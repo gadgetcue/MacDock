@@ -27,4 +27,11 @@ An optional macosicons.com API key can go in `dock.txt` as `@macosicons-key = YO
 ## Credits
 Fonts: Inter (SIL Open Font License). Icons in `icons/` and `dark-icons/` belong to their respective authors.
 
-Screenshots: coming soon.
+## Screenshots
+![Desktop with dock and menu bar](docs/desktop.png)
+
+![Dock](docs/dock.png)
+
+![Dock magnification](docs/dock-magnify.png)
+
+![Control Center](docs/control-center.png)
