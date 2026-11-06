@@ -1,0 +1,17 @@
+folder:GAMES
+folder:Windows Apps
+folder:AI Apps extensions
+folder:GitHub
+folder:Blackmagic
+folder:Lenovo Apps
+folder:Misc
+shell:AppsFolder\{6D809377-6AF0-444B-8957-A3773F02200E}\Blackmagic Design\DaVinci Resolve\Resolve.exe
+shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude
+shell:AppsFolder\Brave
+shell:AppsFolder\{6D809377-6AF0-444B-8957-A3773F02200E}\Audacity\Audacity.exe
+shell:AppsFolder\Microsoft.WindowsStore_8wekyb3d8bbwe!App
+shell:AppsFolder\TelegramMessengerLLP.TelegramDesktop_t4vj0pshhgkwm!Telegram.TelegramDesktop.Store
+shell:AppsFolder\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App
+shell:AppsFolder\{6D809377-6AF0-444B-8957-A3773F02200E}\Proton\VPN\ProtonVPN.Launcher.exe
+shell:AppsFolder\C:\Users\sidta\AppData\Local\Programs\Concat\concat.exe
+shell:AppsFolder\RamenSoftware.Windhawk

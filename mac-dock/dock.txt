@@ -1,0 +1,19 @@
+﻿# MacDock pins. One item per line. Lines starting with # are ignored.
+# Items: apps (.exe/.lnk), folders, files, websites (https://...), ms-settings:, shell: links, [start]
+# Use "Label | target" to give an item a custom name. A line with --- starts the right-hand section.
+# @hide-taskbar on   hides the Windows taskbar while the dock runs (use off to keep it).
+@hide-taskbar on
+@windowtheme off
+
+[start]
+[apps]
+%windir%\explorer.exe
+%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe
+%windir%\system32\notepad.exe
+%windir%\system32\calc.exe
+C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe
+C:\Program Files\WindowsApps\Claude_4.4212.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe
+---
+Downloads | %USERPROFILE%\Downloads
+Documents | %USERPROFILE%\Documents
+Settings | ms-settings:

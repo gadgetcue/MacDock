@@ -1,0 +1,2207 @@
+// MacDock - a lightweight macOS-style dock for Windows.
+//
+// dock.txt (in %APPDATA%\MacDock) controls what is pinned:
+//   - apps (.exe / .lnk), folders, files, websites (https://...), shell:/ms-settings: links, and [start]
+//   - "Label | target" gives an item a custom name
+//   - a line with --- starts the right-hand section (folders and other things, like the Downloads stack)
+//   - "@hide-taskbar off" keeps the Windows taskbar visible
+// You can also drag files/folders onto the dock or use the right-click menu to add things.
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Forms;
+
+namespace MacDock
+{
+    static class Program
+    {
+        internal static bool QuitRequested; // set only by the deliberate "Quit MacDock" menu item
+
+        [DllImport("kernel32.dll")]
+        static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
+
+        static void Relaunch()
+        {
+            // Parent the new process to explorer.exe so it is outside the caller's process tree / job object.
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + Application.ExecutablePath + "\"") { UseShellExecute = false }); }
+            catch (Exception ex) { Log(ex); }
+        }
+
+        [STAThread]
+        static void Main(string[] args)
+        {
+            // Safety net: "MacDock.exe /restore" brings the Windows taskbar back if the dock was killed while it was hidden.
+            if (args.Any(a => a.Equals("/restore", StringComparison.OrdinalIgnoreCase)))
+            {
+                TaskbarControl.ForceRestore();
+                return;
+            }
+
+            int test = Array.FindIndex(args, a => a.Equals("/wt-selftest", StringComparison.OrdinalIgnoreCase));
+            if (test >= 0 && test + 1 < args.Length) { Environment.ExitCode = WindowThemeTest.Run(args[test + 1]); return; }
+
+            // "MacDock.exe --quit" asks the running instance to exit for good (used for rebuilds).
+            if (args.Any(a => a.Equals("--quit", StringComparison.OrdinalIgnoreCase) || a.Equals("/quit", StringComparison.OrdinalIgnoreCase)))
+            {
+                try { System.Threading.EventWaitHandle.OpenExisting("MacDockQuitEvent").Set(); } catch { }
+                return;
+            }
+
+            bool created;
+            using (new System.Threading.Mutex(true, "MacDockSingleInstance", out created))
+            {
+                if (!created) return;
+                NativeMethods.SetProcessDPIAware();
+                Application.EnableVisualStyles();
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += (s, e) => Log(e.Exception);
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => TaskbarControl.Restore();
+                Theme.Refresh();
+                SetUi.EnsureAutostart(); // rewritten every launch unless the user turned it off in Settings
+                Typography.Configure(AppPaths.Config);
+
+                var dock = new DockForm();
+                var quitEvt = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, "MacDockQuitEvent");
+                new System.Threading.Thread(() =>
+                {
+                    quitEvt.WaitOne();
+                    QuitRequested = true;
+                    try { dock.BeginInvoke((Action)(() => Application.Exit())); } catch { }
+                }) { IsBackground = true }.Start();
+                var bar = new TopBar();
+                var island = new IslandForm();
+                var spotlight = new Spotlight();
+
+                bar.BellClicked += island.TogglePanel;
+                bar.SearchClicked += spotlight.Toggle;
+                HotkeyHook.Install(spotlight.Toggle, null);
+
+                // Four- or five-finger swipes on a precision touchpad ("@gestures off" in dock.txt disables this).
+                TouchpadGestures touchpad = null;
+                try
+                {
+                    string config = AppPaths.Config;
+                    bool gesturesOff = File.Exists(config) && File.ReadAllLines(config).Any(l => l.Trim().ToLowerInvariant().Replace(" ", "").StartsWith("@gestures") && l.ToLowerInvariant().Contains("off"));
+                    if (!gesturesOff)
+                    {
+                        touchpad = new TouchpadGestures();
+                        touchpad.SwipeDown += MissionControl.Dismiss;
+                    }
+                }
+                catch (Exception ex) { Log(ex); }
+
+                // Windows can drop topmost state and move windows around across sleep, unlock and display changes.
+                Action reassert = () =>
+                {
+                    try
+                    {
+                        if (!dock.IsHandleCreated || dock.IsDisposed) return;
+                        dock.BeginInvoke((Action)(() =>
+                        {
+                            try { dock.Reassert(); bar.Reposition(); island.Reposition(); DockForm.KeepOnTop(bar); DockForm.KeepOnTop(island); } catch (Exception ex) { Log(ex); }
+                        }));
+                    }
+                    catch (Exception ex) { Log(ex); }
+                };
+                Microsoft.Win32.PowerModeChangedEventHandler onPower = (s, e) => { if (e.Mode == Microsoft.Win32.PowerModes.Resume) reassert(); };
+                Microsoft.Win32.SessionSwitchEventHandler onSession = (s, e) =>
+                {
+                    if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock || e.Reason == Microsoft.Win32.SessionSwitchReason.SessionLogon || e.Reason == Microsoft.Win32.SessionSwitchReason.ConsoleConnect || e.Reason == Microsoft.Win32.SessionSwitchReason.RemoteConnect) reassert();
+                };
+                EventHandler onDisplay = (s, e) => reassert();
+                Microsoft.Win32.SystemEvents.PowerModeChanged += onPower;
+                Microsoft.Win32.SystemEvents.SessionSwitch += onSession;
+                Microsoft.Win32.SystemEvents.DisplaySettingsChanged += onDisplay;
+
+                try
+                {
+                    bar.Show();
+                    island.Show();
+                    Feed.Start();
+                    var watchdog = new Timer { Interval = 2000 };
+                    watchdog.Tick += (s, e) =>
+                    {
+                        try
+                        {
+                            if (dock.IsDisposed) return;
+                            if (!Fullscreen.Active && !dock.Visible) { dock.Show(); dock.Reassert(); }
+                            else DockForm.KeepOnTop(dock);
+                            if (!bar.Visible) bar.Show();
+                            if (!island.Visible) island.Show();
+                            DockForm.KeepOnTop(bar); DockForm.KeepOnTop(island);
+                        }
+                        catch (Exception ex) { Log(ex); }
+                    };
+                    watchdog.Start();
+                    // Memory diet: every 45 s compact the heap and hand unused pages back to Windows (they fault back in on demand).
+                    var trim = new Timer { Interval = 45000 };
+                    trim.Tick += (s, e) =>
+                    {
+                        try
+                        {
+                            GC.Collect(2, GCCollectionMode.Forced, true);
+                            SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
+                        }
+                        catch { }
+                    };
+                    trim.Start();
+                    AppDomain.CurrentDomain.UnhandledException += (s, e) => { if (!QuitRequested) Relaunch(); };
+                    Application.Run(dock);
+                }
+                catch (Exception ex) { Log(ex); }
+                finally
+                {
+                    Microsoft.Win32.SystemEvents.PowerModeChanged -= onPower;
+                    Microsoft.Win32.SystemEvents.SessionSwitch -= onSession;
+                    Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= onDisplay;
+                    if (touchpad != null) touchpad.Dispose();
+                    HotkeyHook.Uninstall();
+                    bar.Dispose();
+                    island.Dispose();
+                    spotlight.Dispose();
+                    TaskbarControl.Restore();
+                    if (!QuitRequested) Relaunch(); // closed or crashed without a deliberate Quit
+                }
+            }
+        }
+
+        // Errors go to %LOCALAPPDATA%\MacDock\dock.log instead of a modal dialog.
+        internal static void Log(string message)
+        {
+            Log(new Exception(message));
+        }
+
+        internal static void Log(Exception ex)
+        {
+            try
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MacDock");
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "dock.log"), DateTime.Now + " " + ex + Environment.NewLine);
+            }
+            catch { }
+        }
+    }
+
+    // Hides the Windows taskbar while the dock runs: turns on auto-hide (so the work area is released)
+    // and hides the taskbar windows so hovering the screen edge can't bring it back. Restore() undoes both.
+    static class TaskbarControl
+    {
+        const uint ABM_GETSTATE = 4, ABM_SETSTATE = 10;
+        const uint ABS_AUTOHIDE = 1, ABS_ALWAYSONTOP = 2;
+        const int SW_HIDE = 0, SW_SHOWNA = 8;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int L, T, R, B; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct APPBARDATA
+        {
+            public int cbSize;
+            public IntPtr hWnd;
+            public uint uCallbackMessage;
+            public uint uEdge;
+            public RECT rc;
+            public IntPtr lParam;
+        }
+
+        [DllImport("shell32.dll")] static extern UIntPtr SHAppBarMessage(uint msg, ref APPBARDATA data);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+
+        static bool hidden;
+        static uint previousState = ABS_ALWAYSONTOP;
+
+        public static bool IsHidden { get { return hidden; } }
+
+        public static void Hide()
+        {
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            if (tray == IntPtr.Zero) return;
+
+            if (!hidden)
+            {
+                APPBARDATA get = NewData(tray);
+                previousState = (uint)(ulong)SHAppBarMessage(ABM_GETSTATE, ref get);
+                APPBARDATA set = NewData(tray);
+                set.lParam = (IntPtr)(previousState | ABS_AUTOHIDE);
+                SHAppBarMessage(ABM_SETSTATE, ref set);
+                hidden = true;
+            }
+            HideWindows();
+        }
+
+        // Explorer can bring the taskbar back (e.g. after a restart), so this is called on every refresh.
+        public static void EnsureHidden()
+        {
+            if (hidden) HideWindows();
+        }
+
+        public static void Restore()
+        {
+            if (!hidden) return;
+            hidden = false;
+
+            foreach (IntPtr h in TrayWindows()) NativeMethods.ShowWindow(h, SW_SHOWNA);
+
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            if (tray != IntPtr.Zero)
+            {
+                APPBARDATA set = NewData(tray);
+                set.lParam = (IntPtr)(previousState & ~ABS_AUTOHIDE);
+                SHAppBarMessage(ABM_SETSTATE, ref set);
+            }
+        }
+
+        public static void ForceRestore()
+        {
+            previousState = ABS_ALWAYSONTOP;
+            hidden = true;
+            Restore();
+        }
+
+        static APPBARDATA NewData(IntPtr hwnd)
+        {
+            var d = new APPBARDATA();
+            d.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
+            d.hWnd = hwnd;
+            return d;
+        }
+
+        static void HideWindows()
+        {
+            foreach (IntPtr h in TrayWindows())
+                if (NativeMethods.IsWindowVisible(h)) NativeMethods.ShowWindow(h, SW_HIDE);
+        }
+
+        static List<IntPtr> TrayWindows()
+        {
+            var list = new List<IntPtr>();
+            IntPtr main = FindWindow("Shell_TrayWnd", null);
+            if (main != IntPtr.Zero) list.Add(main);
+            IntPtr h = IntPtr.Zero;
+            while ((h = FindWindowEx(IntPtr.Zero, h, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero) list.Add(h);
+            return list;
+        }
+    }
+
+    static class NativeMethods
+    {
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int X; public int Y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SIZE { public int cx; public int cy; }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct SHFILEINFO
+        {
+            public IntPtr hIcon;
+            public int iIcon;
+            public uint dwAttributes;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
+        }
+
+        // Only GetIcon is used. The void members fill the vtable slots before it.
+        [ComImport, Guid("46EB5926-582E-4017-9FDF-E8998DAA0950"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        public interface IImageList
+        {
+            void Add();
+            void ReplaceIcon();
+            void SetOverlayImage();
+            void Replace();
+            void AddMasked();
+            void Draw();
+            void Remove();
+            [PreserveSig] int GetIcon(int i, int flags, ref IntPtr picon);
+        }
+
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+        [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int index);
+        [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+        [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+        [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+        [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+        [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+        [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
+        [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SHGetFileInfo(string path, uint attrs, ref SHFILEINFO info, uint size, uint flags);
+        [DllImport("shell32.dll")] public static extern int SHGetImageList(int listType, ref Guid iid, out IImageList list);
+    }
+
+    enum Kind { App, Folder, File, Url, Start, Mission, Launchpad, Trash }
+
+    // One line of dock.txt.
+    sealed class Entry
+    {
+        public int Section;     // 0 = apps, 2 = right-hand section (after ---)
+        public string Label;    // optional custom name
+        public string Target;
+        public string Raw;      // the original line, used to remove it again
+    }
+
+    sealed class Item
+    {
+        public Kind Kind;
+        public string Target;
+        public string Label;
+        public string Aumid;    // AppUserModelID of the app's window, when running (Store apps, web apps...)
+        public Entry Entry;     // null for running apps that are not pinned
+        public int Section;     // 0 pinned apps, 1 running-only apps, 2 right-hand section
+        public bool SepBefore;
+        public Bitmap Icon;
+        // Icon pre-scaled to whole pixel sizes, so a frame blits 1:1 instead of re-filtering the 96px source.
+        public readonly Dictionary<int, Bitmap> Scaled = new Dictionary<int, Bitmap>();
+        public Bitmap ScaledFrom;
+        public List<IntPtr> Handles = new List<IntPtr>();
+        public Spring ScaleSpring = new Spring(1);
+        public double Goal = 1;
+        public double BounceHeight, BounceVelocity;      // launch bounce: a ball bouncing on the dock
+        public DateTime LaunchStart = DateTime.MinValue; // set while an app is launching
+        public DateTime RestUntil = DateTime.MinValue;   // short pause between rounds of bounces
+        public Spring Shift = new Spring(0);             // horizontal glide when icons trade places
+        public RectangleF Rect;
+
+        public double Scale { get { return ScaleSpring.Value; } }
+        public bool Bouncing { get { return BounceHeight > 0.01 || BounceVelocity > 0.01; } }
+
+        public string Key { get { return Kind + "|" + Target; } }
+    }
+
+    sealed class DockForm : Form
+    {
+        const int BaseSize = 48;        // icon size at rest (px)
+        const double MaxScale = 1.75;   // magnification under the cursor
+        const int Gap = 8;              // space between icons
+        const int GroupGap = 14;        // extra space between sections
+        const int PadX = 12, PadY = 8;  // inner padding of the dock pill
+        const int BottomMargin = 8;     // space between dock and the bottom of the screen
+        const int FormHeight = 150;     // room above the pill for magnified icons and labels
+        const int IconSource = 96;      // stored icon resolution, enough for max zoom
+
+        // Motion. Magnification is a nearly critically damped spring: quick, no wobble. The launch bounce is
+        // a ball under gravity that keeps ~55% of its speed on each landing (about three bounces per round).
+        const double MagnifyOmega = 26, MagnifyZeta = 0.9;
+        const double Gravity = 2600, Restitution = 0.55, MinBounceSpeed = 50;
+        const double BounceLaunchSpeed = 322;   // = sqrt(2 * Gravity * 20 px)
+        const double LaunchTimeout = 8;         // seconds to keep bouncing if the app never shows a window
+        const int PillRadius = 22;      // rounded-rectangle corners, like the macOS dock
+        const int CanvasSlack = 260;    // extra width so magnified icons never clip
+
+        const int GWL_EXSTYLE = -20;
+        const int WS_EX_TOOLWINDOW = 0x80;
+        const int WS_EX_APPWINDOW = 0x40000;
+        const int WS_EX_NOACTIVATE = 0x08000000;
+        const int WS_EX_LAYERED = 0x80000;
+        const int DWMWA_CLOAKED = 14;
+        const int SW_RESTORE = 9, SW_MINIMIZE = 6;
+        [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+        const uint SHGFI_SYSICONINDEX = 0x4000;
+        const uint SHGFI_USEFILEATTRIBUTES = 0x10;
+        const int SHIL_JUMBO = 4;
+        const int ILD_TRANSPARENT = 1;
+        const byte VK_MENU = 0x12;
+        const byte VK_LWIN = 0x5B;
+        const uint KEYEVENTF_KEYUP = 0x2;
+
+        static readonly Color LabelFill = Color.FromArgb(190, 28, 28, 32);
+
+        static readonly string[] DefaultConfig =
+        {
+            "# MacDock pins. One item per line. Lines starting with # are ignored.",
+            "# Items: apps (.exe/.lnk), folders, files, websites (https://...), ms-settings:, shell: links, [start]",
+            "# Use \"Label | target\" to give an item a custom name. A line with --- starts the right-hand section.",
+            "# @hide-taskbar on   hides the Windows taskbar while the dock runs (use off to keep it).",
+            "@hide-taskbar on",
+            "# @font = Inter   sets the typeface (default: Inter, then Segoe UI Variable). SF Pro isn't licensed for Windows.",
+            "",
+            "[start]",
+            "%windir%\\explorer.exe",
+            "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe",
+            "%windir%\\system32\\notepad.exe",
+            "%windir%\\system32\\calc.exe",
+            "---",
+            "Downloads | %USERPROFILE%\\Downloads",
+            "Documents | %USERPROFILE%\\Documents",
+            "Settings | ms-settings:"
+        };
+
+        readonly Timer animTimer = new Timer();
+        readonly Timer refreshTimer = new Timer();
+        MenuPopup popup; // the open right-click menu, if any
+        readonly Font labelFont = Typography.Text(9.5f, Weight.Medium);
+        readonly Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
+        readonly string configPath = AppPaths.Config;
+        readonly int pillHeight = BaseSize + 2 * PadY;
+
+        List<Entry> entries = new List<Entry>();
+        bool hideTaskbar = true;
+        DateTime configStamp = DateTime.MinValue;
+        List<Item> items = new List<Item>();
+        RectangleF pillRect;
+        int hoverIndex = -1;
+        Surface surface;
+        readonly FrameClock clock = new FrameClock();
+        VsyncDriver vsync;
+        bool wasBusy;
+
+        // Long press to rearrange: hold still on a pinned icon to pick it up, drag it sideways, release to drop it.
+        const int HoldMs = 380, HoldTolerance = 6;
+        const double DragScale = 1.15, ShiftOmega = 30, ShiftZeta = 0.85;
+        Item pressItem, dragItem;
+        Point pressPoint;
+        DateTime pressTime;
+        double dragX;
+
+        // Slides down out of sight while a fullscreen app is in front (0 = shown, 1 = hidden).
+        Spring hideSpring = new Spring(0);
+        int fullscreenTick;
+        const double HideOmega = 22, HideZeta = 1.0;
+        const float HideDistance = PillHeightConst + BottomMargin + 14;
+        const int PillHeightConst = BaseSize + 2 * PadY;
+
+        public static DockForm Instance { get; private set; }
+
+        // "Show Dock" and "Auto-hide dock" are kept in dock.txt (@show-dock, @auto-hide-dock).
+        internal static bool ShowDockOn = true, AutoHideOn;
+        bool dockReserved;
+        int dockReservedHeight;
+
+        static void ReadDockSwitches()
+        {
+            ShowDockOn = true;  // never hidden: always shown, auto-hide disabled
+            AutoHideOn = false;
+        }
+
+        // The centre of the dock icon that belongs to this window's app (screen coordinates), for the genie effect.
+        internal bool TryIconCenter(IntPtr hwnd, out Point center)
+        {
+            center = Point.Empty;
+            if (!ShowDockOn || !Visible) return false;
+            uint pid;
+            NativeMethods.GetWindowThreadProcessId(hwnd, out pid);
+            string exe = ProcessPath(pid);
+            foreach (Item it in items)
+            {
+                if (it.Handles.Contains(hwnd) || (exe != null && string.Equals(it.Target, exe, StringComparison.OrdinalIgnoreCase)))
+                {
+                    RectangleF r = it.Rect;
+                    center = new Point(Left + (int)(r.Left + r.Width / 2), Top + (int)(r.Top + r.Height / 2));
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // A switch changed (Settings, the top bar menu or an edit of dock.txt): apply it now.
+        internal void ApplyDockMode()
+        {
+            ReadDockSwitches();
+            animTimer.Interval = 50;
+            if (!animTimer.Enabled) animTimer.Start();
+            UpdateReservation();
+        }
+
+        // With the dock shown and not auto-hiding, its strip is reserved as a bottom appbar so maximized windows stop at
+        // its top edge (the top bar does the same at the top). Otherwise the reservation is dropped.
+        void UpdateReservation()
+        {
+            if (ShowDockOn && !AutoHideOn && IsHandleCreated) ReserveBottom();
+            else ReleaseBottom();
+        }
+
+        void ReserveBottom()
+        {
+            try
+            {
+                Rectangle screen = Screen.PrimaryScreen.Bounds;
+                int h = PillHeightConst + BottomMargin + 2;
+                var data = new Win32.APPBARDATA();
+                data.cbSize = Marshal.SizeOf(typeof(Win32.APPBARDATA));
+                data.hWnd = Handle;
+                if (!dockReserved)
+                {
+                    data.uCallbackMessage = Win32.RegisterWindowMessage("MacDockDockBar");
+                    Win32.SHAppBarMessage(0, ref data); // ABM_NEW
+                }
+                data.uEdge = 3; // bottom
+                data.rc = new Win32.RECT { Left = screen.Left, Top = screen.Bottom - h, Right = screen.Right, Bottom = screen.Bottom };
+                Win32.SHAppBarMessage(2, ref data); // ABM_QUERYPOS
+                data.rc.Top = data.rc.Bottom - h;
+                Win32.SHAppBarMessage(3, ref data); // ABM_SETPOS
+                dockReserved = true;
+                dockReservedHeight = h;
+            }
+            catch { }
+        }
+
+        void ReleaseBottom()
+        {
+            if (!dockReserved) return;
+            dockReserved = false;
+            var data = new Win32.APPBARDATA();
+            data.cbSize = Marshal.SizeOf(typeof(Win32.APPBARDATA));
+            data.hWnd = Handle;
+            Win32.SHAppBarMessage(1, ref data); // ABM_REMOVE
+        }
+
+        public DockForm()
+        {
+            Instance = this;
+            ReadDockSwitches();
+            Genie.Install(); // the minimize / restore effect watches for windows being minimized and restored
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            AllowDrop = true;
+            StartPosition = FormStartPosition.Manual;
+
+            // Polls the cursor; idles at 50 ms and speeds up to ~60 fps only while animating.
+            animTimer.Interval = 50;
+            animTimer.Tick += (s, e) => Step();
+            vsync = new VsyncDriver(this, Step);
+
+            refreshTimer.Interval = 2000;
+            refreshTimer.Tick += (s, e) => RebuildItems();
+
+            LoadConfig();
+            ApplyTaskbarSetting();
+            RebuildItems();
+            animTimer.Start();
+            refreshTimer.Start();
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                // Layered = per-pixel alpha (real glass); tool window = hidden from Alt+Tab; no-activate = never steals focus.
+                cp.ExStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            UpdateReservation();
+            Redraw();
+            BeginInvoke(new Action(Genie.Warm)); // build the genie overlay now, so the first minimize isn't slow
+            // WindowTheme (traffic-light overlay) disabled: it blocked moving/maximizing windows.
+        }
+
+        // ---------- drawing ----------
+
+        // Draws the dock into an ARGB bitmap and hands it to Windows as a layered window.
+        // Fully transparent pixels let clicks fall through to whatever is underneath.
+        void Redraw()
+        {
+            if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
+            if (surface == null || surface.Width != Width || surface.Height != Height)
+            {
+                if (surface != null) surface.Dispose();
+                surface = new Surface(Width, Height);
+            }
+
+            using (Graphics g = surface.Begin())
+            {
+                DrawDock(g);
+            }
+            surface.Present(Handle, Left, Top);
+
+            // The blur follows the pill (including its slide out of sight) just below this window.
+            float lift = (float)(hideSpring.Value * HideDistance);
+            // (blur companion window removed: the glass pill is drawn alone)
+        }
+
+        void DrawDock(Graphics g)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            // Icons are stored at 96px and drawn at 48-84px every animation frame. High-quality bilinear
+            // pre-filters when shrinking and costs about half of bicubic, which keeps hover animation light.
+            g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            Typography.Prepare(g);
+            g.TranslateTransform(0, (float)(hideSpring.Value * HideDistance));
+
+            // Glass pill, same material as the bar and panels: a faint cool tint, a soft sheen that fades
+            // downward, and a thin rim that is brightest along the top edge (the specular highlight).
+            using (GraphicsPath pill = RoundedRect(pillRect, PillRadius))
+            using (var baseFill = new SolidBrush(Color.FromArgb(70, 40, 48, 62))) // translucent tint; nothing sits underneath
+            using (var sheen = new LinearGradientBrush(pillRect, Color.FromArgb(38, 255, 255, 255), Color.FromArgb(8, 255, 255, 255), LinearGradientMode.Vertical))
+            using (var rimBrush = new LinearGradientBrush(pillRect, Color.FromArgb(96, 255, 255, 255), Color.FromArgb(28, 255, 255, 255), LinearGradientMode.Vertical))
+            using (var rim = new Pen(rimBrush, 1f))
+            {
+                g.FillPath(baseFill, pill);
+                g.FillPath(sheen, pill);
+                g.DrawPath(rim, pill);
+            }
+
+            using (var dot = new SolidBrush(Color.FromArgb(220, 255, 255, 255)))
+            using (var sepPen = new Pen(Color.FromArgb(90, 255, 255, 255)))
+            {
+                for (int i = 0; i < items.Count; i++)
+                {
+                    Item it = items[i];
+
+                    if (it.SepBefore && i > 0)
+                    {
+                        float x = it.Rect.Left - (Gap + GroupGap) / 2f;
+                        g.DrawLine(sepPen, x, pillRect.Top + 14, x, pillRect.Bottom - 14);
+                    }
+
+                    if (it == dragItem) continue; // drawn last, lifted above the others
+                    DrawIcon(g, it, it.Rect);
+                    if (it.Handles.Count > 0) // running indicator, like the macOS dot
+                        g.FillEllipse(dot, it.Rect.Left + it.Rect.Width / 2 - 2, pillRect.Bottom - 6, 4, 4);
+                }
+
+                if (dragItem != null)
+                {
+                    RectangleF r = dragItem.Rect;
+                    using (var shadow = new SolidBrush(Color.FromArgb(60, 0, 0, 0)))
+                        g.FillEllipse(shadow, r.Left + 6, pillRect.Bottom - PadY - 2, r.Width - 12, 8);
+                    DrawIcon(g, dragItem, r);
+                }
+            }
+
+            if (hoverIndex >= 0 && hoverIndex < items.Count)
+            {
+                Item it = items[hoverIndex];
+                SizeF size = g.MeasureString(it.Label, labelFont, 400, StringFormat.GenericTypographic);
+                float cx = it.Rect.Left + it.Rect.Width / 2f;
+                float w = size.Width + 20, h = 24;
+                float x = Math.Max(4, Math.Min(Width - w - 4, cx - w / 2));
+                float y = it.Rect.Top - h - 12;
+                using (GraphicsPath lp = RoundedRect(new RectangleF(x, y, w, h), 8))
+                using (var b = new SolidBrush(LabelFill))
+                {
+                    g.FillPath(b, lp);
+                    // Small arrow pointing at the icon, like the macOS dock tooltip.
+                    g.FillPolygon(b, new[] { new PointF(cx - 6, y + h - 0.5f), new PointF(cx + 6, y + h - 0.5f), new PointF(cx, y + h + 6) });
+                }
+                using (var tb = new SolidBrush(Color.White))
+                    g.DrawString(it.Label, labelFont, tb, new RectangleF(x, y, w, h), Typography.Format(StringAlignment.Center));
+            }
+        }
+
+        void DrawIcon(Graphics g, Item it, RectangleF r)
+        {
+            int sz = (int)Math.Round(Math.Min(r.Width, r.Height));
+            if (it.Icon == null || sz < 4 || sz > 200) { if (it.Icon != null) g.DrawImage(it.Icon, r); return; }
+            if (it.ScaledFrom != it.Icon) { it.Scaled.Clear(); it.ScaledFrom = it.Icon; }
+            Bitmap b;
+            if (!it.Scaled.TryGetValue(sz, out b))
+            {
+                if (it.Scaled.Count > 64) it.Scaled.Clear();
+                b = new Bitmap(sz, sz, PixelFormat.Format32bppPArgb);
+                using (Graphics bg = Graphics.FromImage(b))
+                {
+                    bg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    bg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    bg.DrawImage(it.Icon, new Rectangle(0, 0, sz, sz));
+                }
+                it.Scaled[sz] = b;
+            }
+            g.DrawImage(b, new Rectangle((int)Math.Round(r.Left + (r.Width - sz) / 2f), (int)Math.Round(r.Top + (r.Height - sz) / 2f), sz, sz));
+        }
+
+        static GraphicsPath RoundedRect(RectangleF r, float radius)
+        {
+            var path = new GraphicsPath();
+            float d = radius * 2;
+            path.AddArc(r.Left, r.Top, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        // ---------- animation and layout ----------
+
+        // Auto-hide: the dock slides away while a normal app window is in front, and comes back when the cursor
+        // rests on the bottom edge of the screen (about 150 ms) or while it stays over the dock. The cursor is
+        // polled here, so the reveal works even while the dock window is hidden.
+        bool revealed;
+        DateTime edgeSince = DateTime.MaxValue;
+
+        bool AutoHideAway()
+        {
+            if (!Fullscreen.AppInFront) { revealed = false; edgeSince = DateTime.MaxValue; return false; }
+
+            NativeMethods.POINT p;
+            NativeMethods.GetCursorPos(out p);
+            Rectangle screen = Screen.FromPoint(new Point(p.X, p.Y)).Bounds;
+            Rectangle dockScreen = Screen.FromHandle(Handle).Bounds;
+            bool onDockScreen = screen == dockScreen;
+
+            bool atEdge = onDockScreen && p.Y >= dockScreen.Bottom - 3;            if (atEdge)
+            {
+                if (edgeSince == DateTime.MaxValue) edgeSince = DateTime.Now;
+                else if ((DateTime.Now - edgeSince).TotalMilliseconds >= 150) revealed = true;
+            }
+            else edgeSince = DateTime.MaxValue;
+
+            if (revealed)
+            {
+                // Stay while the cursor is over the pill (or the dock is being used), release when it leaves.
+                bool over = onDockScreen && p.X >= Left && p.X < Left + Width && p.Y >= Top + pillRect.Top - 8;
+                if (!over && !atEdge && dragItem == null && pressItem == null && popup == null) revealed = false;
+            }
+            return !revealed;
+        }
+
+        // Runs each tick: reads the cursor, eases each icon toward its target size, and redraws only when something moved.
+        void Step()
+        {
+            if (hideTaskbar) TaskbarControl.EnsureHidden(); // Explorer can re-show it at any time
+
+            // Dock switched off and already out of sight: nothing to poll, draw or react to until it is switched on again.
+            if (!ShowDockOn && !Visible)
+            {
+                if (vsync.Active) vsync.Sleep();
+                animTimer.Interval = 250;
+                return;
+            }
+
+            if (++fullscreenTick % 5 == 0) Fullscreen.Update(); // ~4 times a second is plenty
+            bool autoAway = !ShowDockOn || (AutoHideOn && AutoHideAway()); // auto-hide polls the cursor; off, it costs nothing
+            bool away = Fullscreen.Active || autoAway;
+
+            if (!Visible)
+            {
+                if (vsync.Active) { vsync.Sleep(); animTimer.Interval = 50; if (!animTimer.Enabled) animTimer.Start(); }
+                if (!away)
+                {
+                    Show();       // fullscreen ended: reappear, sliding up from below
+                    UpdateReservation(); // a hidden window can't hold the reserved strip, so take it again now
+                    wasBusy = false;
+                    Redraw();
+                }
+                return;
+            }
+
+            NativeMethods.POINT p;
+            NativeMethods.GetCursorPos(out p);
+            Point local = PointToClient(new Point(p.X, p.Y));
+
+            // Long press: holding still on a pinned icon picks it up; moving before the hold finishes cancels it.
+            if (pressItem != null)
+            {
+                if ((Control.MouseButtons & MouseButtons.Left) == 0) pressItem = null;
+                else if (dragItem == null)
+                {
+                    bool still = Math.Abs(local.X - pressPoint.X) + Math.Abs(local.Y - pressPoint.Y) <= HoldTolerance;
+                    if (!still) pressItem = null;
+                    else if ((DateTime.Now - pressTime).TotalMilliseconds >= HoldMs) BeginDrag(pressItem);
+                }
+            }
+            if (dragItem != null)
+            {
+                dragX = local.X;
+                ContinueDrag();
+            }
+
+            int n = items.Count;
+            double[] ones = new double[n];
+            for (int i = 0; i < n; i++) ones[i] = 1;
+            float baseTotal;
+            float[] baseX = Row(ones, out baseTotal);
+            float baseLeft = (Width - (baseTotal + 2 * PadX)) / 2f + PadX;
+
+            bool nearDock = !away && hideSpring.Value < 0.05 && ClientRectangle.Contains(local) && local.Y >= pillRect.Top - (MaxScale - 1) * BaseSize - 4;
+            int hover = -1;
+            for (int i = 0; i < n; i++)
+            {
+                double center = baseLeft + baseX[i] + BaseSize / 2.0;
+                double dist = Math.Abs(local.X - center);
+                double t = dist / (BaseSize * 2.2);
+                if (dragItem != null) items[i].Goal = items[i] == dragItem ? DragScale : 1; // no magnifying while rearranging
+                else items[i].Goal = nearDock && t < 1 ? 1 + (MaxScale - 1) * Math.Pow(Math.Cos(t * Math.PI / 2), 2) : 1;
+                if (dragItem == null && nearDock && dist < BaseSize / 2.0) hover = i;
+            }
+
+            double dt;
+            if (wasBusy) dt = vsync.Frame(clock.Next());
+            else { clock.Reset(); dt = vsync.Dt; } // first frame after idling
+
+            bool busy = false;
+            foreach (Item it in items)
+            {
+                if (!it.ScaleSpring.IsSettled(it.Goal))
+                {
+                    it.ScaleSpring.Step(it.Goal, MagnifyOmega, MagnifyZeta, dt);
+                    busy = true;
+                }
+                else it.ScaleSpring.Snap(it.Goal);
+
+                if (Math.Abs(it.Shift.Value) > 0.3 || Math.Abs(it.Shift.Velocity) > 0.3)
+                {
+                    it.Shift.Step(0, ShiftOmega, ShiftZeta, dt); // icons glide into the gap left by a rearranged neighbour
+                    busy = true;
+                }
+                else it.Shift.Snap(0);
+
+                if (StepBounce(it, dt)) busy = true;
+            }
+            if (dragItem != null) busy = true; // follow the cursor every frame
+
+            double hideTarget = away ? 1 : 0;
+            if (!hideSpring.IsSettled(hideTarget, 0.003))
+            {
+                hideSpring.Step(hideTarget, HideOmega, HideZeta, dt);
+                busy = true;
+            }
+            else hideSpring.Snap(hideTarget);
+            wasBusy = busy;
+
+            bool hoverChanged = hover != hoverIndex;
+            hoverIndex = hover;
+            LayoutItems();
+
+            if (busy || hoverChanged) Redraw();
+            if (away && hideSpring.Value >= 0.999)
+            {
+                Hide(); // fully out of sight: stop drawing and stop catching clicks
+            }
+            if (busy)
+            {
+                if (!vsync.Active) { animTimer.Stop(); vsync.Wake(); } // motion: one step per display refresh, no timer
+            }
+            else
+            {
+                if (vsync.Active) vsync.Sleep();
+                animTimer.Interval = 50;
+                if (!animTimer.Enabled) animTimer.Start();
+            }
+        }
+
+        // Bouncing ball. While an app is launching, rounds of bounces repeat until its window appears.
+        bool StepBounce(Item it, double dt)
+        {
+            if (it.LaunchStart != DateTime.MinValue)
+            {
+                bool finished = it.Handles.Count > 0 || (DateTime.Now - it.LaunchStart).TotalSeconds > LaunchTimeout;
+                if (finished) it.LaunchStart = DateTime.MinValue;
+                else if (!it.Bouncing && DateTime.Now >= it.RestUntil) it.BounceVelocity = BounceLaunchSpeed;
+            }
+
+            if (!it.Bouncing)
+            {
+                it.BounceHeight = 0;
+                it.BounceVelocity = 0;
+                return it.LaunchStart != DateTime.MinValue; // keep ticking while waiting for the next round
+            }
+
+            it.BounceVelocity -= Gravity * dt;
+            it.BounceHeight += it.BounceVelocity * dt;
+            if (it.BounceHeight <= 0)
+            {
+                it.BounceHeight = 0;
+                it.BounceVelocity = -it.BounceVelocity * Restitution;
+                if (it.BounceVelocity < MinBounceSpeed)
+                {
+                    it.BounceVelocity = 0;
+                    it.RestUntil = DateTime.Now.AddMilliseconds(180);
+                }
+            }
+            return true;
+        }
+
+        // Lays items out in a row centered in the pill. Scaled icons grow from the bottom and push neighbors aside.
+        float[] Row(double[] scales, out float total)
+        {
+            var xs = new float[scales.Length];
+            float x = 0;
+            for (int i = 0; i < scales.Length; i++)
+            {
+                xs[i] = x;
+                x += (float)(BaseSize * scales[i]);
+                if (i < scales.Length - 1)
+                    x += Gap + (items[i + 1].SepBefore ? GroupGap : 0);
+            }
+            total = x;
+            return xs;
+        }
+
+        void LayoutItems()
+        {
+            int n = items.Count;
+            var scales = new double[n];
+            for (int i = 0; i < n; i++) scales[i] = items[i].Scale;
+
+            float total;
+            float[] xs = Row(scales, out total);
+            float pillWidth = Math.Max(BaseSize, total) + 2 * PadX;
+            float left = (Width - pillWidth) / 2f;
+            pillRect = new RectangleF(left, Height - BottomMargin - pillHeight, pillWidth, pillHeight);
+
+            float baseline = pillRect.Bottom - PadY;
+            for (int i = 0; i < n; i++)
+            {
+                Item it = items[i];
+                float size = (float)(BaseSize * it.Scale);
+                it.Rect = new RectangleF(left + PadX + xs[i] + (float)it.Shift.Value, baseline - size - (float)it.BounceHeight, size, size);
+            }
+
+            // The picked-up icon follows the cursor, lifted a little, and stays inside the pill.
+            if (dragItem != null && items.Contains(dragItem))
+            {
+                float size = (float)(BaseSize * dragItem.Scale);
+                float cx = Math.Max(pillRect.Left + size / 2, Math.Min(pillRect.Right - size / 2, (float)dragX));
+                dragItem.Rect = new RectangleF(cx - size / 2, baseline - size - 12, size, size);
+            }
+        }
+
+        // ---------- rearranging ----------
+
+        void BeginDrag(Item item)
+        {
+            dragItem = item;
+            pressItem = null;
+            hoverIndex = -1;
+            dragX = item.Rect.Left + item.Rect.Width / 2;
+            animTimer.Interval = 16;
+        }
+
+        // Swaps the dragged icon with a neighbour in its own section once the cursor passes that neighbour's centre.
+        void ContinueDrag()
+        {
+            int k = items.IndexOf(dragItem);
+            if (k < 0) return;
+
+            while (k > 0 && items[k - 1].Section == dragItem.Section && dragX < items[k - 1].Rect.Left + items[k - 1].Rect.Width / 2)
+            {
+                MoveItem(k, k - 1);
+                k--;
+            }
+            while (k < items.Count - 1 && items[k + 1].Section == dragItem.Section && dragX > items[k + 1].Rect.Left + items[k + 1].Rect.Width / 2)
+            {
+                MoveItem(k, k + 1);
+                k++;
+            }
+        }
+
+        void MoveItem(int from, int to)
+        {
+            var before = new Dictionary<Item, float>();
+            foreach (Item it in items) before[it] = it.Rect.Left;
+
+            Item moved = items[from];
+            items.RemoveAt(from);
+            items.Insert(to, moved);
+            for (int i = 0; i < items.Count; i++) items[i].SepBefore = i > 0 && items[i - 1].Section != items[i].Section;
+            LayoutItems();
+
+            // Neighbours keep their on-screen position for a moment and then glide into their new slot.
+            foreach (Item it in items)
+                if (it != dragItem) it.Shift.Value += before[it] - it.Rect.Left;
+        }
+
+        void EndDrag()
+        {
+            Item moved = dragItem;
+            dragItem = null;
+            pressItem = null;
+            if (moved == null) return;
+
+            float releasedAt = moved.Rect.Left;
+
+            // Dropping a pinned icon on the Recycle Bin removes it from the dock.
+            Item bin = items.FirstOrDefault(i => i.Kind == Kind.Trash);
+            if (bin != null && moved != bin && moved.Entry != null && moved.Kind != Kind.Trash
+                && dragX >= bin.Rect.Left && dragX <= bin.Rect.Right)
+            {
+                RemovePin(moved.Entry.Raw);
+                LoadConfig();
+                RebuildItems();
+                animTimer.Interval = 16;
+                return;
+            }
+
+            // The icon that now follows it in the same section decides where its line goes in dock.txt.
+            Entry next = null;
+            int k = items.IndexOf(moved);
+            for (int j = k + 1; j >= 0 && j < items.Count && items[j].Section == moved.Section; j++)
+            {
+                if (items[j].Entry != null) { next = items[j].Entry; break; }
+            }
+            if (moved.Entry != null) ReorderPin(moved.Entry, next, moved.Section);
+
+            LoadConfig();
+            RebuildItems();
+
+            // Let the dropped icon settle into its slot instead of snapping there.
+            Item dropped = items.FirstOrDefault(i => i.Key == moved.Key);
+            if (dropped != null)
+            {
+                dropped.Shift.Value = releasedAt - dropped.Rect.Left;
+                LayoutItems();
+                Redraw();
+            }
+            animTimer.Interval = 16;
+        }
+
+        // Moves one pin's line within dock.txt: just before the pin that follows it, or to the end of its section.
+        void ReorderPin(Entry moved, Entry next, int section)
+        {
+            try
+            {
+                List<string> lines = File.ReadAllLines(configPath).ToList();
+                int from = lines.FindIndex(l => l == moved.Raw);
+                if (from < 0) return;
+                lines.RemoveAt(from);
+
+                int to;
+                if (next != null)
+                {
+                    to = lines.FindIndex(l => l == next.Raw);
+                    if (to < 0) to = lines.Count;
+                }
+                else if (section == 0)
+                {
+                    int sep = lines.FindIndex(l => l.Trim() == "---");
+                    to = sep >= 0 ? sep : lines.Count;
+                }
+                else to = lines.Count;
+
+                lines.Insert(to, moved.Raw);
+                File.WriteAllLines(configPath, lines);
+            }
+            catch { }
+        }
+
+        [DllImport("user32.dll")]
+        static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+
+        // Puts a window back above every other window without moving or activating it.
+        internal static void KeepOnTop(Form f)
+        {
+            if (f != null && f.IsHandleCreated)
+                SetWindowPos(f.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010 | 0x0200); // NOMOVE|NOSIZE|NOACTIVATE|NOOWNERZORDER
+        }
+
+        // After sleep, unlock or a display change: re-place the dock, hide the taskbar again and redraw.
+        internal void Reassert()
+        {
+            if (hideTaskbar) TaskbarControl.EnsureHidden();
+            Genie.Abort(); // an effect in flight was laid out for the old display
+            UpdateReservation(); // moves the reserved strip to the display that is main now
+            if (!ShowDockOn) return; // a hidden dock stays hidden through sleep, unlock and display changes
+            FitCanvas();
+            KeepOnTop(this);
+            Redraw();
+        }
+
+        // Sizes the window to the current icon count (plus slack for magnification) and centers it at the screen bottom.
+        void FitCanvas()
+        {
+            var ones = new double[items.Count];
+            for (int i = 0; i < ones.Length; i++) ones[i] = 1;
+            float total;
+            Row(ones, out total);
+
+            Rectangle area = Screen.PrimaryScreen.Bounds;
+            if (!hideTaskbar)
+            {
+                area = Screen.PrimaryScreen.WorkingArea;
+                if (dockReserved) area.Height += dockReservedHeight; // the dock's own reservation must not push it up
+            }
+            int width = Math.Min(area.Width, (int)Math.Ceiling(total + 2 * PadX + CanvasSlack));
+            Rectangle bounds = new Rectangle(area.Left + (area.Width - width) / 2, area.Bottom - FormHeight, width, FormHeight);
+            if (Bounds != bounds) Bounds = bounds;
+        }
+
+        // ---------- items ----------
+
+        void RebuildItems()
+        {
+            if (dragItem != null) return; // the order on screen is mid-change; it is saved when the icon is dropped
+
+            if (File.Exists(configPath) && File.GetLastWriteTime(configPath) != configStamp)
+            {
+                LoadConfig();
+                ApplyTaskbarSetting();
+                ApplyDockMode();
+            }
+            if (hideTaskbar) TaskbarControl.EnsureHidden();
+
+            Dictionary<string, List<IntPtr>> running = EnumerateRunningWindows();
+            var previous = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
+            foreach (Item old in items) previous[old.Key] = old;
+
+            var list = new List<Item>();
+            var pinnedApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (Entry e in entries.Where(x => x.Section == 0))
+                AddEntryItem(list, e, running, pinnedApps);
+
+            // Entries in the right-hand section may also be apps; they count as pinned too.
+            var rightItems = new List<Item>();
+            foreach (Entry e in entries.Where(x => x.Section != 0))
+                AddEntryItem(rightItems, e, running, pinnedApps);
+
+            foreach (string path in running.Keys.OrderBy(k => k))
+            {
+                if (!pinnedApps.Add(path)) continue;
+                list.Add(NewItem(Kind.App, path, null, null, 1, running));
+            }
+            list.AddRange(rightItems);
+
+            // The Recycle Bin always sits at the far right (like the macOS Trash), unless the user already pinned one.
+            if (!list.Any(x => x.Kind == Kind.Trash))
+                list.Add(NewItem(Kind.Trash, RecycleBin.Target, null, null, 3, running));
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                Item it = list[i];
+                it.SepBefore = i > 0 && list[i - 1].Section != it.Section;
+
+                Item old;
+                if (previous.TryGetValue(it.Key, out old))
+                {
+                    it.ScaleSpring = old.ScaleSpring;
+                    it.Goal = old.Goal;
+                    it.BounceHeight = old.BounceHeight;
+                    it.BounceVelocity = old.BounceVelocity;
+                    it.LaunchStart = old.LaunchStart;
+                    it.RestUntil = old.RestUntil;
+                    it.Shift = old.Shift;
+                }
+            }
+
+            items = list;
+            if (hoverIndex >= items.Count) hoverIndex = -1;
+            refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue) ? 500 : 2000;
+            FitCanvas();
+            LayoutItems();
+            Redraw();
+        }
+
+        void AddEntryItem(List<Item> list, Entry e, Dictionary<string, List<IntPtr>> running, HashSet<string> pinnedApps)
+        {
+            Kind kind;
+            if (!TryClassify(e.Target, out kind)) return;
+            if (kind == Kind.App && !pinnedApps.Add(e.Target)) return;
+            list.Add(NewItem(kind, e.Target, e.Label, e, e.Section, running));
+        }
+
+        Item NewItem(Kind kind, string target, string label, Entry entry, int section, Dictionary<string, List<IntPtr>> running)
+        {
+            var it = new Item
+            {
+                Kind = kind,
+                Target = target,
+                Entry = entry,
+                Section = section,
+                Label = !string.IsNullOrEmpty(label) ? label : DefaultLabel(kind, target)
+            };
+            // Universal lookup: a running app's window carries its own AppUserModelID, which names the Start-menu entry
+            // (proper name + icon) no matter how odd the exe is called.
+            List<IntPtr> win;
+            if (kind == Kind.App && !ShellIcons.IsAppsFolderItem(target) && running.TryGetValue(target, out win))
+            {
+                foreach (IntPtr h in win.Take(3))
+                {
+                    string id = Pwa.AumidOfWindow(h);
+                    if (string.IsNullOrEmpty(id) || Pwa.IsWebAppId(id)) continue; // web apps share the browser's exe
+                    it.Aumid = id;
+                    lock (AppDirectory.Names)
+                    {
+                        string listed;
+                        if (string.IsNullOrEmpty(label) && AppDirectory.Names.TryGetValue(id, out listed) && !string.IsNullOrWhiteSpace(listed)) it.Label = listed;
+                    }
+                    break;
+                }
+            }
+            it.Icon = GetIcon(it);
+
+            List<IntPtr> handles;
+            if (kind == Kind.App && running.TryGetValue(target, out handles)) it.Handles = handles;
+            return it;
+        }
+
+        static string DefaultLabel(Kind kind, string target)
+        {
+            switch (kind)
+            {
+                case Kind.Start: return "Start";
+                case Kind.Mission: return "Mission Control";
+                case Kind.Launchpad: return "All Apps";
+                case Kind.Trash: return "Recycle Bin";
+                case Kind.Url:
+                    Uri uri;
+                    return Uri.TryCreate(target, UriKind.Absolute, out uri) && uri.Host.Length > 0 ? uri.Host : target;
+                case Kind.Folder:
+                    string name = Path.GetFileName(target.TrimEnd('\\', '/'));
+                    return name.Length > 0 ? name : target;
+                default:
+                    if (ShellIcons.IsAppsFolderItem(target)) return AppDirectory.NameFor(target.Substring(ShellIcons.AppsFolderPrefix.Length));
+                    if (kind == Kind.App)
+                    {
+                        // The app's own display name ("Microsoft Edge"), not its file name ("msedge").
+                        try
+                        {
+                            string description = FileVersionInfo.GetVersionInfo(target).FileDescription;
+                            // A Store app's exe can carry a raw name ("WhatsApp.Root"): prefer the Start-menu name it contains.
+                            var listed = AppDirectory.Match(!string.IsNullOrWhiteSpace(description) ? description : Path.GetFileNameWithoutExtension(target));
+                            if (listed != null && target.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) >= 0) return listed.Value.Key;
+                            if (!string.IsNullOrWhiteSpace(description)) return description.Trim();
+                        }
+                        catch { }
+                    }
+                    return Path.GetFileNameWithoutExtension(target);
+            }
+        }
+
+        static bool IsUri(string t)
+        {
+            return t.IndexOf("://", StringComparison.Ordinal) > 0
+                || t.StartsWith("shell:", StringComparison.OrdinalIgnoreCase)
+                || t.StartsWith("ms-settings:", StringComparison.OrdinalIgnoreCase)
+                || t.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool IsAppFile(string path)
+        {
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            return (ext == ".exe" || ext == ".lnk") && File.Exists(path);
+        }
+
+        static bool TryClassify(string target, out Kind kind)
+        {
+            kind = Kind.File;
+            if (target == "[start]") { kind = Kind.Start; return true; }
+            if (target == "[apps]") { kind = Kind.Launchpad; return true; }
+            if (RecycleBin.IsTarget(target)) { kind = Kind.Trash; return true; }
+            if (ShellIcons.IsAppsFolderItem(target)) { kind = Kind.App; return true; } // Store apps and other Start menu apps
+            if (IsUri(target)) { kind = Kind.Url; return true; }
+            if (Directory.Exists(target)) { kind = Kind.Folder; return true; }
+            if (File.Exists(target)) { kind = IsAppFile(target) ? Kind.App : Kind.File; return true; }
+            return false;
+        }
+
+        void Activate(Item it)
+        {
+            // Clicking a dock item while Launchpad or Mission Control is open closes it, then the item opens as usual.
+            if (it.Kind != Kind.Mission && it.Kind != Kind.Launchpad) MissionControl.DismissForLaunch();
+
+            if (it.Kind == Kind.Start)
+            {
+                NativeMethods.keybd_event(VK_LWIN, 0, 0, UIntPtr.Zero);
+                NativeMethods.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                return;
+            }
+            if (it.Kind == Kind.Launchpad) { MissionControl.Toggle(true); return; }
+            if (it.Kind == Kind.Trash) { RecycleBin.Open(); it.BounceVelocity = BounceLaunchSpeed * 0.7; return; }
+
+            // Clicking the icon of the app that is in front minimizes its front window (the genie effect plays); otherwise the
+            // app's window is restored if needed and brought forward. The dock never takes focus, so the first click while
+            // another app is in front always lands on the "bring forward" branch.
+            IntPtr front = Win32.GetForegroundWindow();
+            IntPtr frontOwner = front == IntPtr.Zero ? IntPtr.Zero : GetAncestor(front, 3); // GA_ROOTOWNER
+            foreach (IntPtr h in it.Handles)
+            {
+                if (!NativeMethods.IsWindow(h) || (h != front && h != frontOwner)) continue;
+                if (!NativeMethods.IsIconic(h)) { NativeMethods.ShowWindow(h, SW_MINIMIZE); return; }
+                break;
+            }
+
+            IntPtr target = IntPtr.Zero;
+            foreach (IntPtr h in it.Handles)
+            {
+                if (NativeMethods.IsWindow(h)) { target = h; break; }
+            }
+
+            if (target != IntPtr.Zero)
+            {
+                if (NativeMethods.IsIconic(target)) NativeMethods.ShowWindow(target, SW_RESTORE);
+                // A synthetic Alt tap lets a background process take the foreground.
+                NativeMethods.keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+                NativeMethods.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                NativeMethods.SetForegroundWindow(target);
+            }
+            else
+            {
+                if (!Pwa.Launch(it.Target)) return; // a web app that is already open is raised, not started again
+
+                // Only apps get the launch bounce; folders and links just open.
+                if (it.Kind == Kind.App)
+                {
+                    it.LaunchStart = DateTime.Now;
+                    it.BounceVelocity = BounceLaunchSpeed;
+                    refreshTimer.Interval = 500; // notice the new window quickly so the bounce stops on time
+                }
+                else
+                {
+                    it.BounceVelocity = BounceLaunchSpeed * 0.7; // one short acknowledgement bounce
+                }
+            }
+        }
+
+        // ---------- config ----------
+
+        void LoadConfig()
+        {
+            if (!File.Exists(configPath)) File.WriteAllLines(configPath, DefaultConfig);
+            configStamp = File.GetLastWriteTime(configPath);
+
+            entries = new List<Entry>();
+            hideTaskbar = true;
+            int section = 0;
+
+            foreach (string raw in File.ReadAllLines(configPath))
+            {
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+                if (line == "---") { section = 2; continue; }
+
+                if (line.StartsWith("@"))
+                {
+                    string opt = line.Substring(1).Trim().ToLowerInvariant();
+                    if (opt.StartsWith("hide-taskbar"))
+                        hideTaskbar = !(opt.EndsWith("off") || opt.EndsWith("false") || opt.EndsWith("no"));
+                    continue;
+                }
+
+                string label = null, target = line;
+                int bar = line.IndexOf('|');
+                if (bar > 0)
+                {
+                    label = line.Substring(0, bar).Trim();
+                    target = line.Substring(bar + 1).Trim();
+                }
+                target = Environment.ExpandEnvironmentVariables(target.Trim('"'));
+                entries.Add(new Entry { Section = section, Label = label, Target = target, Raw = raw });
+            }
+        }
+
+        void ApplyTaskbarSetting()
+        {
+            if (hideTaskbar && !TaskbarControl.IsHidden) TaskbarControl.Hide();
+            else if (!hideTaskbar && TaskbarControl.IsHidden) TaskbarControl.Restore();
+        }
+
+        // Adds a line to dock.txt: apps go before the --- line, everything else after it.
+        void AddPin(string line, string target, int section)
+        {
+            try
+            {
+                List<string> lines = File.ReadAllLines(configPath).ToList();
+                foreach (string l in lines)
+                {
+                    string t = l.Trim();
+                    int bar = t.IndexOf('|');
+                    string existing = bar > 0 ? t.Substring(bar + 1).Trim() : t;
+                    if (string.Equals(Environment.ExpandEnvironmentVariables(existing), target, StringComparison.OrdinalIgnoreCase)) return;
+                }
+
+                int sep = lines.FindIndex(l => l.Trim() == "---");
+                if (section == 0)
+                {
+                    if (sep >= 0) lines.Insert(sep, line); else lines.Add(line);
+                }
+                else
+                {
+                    if (sep < 0) lines.Add("---");
+                    lines.Add(line);
+                }
+                File.WriteAllLines(configPath, lines);
+            }
+            catch { }
+            LoadConfig();
+            RebuildItems();
+        }
+
+        void RemovePin(string raw)
+        {
+            try
+            {
+                List<string> lines = File.ReadAllLines(configPath).ToList();
+                int index = lines.FindIndex(l => l == raw);
+                if (index >= 0)
+                {
+                    lines.RemoveAt(index);
+                    File.WriteAllLines(configPath, lines);
+                }
+            }
+            catch { }
+            LoadConfig();
+            RebuildItems();
+        }
+
+        // Apps in the dock that have no macOS icon yet (their names, for the macosicons.com lookup).
+        public List<string> AppsWithoutMacIcon()
+        {
+            var names = new List<string>();
+            foreach (Item it in items)
+            {
+                if (it.Kind != Kind.App) continue;
+                using (Bitmap pack = IconPack.ForItem(it.Kind, it.Target, it.Label))
+                    if (pack == null) names.Add(it.Label);
+            }
+            return names;
+        }
+
+        // Re-reads every icon, e.g. after the icon pack changed.
+        public void RefreshIcons()
+        {
+            foreach (Bitmap b in iconCache.Values) b.Dispose();
+            iconCache.Clear();
+            items = new List<Item>(); // drop references to the disposed bitmaps before rebuilding
+            RebuildItems();
+        }
+
+        // The three "add to Dock" prompts. Also reachable from the top bar's logo menu.
+        public void PromptAddFolder()
+        {
+            using (var d = new FolderBrowserDialog { Description = "Choose a folder to add to the Dock" })
+                if (d.ShowDialog() == DialogResult.OK) AddPin(d.SelectedPath, d.SelectedPath, 2);
+        }
+
+        public void PromptAddApp()
+        {
+            using (var d = new OpenFileDialog { Title = "Add an app or file to the Dock", DereferenceLinks = false })
+                if (d.ShowDialog() == DialogResult.OK) AddPath(d.FileName);
+        }
+
+        public void PromptAddWebsite()
+        {
+            AddWebsite(Microsoft.VisualBasic.Interaction.InputBox("Website address:", "Add website to the Dock", "https://"));
+        }
+
+        // Used by Mission Control's All Apps view (drag an app onto the dock, or press its + button).
+        public const string AppDragFormat = "MacDockApp";
+
+        public void AddApp(string name, string target)
+        {
+            AddPin(name + " | " + target, target, 0);
+        }
+
+        public bool IsPinned(string target)
+        {
+            return entries.Any(e => string.Equals(e.Target, target, StringComparison.OrdinalIgnoreCase));
+        }
+
+        public void RemoveApp(string target)
+        {
+            Entry entry = entries.FirstOrDefault(e => string.Equals(e.Target, target, StringComparison.OrdinalIgnoreCase));
+            if (entry != null) RemovePin(entry.Raw);
+        }
+
+        void AddPath(string path)
+        {
+            AddPin(path, path, IsAppFile(path) ? 0 : 2);
+        }
+
+        void AddWebsite(string url)
+        {
+            url = url.Trim();
+            if (!IsUri(url)) return;
+            AddPin(DefaultLabel(Kind.Url, url) + " | " + url, url, 2);
+        }
+
+        // ---------- input ----------
+
+        int IndexAt(int x, int y)
+        {
+            for (int i = 0; i < items.Count; i++)
+                if (items[i].Rect.Contains(x, y)) return i;
+            return -1;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+
+            // Only pinned items can be rearranged (running apps that aren't pinned have no place in dock.txt).
+            int index = IndexAt(e.X, e.Y);
+            if (index >= 0 && items[index].Entry != null)
+            {
+                pressItem = items[index];
+                pressPoint = e.Location;
+                pressTime = DateTime.Now;
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (dragItem != null) { EndDrag(); return; } // dropping after a long press is not a click
+            pressItem = null;
+
+            int index = IndexAt(e.X, e.Y);
+
+            if (e.Button == MouseButtons.Right) ShowMenu(index >= 0 ? items[index] : null, e.Location);
+            else if (e.Button == MouseButtons.Left && index >= 0) Activate(items[index]);
+        }
+
+        void ShowMenu(Item it, Point at)
+        {
+            if (popup != null) popup.Close();
+            var list = new List<MenuEntry>();
+
+            if (it != null && it.Kind == Kind.Trash)
+            {
+                list.Add(MenuEntry.Item("Open", null, () => RecycleBin.Open()));
+                list.Add(MenuEntry.Item("Empty Recycle Bin", null, RecycleBin.IsFull() ? (Action)(() => RecycleBin.Empty()) : null));
+                list.Add(MenuEntry.Sep());
+            }
+            else if (it != null)
+            {
+                list.Add(MenuEntry.Item(it.Label, null, null)); // header, greyed out
+
+                if (it.Handles != null && it.Handles.Count > 0)
+                {
+                    Item targetItem = it;
+                    list.Add(MenuEntry.Item("Close", null, () => CloseItem(targetItem)));
+                    list.Add(MenuEntry.Item("Force Close", null, () => ForceCloseItem(targetItem)));
+                    list.Add(MenuEntry.Sep());
+                }
+
+                if (it.Entry != null && it.Kind != Kind.Start)
+                {
+                    Entry entry = it.Entry;
+                    list.Add(MenuEntry.Item("Remove from Dock", null, () => RemovePin(entry.Raw)));
+                }
+                else if (it.Entry == null && it.Kind == Kind.App)
+                {
+                    string path = it.Target;
+                    list.Add(MenuEntry.Item("Keep in Dock", null, () => AddPin(path, path, 0)));
+                }
+                list.Add(MenuEntry.Sep());
+            }
+
+            list.Add(MenuEntry.Item("Add folder to Dock...", null, () => PromptAddFolder()));
+            list.Add(MenuEntry.Item("Add app or file to Dock...", null, () => PromptAddApp()));
+            list.Add(MenuEntry.Item("Add website to Dock...", null, () => PromptAddWebsite()));
+            list.Add(MenuEntry.Sep());
+
+            // The same frosted popup as the top bar's menus; it opens upward from the click, above the dock.
+            Point screenAt = PointToScreen(at);
+            MenuPopup menu = null;
+            menu = new MenuPopup(list, screenAt, 0, () => { if (popup == menu) popup = null; });
+            menu.launchpadGlass = true;
+            Rectangle area = Screen.FromPoint(screenAt).Bounds;
+            int pillTop = Top + (int)Math.Round(pillRect.Top);
+            menu.Top = Math.Max(area.Top + 4, pillTop - menu.Height - 10);
+            popup = menu;
+            menu.Show();
+        }
+
+        static void CloseItem(Item it)
+        {
+            if (it == null || it.Handles == null) return;
+            foreach (IntPtr h in it.Handles.ToList())
+            {
+                try { Win32.PostMessage(h, WinUtil.WM_CLOSE, IntPtr.Zero, IntPtr.Zero); }
+                catch { }
+            }
+        }
+
+        static void ForceCloseItem(Item it)
+        {
+            if (it == null) return;
+            var pids = new HashSet<uint>();
+
+            if (it.Handles != null)
+            {
+                foreach (IntPtr h in it.Handles)
+                {
+                    uint pid;
+                    NativeMethods.GetWindowThreadProcessId(h, out pid);
+                    if (pid != 0) pids.Add(pid);
+                }
+            }
+
+            if (pids.Count == 0 && it.Kind == Kind.App && !string.IsNullOrEmpty(it.Target))
+            {
+                try
+                {
+                    string exeName = Path.GetFileNameWithoutExtension(it.Target);
+                    foreach (var p in Process.GetProcessesByName(exeName))
+                    {
+                        try { pids.Add((uint)p.Id); } catch { }
+                    }
+                }
+                catch { }
+            }
+
+            foreach (uint pid in pids)
+            {
+                try
+                {
+                    using (var p = Process.GetProcessById((int)pid))
+                    {
+                        p.Kill();
+                    }
+                }
+                catch { }
+            }
+        }
+        protected override void OnDragEnter(DragEventArgs e)
+        {
+            base.OnDragEnter(e);
+            bool ok = e.Data.GetDataPresent(AppDragFormat) || e.Data.GetDataPresent(DataFormats.FileDrop) || e.Data.GetDataPresent(DataFormats.UnicodeText);
+            e.Effect = ok ? DragDropEffects.Copy : DragDropEffects.None;
+        }
+
+        bool OverTrash(DragEventArgs e)
+        {
+            Point c = PointToClient(new Point(e.X, e.Y));
+            int i = IndexAt(c.X, c.Y);
+            return i >= 0 && items[i].Kind == Kind.Trash;
+        }
+
+        protected override void OnDragOver(DragEventArgs e)
+        {
+            base.OnDragOver(e);
+            if (e.Data.GetDataPresent(DataFormats.FileDrop) && OverTrash(e)) e.Effect = DragDropEffects.Move;
+        }
+
+        protected override void OnDragDrop(DragEventArgs e)
+        {
+            base.OnDragDrop(e);
+
+            // Files dropped on the Recycle Bin icon go to the Recycle Bin.
+            string[] doomed = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (doomed != null && OverTrash(e))
+            {
+                // Deferred so the drag source (Explorer) isn't blocked while confirmation/progress UI shows.
+                BeginInvoke((Action)(() => { RecycleBin.Delete(doomed); RebuildItems(); }));
+                return;
+            }
+
+            // From Mission Control: "name\ntarget".
+            string app = e.Data.GetData(AppDragFormat) as string;
+            if (app != null)
+            {
+                string[] parts = app.Split('\n');
+                if (parts.Length == 2) AddApp(parts[0], parts[1]);
+                return;
+            }
+
+            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (files != null)
+            {
+                foreach (string f in files) AddPath(f);
+                return;
+            }
+            string text = e.Data.GetData(DataFormats.UnicodeText) as string;
+            if (text != null) AddWebsite(text);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Genie.Uninstall();
+                WindowTheme.Uninstall();
+                ReleaseBottom();
+                TaskbarControl.Restore();
+                foreach (Bitmap b in iconCache.Values) b.Dispose();
+                if (surface != null) surface.Dispose();
+                if (popup != null) popup.Close();
+                vsync.Dispose();
+                animTimer.Dispose();
+                refreshTimer.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        // ---------- icons ----------
+
+        Bitmap GetIcon(Item it)
+        {
+            bool shared = (it.Kind == Kind.Url && !it.Target.StartsWith("http", StringComparison.OrdinalIgnoreCase)) || it.Kind == Kind.Start || it.Kind == Kind.Mission || it.Kind == Kind.Launchpad;
+            string key = shared ? "@" + it.Kind : it.Kind == Kind.Trash ? "@Trash" + RecycleBin.IsFull() : it.Target;
+            Bitmap bmp;
+            if (!iconCache.TryGetValue(key, out bmp))
+            {
+                bmp = BuildIcon(it);
+                iconCache[key] = bmp;
+            }
+            return bmp;
+        }
+
+        static Bitmap BuildIcon(Item it)
+        {
+            // An installed icon pack wins when it has a macOS counterpart for this app.
+            Bitmap packed = IconPack.ForItem(it.Kind, it.Target, it.Label);
+            if (packed != null) return packed;
+
+            switch (it.Kind)
+            {
+                case Kind.Start:
+                    return StartIcon();
+                case Kind.Mission:
+                    return MissionIcon();
+                case Kind.Launchpad:
+                    return LaunchpadIcon();
+                case Kind.Trash:
+                    return TrashIcon(RecycleBin.IsFull());
+                case Kind.Folder:
+                    // Folders keep their own artwork, like the folder stacks in the macOS dock.
+                    return LoadShellIcon(it.Target, 0, 0) ?? ScaleIcon(SystemIcons.Application.ToBitmap());
+                case Kind.Url:
+                    // Drawn here instead of asking Windows for the ".url" icon: that lookup runs the browser's icon
+                    // handler, which tries to write to the Favorites folder and trips Controlled Folder Access.
+                    if (it.Target.StartsWith("ms-settings:", StringComparison.OrdinalIgnoreCase)) return GearIcon();
+                    Bitmap site = SiteIcons.Get(it.Target); // the site's own icon once fetched; globe until then
+                    return site != null ? Tile(ScaleIcon(site)) : WebIcon();
+                default:
+                    if (ShellIcons.IsAppsFolderItem(it.Target))
+                    {
+                        Bitmap webIcon = Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target)) ? Pwa.IconFor(it.Label) : null; // web apps keep their own icon
+                        return Tile(webIcon ?? ShellIcons.Load(it.Target, IconSource) ?? ScaleIcon(SystemIcons.Application.ToBitmap()));
+                    }
+
+                    Bitmap icon = null;
+                    // 1) the Start-menu entry of the window's own app id; 2) one whose name matches (Store exes)
+                    string aumid = it.Aumid;
+                    if (aumid == null && it.Target.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        var listed = AppDirectory.Match(it.Label);
+                        if (listed != null) aumid = listed.Value.Value;
+                    }
+                    if (aumid != null)
+                    {
+                        icon = ShellIcons.Load(ShellIcons.AppsFolderPrefix + aumid, IconSource);
+                        if (icon != null && IsBlank(icon)) { icon.Dispose(); icon = null; }
+                        if (icon != null) return Tile(icon);
+                    }
+                    // 3) the exe's shell icon, unless it came back empty; 4) the associated icon; 5) the generic app icon
+                    icon = LoadShellIcon(it.Target, 0, 0);
+                    if (icon != null && IsBlank(icon)) { icon.Dispose(); icon = null; }
+                    if (icon == null)
+                    {
+                        try { using (Icon i = Icon.ExtractAssociatedIcon(it.Target)) icon = ScaleIcon(i.ToBitmap()); }
+                        catch { icon = ScaleIcon(SystemIcons.Application.ToBitmap()); }
+                    }
+                    return Tile(icon);
+            }
+        }
+
+        // Pulls the 256px shell icon so it stays sharp when zoomed.
+        internal static Bitmap LoadShellIcon(string path, uint extraFlags, uint attrs)
+        {
+            try
+            {
+                var info = new NativeMethods.SHFILEINFO();
+                IntPtr ok = NativeMethods.SHGetFileInfo(path, attrs, ref info, (uint)Marshal.SizeOf(info), SHGFI_SYSICONINDEX | extraFlags);
+                Guid iid = typeof(NativeMethods.IImageList).GUID;
+                NativeMethods.IImageList list;
+                if (ok != IntPtr.Zero && NativeMethods.SHGetImageList(SHIL_JUMBO, ref iid, out list) == 0)
+                {
+                    IntPtr hIcon = IntPtr.Zero;
+                    list.GetIcon(info.iIcon, ILD_TRANSPARENT, ref hIcon);
+                    Marshal.ReleaseComObject(list);
+                    if (hIcon != IntPtr.Zero)
+                    {
+                        Bitmap big;
+                        big = ShellIcons.FromHIcon(hIcon);
+                        if (big == null) using (Icon icon = Icon.FromHandle(hIcon)) big = icon.ToBitmap();
+                        NativeMethods.DestroyIcon(hIcon);
+                        return ScaleIcon(big);
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        static Bitmap TrashIcon(bool full)
+        {
+            try
+            {
+                int idx = RecycleBin.IconIndex(full);
+                Guid iid = typeof(NativeMethods.IImageList).GUID;
+                NativeMethods.IImageList list;
+                if (idx >= 0 && NativeMethods.SHGetImageList(SHIL_JUMBO, ref iid, out list) == 0)
+                {
+                    IntPtr hIcon = IntPtr.Zero;
+                    list.GetIcon(idx, ILD_TRANSPARENT, ref hIcon);
+                    Marshal.ReleaseComObject(list);
+                    if (hIcon != IntPtr.Zero)
+                    {
+                        Bitmap big = ShellIcons.FromHIcon(hIcon);
+                        if (big == null) using (Icon icon = Icon.FromHandle(hIcon)) big = icon.ToBitmap();
+                        NativeMethods.DestroyIcon(hIcon);
+                        return ScaleIcon(big);
+                    }
+                }
+            }
+            catch { }
+            return ScaleIcon(SystemIcons.Application.ToBitmap());
+        }
+
+        static Bitmap ScaleIcon(Bitmap src)
+        {
+            var dst = new Bitmap(IconSource, IconSource);
+            using (src)
+            using (Graphics g = Graphics.FromImage(dst))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.Clear(Color.Transparent);
+                g.DrawImage(src, 0, 0, IconSource, IconSource);
+            }
+            return dst;
+        }
+
+        // Puts the icon on a macOS-style rounded-square tile. Light icons get a dark tile so they stay visible.
+        internal static Bitmap Tile(Bitmap icon)
+        {
+            const int S = IconSource;
+            Color top, bottom;
+            if (AverageLuminance(icon) > 0.72)
+            {
+                top = Color.FromArgb(92, 98, 120);
+                bottom = Color.FromArgb(40, 43, 58);
+            }
+            else
+            {
+                top = Color.FromArgb(255, 255, 255);
+                bottom = Color.FromArgb(205, 211, 224);
+            }
+
+            var tile = new Bitmap(S, S);
+            using (Graphics g = Graphics.FromImage(tile))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+                var rect = new RectangleF(1.5f, 1.5f, S - 3, S - 3);
+                using (GraphicsPath path = RoundedRect(rect, S * 0.225f))
+                using (var fill = new LinearGradientBrush(rect, top, bottom, 90f))
+                using (var rim = new Pen(Color.FromArgb(120, 255, 255, 255), 1.5f))
+                {
+                    g.FillPath(fill, path);
+                    g.DrawPath(rim, path);
+                }
+
+                float inner = S * 0.66f;
+                g.DrawImage(icon, (S - inner) / 2f, (S - inner) / 2f, inner, inner);
+            }
+            icon.Dispose();
+            return tile;
+        }
+
+        // True when (nearly) every pixel is transparent: the shell returns that for some Store exes.
+        static bool IsBlank(Bitmap icon)
+        {
+            try
+            {
+                for (int y = 0; y < icon.Height; y += 4)
+                    for (int x = 0; x < icon.Width; x += 4)
+                        if (icon.GetPixel(x, y).A > 16) return false;
+            }
+            catch { return false; }
+            return true;
+        }
+
+        static double AverageLuminance(Bitmap icon)
+        {
+            using (var small = new Bitmap(icon, 16, 16))
+            {
+                double sum = 0;
+                int count = 0;
+                for (int y = 0; y < 16; y++)
+                {
+                    for (int x = 0; x < 16; x++)
+                    {
+                        Color c = small.GetPixel(x, y);
+                        if (c.A < 40) continue;
+                        sum += (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) / 255.0;
+                        count++;
+                    }
+                }
+                return count == 0 ? 0.5 : sum / count;
+            }
+        }
+
+        // A gear on a graphite plate: the Settings icon when no icon pack is installed.
+        static Bitmap GearIcon()
+        {
+            const int S = IconSource;
+            var bmp = new Bitmap(S, S);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                var rect = new RectangleF(1.5f, 1.5f, S - 3, S - 3);
+                using (GraphicsPath plate = RoundedRect(rect, S * 0.225f))
+                using (var fill = new LinearGradientBrush(rect, Color.FromArgb(172, 178, 190), Color.FromArgb(98, 103, 116), 90f))
+                using (var rim = new Pen(Color.FromArgb(120, 255, 255, 255), 1.5f))
+                {
+                    g.FillPath(fill, plate);
+                    g.DrawPath(rim, plate);
+                }
+
+                // Eight teeth around a ring, with a hole in the middle.
+                float c = S / 2f, outer = S * 0.33f, inner = S * 0.255f;
+                const int teeth = 8;
+                var points = new List<PointF>();
+                for (int i = 0; i < teeth; i++)
+                {
+                    double a0 = Math.PI * 2 * i / teeth;
+                    double step = Math.PI * 2 / teeth;
+                    foreach (double[] p in new[] { new[] { 0.0, inner }, new[] { 0.16, outer }, new[] { 0.34, outer }, new[] { 0.5, inner } })
+                    {
+                        double a = a0 + step * p[0];
+                        points.Add(new PointF(c + (float)(Math.Cos(a) * p[1]), c + (float)(Math.Sin(a) * p[1])));
+                    }
+                }
+                using (var gear = new GraphicsPath())
+                {
+                    gear.AddPolygon(points.ToArray());
+                    gear.AddEllipse(c - S * 0.1f, c - S * 0.1f, S * 0.2f, S * 0.2f); // hole (even-odd fill)
+                    using (var body = new LinearGradientBrush(rect, Color.FromArgb(250, 250, 252), Color.FromArgb(214, 218, 226), 90f))
+                        g.FillPath(body, gear);
+                }
+            }
+            return bmp;
+        }
+
+        // A globe on a blue plate for websites and other links.
+        static Bitmap WebIcon()
+        {
+            const int S = IconSource;
+            var bmp = new Bitmap(S, S);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                var rect = new RectangleF(1.5f, 1.5f, S - 3, S - 3);
+                using (GraphicsPath plate = RoundedRect(rect, S * 0.225f))
+                using (var fill = new LinearGradientBrush(rect, Color.FromArgb(90, 190, 255), Color.FromArgb(10, 110, 230), 90f))
+                using (var rim = new Pen(Color.FromArgb(120, 255, 255, 255), 1.5f))
+                {
+                    g.FillPath(fill, plate);
+                    g.DrawPath(rim, plate);
+                }
+
+                float c = S / 2f, r = S * 0.30f;
+                using (var pen = new Pen(Color.FromArgb(240, 255, 255, 255), 2.6f))
+                {
+                    g.DrawEllipse(pen, c - r, c - r, r * 2, r * 2);
+                    g.DrawEllipse(pen, c - r * 0.45f, c - r, r * 0.9f, r * 2);   // meridian
+                    g.DrawLine(pen, c - r, c, c + r, c);                         // equator
+                    g.DrawArc(pen, c - r, c - r * 0.55f, r * 2, r * 1.1f, 0, 180); // parallels
+                    g.DrawArc(pen, c - r, c - r * 0.55f, r * 2, r * 1.1f, 180, 180);
+                }
+            }
+            return bmp;
+        }
+
+        // Three overlapping windows on a dark plate, like the Mission Control icon.
+        static Bitmap MissionIcon()
+        {
+            const int S = IconSource;
+            var bmp = new Bitmap(S, S);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                var rect = new RectangleF(1.5f, 1.5f, S - 3, S - 3);
+                using (GraphicsPath plate = RoundedRect(rect, S * 0.225f))
+                using (var fill = new LinearGradientBrush(rect, Color.FromArgb(70, 74, 96), Color.FromArgb(28, 30, 42), 90f))
+                using (var rim = new Pen(Color.FromArgb(110, 255, 255, 255), 1.5f))
+                {
+                    g.FillPath(fill, plate);
+                    g.DrawPath(rim, plate);
+                }
+
+                float w = S * 0.30f, h = S * 0.22f;
+                DrawWindowGlyph(g, S * 0.14f, S * 0.22f, w, h);
+                DrawWindowGlyph(g, S * 0.56f, S * 0.22f, w, h);
+                DrawWindowGlyph(g, S * 0.35f, S * 0.54f, w, h);
+            }
+            return bmp;
+        }
+
+        static void DrawWindowGlyph(Graphics g, float x, float y, float w, float h)
+        {
+            var r = new RectangleF(x, y, w, h);
+            using (GraphicsPath p = RoundedRect(r, 4))
+            using (var fill = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
+            using (var pen = new Pen(Color.FromArgb(230, 255, 255, 255), 2f))
+            using (var bar = new SolidBrush(Color.FromArgb(230, 255, 255, 255)))
+            {
+                g.FillPath(fill, p);
+                g.DrawPath(pen, p);
+                g.FillRectangle(bar, x + 3, y + 3, w - 6, 3);
+            }
+        }
+
+        // A grid of colored squares, like Launchpad.
+        static Bitmap LaunchpadIcon()
+        {
+            const int S = IconSource;
+            var bmp = new Bitmap(S, S);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                var rect = new RectangleF(1.5f, 1.5f, S - 3, S - 3);
+                using (GraphicsPath plate = RoundedRect(rect, S * 0.225f))
+                using (var fill = new LinearGradientBrush(rect, Color.FromArgb(250, 250, 252), Color.FromArgb(206, 210, 222), 90f))
+                using (var rim = new Pen(Color.FromArgb(120, 255, 255, 255), 1.5f))
+                {
+                    g.FillPath(fill, plate);
+                    g.DrawPath(rim, plate);
+                }
+
+                Color[] colors =
+                {
+                    Color.FromArgb(255, 69, 58), Color.FromArgb(255, 159, 10), Color.FromArgb(255, 214, 10),
+                    Color.FromArgb(52, 199, 89), Color.FromArgb(10, 132, 255), Color.FromArgb(94, 92, 230),
+                    Color.FromArgb(191, 90, 242), Color.FromArgb(255, 55, 95), Color.FromArgb(100, 210, 255)
+                };
+                float cell = S * 0.19f, gap = S * 0.06f, start = (S - (3 * cell + 2 * gap)) / 2f;
+                for (int i = 0; i < 9; i++)
+                {
+                    using (GraphicsPath p = RoundedRect(new RectangleF(start + (i % 3) * (cell + gap), start + (i / 3) * (cell + gap), cell, cell), 5))
+                    using (var b = new SolidBrush(colors[i]))
+                        g.FillPath(b, p);
+                }
+            }
+            return bmp;
+        }
+
+        // The Start item replaces the hidden taskbar's Start button.
+        static Bitmap StartIcon()
+        {
+            const int S = IconSource;
+            var bmp = new Bitmap(S, S);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                var rect = new RectangleF(1.5f, 1.5f, S - 3, S - 3);
+                using (GraphicsPath path = RoundedRect(rect, S * 0.225f))
+                using (var fill = new LinearGradientBrush(rect, Color.FromArgb(70, 160, 255), Color.FromArgb(0, 84, 190), 90f))
+                using (var rim = new Pen(Color.FromArgb(120, 255, 255, 255), 1.5f))
+                using (var white = new SolidBrush(Color.White))
+                {
+                    g.FillPath(fill, path);
+                    g.DrawPath(rim, path);
+
+                    float pane = S * 0.2f, gap = S * 0.04f, start = (S - (2 * pane + gap)) / 2f;
+                    for (int row = 0; row < 2; row++)
+                        for (int col = 0; col < 2; col++)
+                            g.FillRectangle(white, start + col * (pane + gap), start + row * (pane + gap), pane, pane);
+                }
+            }
+            return bmp;
+        }
+
+        // ---------- running windows ----------
+
+        static readonly Dictionary<uint, string> PathCache = new Dictionary<uint, string>();
+
+        // Returns visible, titled app windows grouped by their exe path.
+        internal static Dictionary<string, List<IntPtr>> EnumerateRunningWindows()
+        {
+            var result = new Dictionary<string, List<IntPtr>>(StringComparer.OrdinalIgnoreCase);
+            var pathByPid = PathCache; // persists across refreshes; MainModule lookups are the expensive part
+            uint self;
+            using (Process me = Process.GetCurrentProcess()) self = (uint)me.Id;
+            var className = new StringBuilder(256);
+
+            NativeMethods.EnumWindows((hWnd, lParam) =>
+            {
+                if (!NativeMethods.IsWindowVisible(hWnd) || NativeMethods.GetWindowTextLength(hWnd) == 0) return true;
+
+                int ex = NativeMethods.GetWindowLong(hWnd, GWL_EXSTYLE);
+                if ((ex & WS_EX_TOOLWINDOW) != 0 && (ex & WS_EX_APPWINDOW) == 0) return true;
+
+                int cloaked;
+                if (NativeMethods.DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, out cloaked, 4) == 0 && cloaked != 0) return true;
+
+                className.Clear();
+                NativeMethods.GetClassName(hWnd, className, className.Capacity);
+                string cls = className.ToString();
+                if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return true;
+
+                uint pid;
+                NativeMethods.GetWindowThreadProcessId(hWnd, out pid);
+                if (pid == self) return true;
+
+                string exe;
+                if (!pathByPid.TryGetValue(pid, out exe))
+                {
+                    exe = ProcessPath(pid);
+                    pathByPid[pid] = exe;
+                }
+                if (exe == null) return true;
+
+                // A Brave / Edge / Chrome web app is its own app: group its windows under its AppsFolder id, not under
+                // the browser's exe, so it neither merges into the browser nor into other web apps.
+                if (cls == "Chrome_WidgetWin_1")
+                {
+                    string aumid = Pwa.AumidOfWindow(hWnd);
+                    if (Pwa.IsWebAppId(aumid)) exe = Pwa.TargetFor(aumid);
+                }
+
+                List<IntPtr> handles;
+                if (!result.TryGetValue(exe, out handles))
+                {
+                    handles = new List<IntPtr>();
+                    result[exe] = handles;
+                }
+                handles.Add(hWnd);
+                return true;
+            }, IntPtr.Zero);
+
+            return result;
+        }
+
+        internal static string ProcessPath(uint pid)
+        {
+            try
+            {
+                using (Process p = Process.GetProcessById((int)pid))
+                    return p.MainModule.FileName;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+}

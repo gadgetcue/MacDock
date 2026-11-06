@@ -1,0 +1,7 @@
+*.exe
+*.bak
+*.zip
+obj/
+bin/
+*.pdb
+*.user
