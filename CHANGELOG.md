@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.3
+### Added
+- **Drag and drop**: drop files onto dock apps to open them with that app.
+- **Launchpad sort icon** for ordering apps.
+- Executable metadata (version info) and an application manifest.
+
+### Changed
+- **Antivirus hardening** to reduce false positives: the optional guard task is now opt-in; restarts no longer go through `cmd`/`ping`; the installer no longer uses PowerShell with `ExecutionPolicy Bypass`; installer output is transparent about what it does.
+- Faster folder hover.
+- Win32 interop cleanups and window preview improvements.
+
+### Fixed
+- Build error from missing keyboard-hook declarations in `Win32.cs`.
 ## v1.2
 ### Added
 - **LocalSend**: AirDrop-style file sharing with nearby devices (LocalSend v2 protocol), with a built-in loopback self-test (`MacDock.exe --ls-selftest`).

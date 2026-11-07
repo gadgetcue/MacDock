@@ -4,7 +4,7 @@ A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds 
 
 ![Desktop with dock and menu bar](docs/desktop.png)
 
-See the [changelog](CHANGELOG.md) for what's new in v1.2.
+See the [changelog](CHANGELOG.md) for what's new in v1.3.
 
 ## Installation
 Requires Windows 11 (Windows 10 mostly works). No .NET SDK needed.
@@ -16,6 +16,11 @@ Requires Windows 11 (Windows 10 mostly works). No .NET SDK needed.
 `Install.bat` copies MacDock to `%LOCALAPPDATA%\MacDock` (no admin needed), adds a Start Menu shortcut and launches it. It starts at login by default (toggle in MacDock Settings), and a small `MacDockGuard` scheduled task relaunches the dock if it is killed.
 
 **Uninstall:** run `Uninstall.bat` from the unzipped release. It restores the taskbar, stops MacDock, removes autostart, the guard task and the shortcut, and deletes the install folder. Pins and settings in `%APPDATA%\MacDock` are kept until you delete that folder.
+
+## Antivirus and SmartScreen note
+The release exe is **unsigned**, so Windows SmartScreen or Defender heuristics may flag it (it uses a global keyboard hook and window APIs, as any dock or shell replacement does). You can:
+- Build it from source yourself (see below); the code is open.
+- Verify the download against the SHA256 listed in the release notes (`certutil -hashfile MacDock.exe SHA256`).
 
 ## Features
 - **Dock**: magnification, running indicators, drag to reorder, drop files on apps, and a working Recycle Bin. Pins live in `dock.txt` (apps, folders, files, websites, `ms-settings:` links).
