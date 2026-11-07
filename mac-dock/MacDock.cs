@@ -463,6 +463,8 @@ namespace MacDock
         readonly Timer animTimer = new Timer();
         readonly Timer refreshTimer = new Timer();
         MenuPopup popup; // the open right-click menu, if any
+        WindowPreview preview; // window thumbnails shown while hovering an app with several windows
+        DateTime hoverSince = DateTime.UtcNow;
         readonly Font labelFont = Typography.Text(9.5f, Weight.Medium);
         readonly Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
         readonly string configPath = AppPaths.Config;
@@ -895,6 +897,9 @@ namespace MacDock
 
             bool hoverChanged = hover != hoverIndex;
             hoverIndex = hover;
+            if (hoverChanged) hoverSince = DateTime.UtcNow;
+            if (hover >= 0 && preview == null && popup == null && dragItem == null && (DateTime.UtcNow - hoverSince).TotalMilliseconds > 350)
+                ShowPreview(items[hover]);
             LayoutItems();
 
             if (busy || hoverChanged) Redraw();
@@ -1396,8 +1401,37 @@ namespace MacDock
             return false;
         }
 
+        void ShowPreview(Item it)
+        {
+            hoverSince = DateTime.MaxValue; // once per hover
+            var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
+            if (live.Count < 1) return;
+            Point c = PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), (int)it.Rect.Top - 18));
+            Item target = it;
+            WindowPreview pv = null;
+            pv = new WindowPreview(live, it.Icon, c, FocusWindow, sp =>
+            {
+                Rectangle r = RectangleToScreen(Rectangle.Round(target.Rect));
+                r.Inflate(4, 20);
+                return r.Contains(sp);
+            }, () => { if (preview == pv) preview = null; });
+            preview = pv;
+            pv.Show();
+        }
+
+        static void FocusWindow(IntPtr target)
+        {
+            if (!NativeMethods.IsWindow(target)) return;
+            if (NativeMethods.IsIconic(target)) NativeMethods.ShowWindow(target, SW_RESTORE);
+            // A synthetic Alt tap lets a background process take the foreground.
+            NativeMethods.keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+            NativeMethods.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            NativeMethods.SetForegroundWindow(target);
+        }
+
         void Activate(Item it)
         {
+            if (preview != null) preview.Close();
             // Clicking a dock item while Launchpad or Mission Control is open closes it, then the item opens as usual.
             if (it.Kind != Kind.Mission && it.Kind != Kind.Launchpad) MissionControl.DismissForLaunch();
 
@@ -1655,6 +1689,7 @@ namespace MacDock
         void ShowMenu(Item it, Point at)
         {
             if (popup != null) popup.Close();
+            if (preview != null) preview.Close();
             var list = new List<MenuEntry>();
 
             if (it != null && it.Kind == Kind.Trash)
