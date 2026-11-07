@@ -3,8 +3,8 @@
 
 using System;
 using System.Management;
-using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -90,6 +90,121 @@ namespace MacDock
             if (d[18] == 0x15 && d.Length >= 43) return true;
             if (d[18] == 0x13) return false;
             return null;
+        }
+
+        // Strength lives in the settings blob as a varint-like colour temperature after the 0xCF 0x28 marker:
+        // kelvin = (b0 - 0x80) / 2 + b1 * 64. Returns 0..100 (6500 K = 0, 1200 K = 100) or -1 when the blob isn't recognised.
+        const string CurrentKey = @"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\";
+        // Newer Windows 11 builds keep the live strength in the per-device copy; older ones in the default copy. Both are kept in step.
+        static readonly string[] SettingsPaths =
+        {
+            CurrentKey + @"{31b4860e-ad92-48c8-929d-2808e44c7525}$windows.data.bluelightreduction.settingsperdevice\windows.data.bluelightreduction.settingsperdevice",
+            CurrentKey + @"default$windows.data.bluelightreduction.settings\windows.data.bluelightreduction.settings"
+        };
+
+        static int TempIndex(byte[] d)
+        {
+            if (d == null) return -1;
+            for (int i = 0; i + 3 < d.Length; i++)
+                if (d[i] == 0xCF && d[i + 1] == 0x28 && (d[i + 2] & 0x80) != 0 && d[i + 3] < 0x80) return i + 2;
+            return -1;
+        }
+
+        public static int Strength()
+        {
+            return lastSet >= 0 ? lastSet : StrengthFromRegistry();
+        }
+
+        static int StrengthFromRegistry()
+        {
+            try
+            {
+                byte[] d;
+                d = null;
+                int i = -1;
+                foreach (string path in SettingsPaths)
+                {
+                    using (RegistryKey k = Registry.CurrentUser.OpenSubKey(path)) d = k == null ? null : k.GetValue("Data") as byte[];
+                    i = TempIndex(d);
+                    if (i >= 0) break;
+                }
+                if (i < 0) return -1;
+                int kelvin = (d[i] - 0x80) / 2 + d[i + 1] * 64;
+                kelvin = Math.Max(1200, Math.Min(6500, kelvin));
+                return (int)Math.Round((6500 - kelvin) * 100.0 / 5300);
+            }
+            catch { return -1; }
+        }
+
+        static readonly object sGate = new object();
+        static int sWanted = -1;
+        static bool sRunning;
+        static int lastSet = -1;
+
+        // Windows ignores edits to the stored strength, so the value is set the way the user would: on the Strength slider of
+        // Settings > Night light, through UI Automation, with that window parked off screen and closed again. Slider drags
+        // are collapsed: the newest value is applied once the slider has been still for a moment.
+        public static void SetStrengthLatest(int pct)
+        {
+            lastSet = pct;
+            lock (sGate) { sWanted = pct; if (sRunning) return; sRunning = true; }
+            Task.Run(() =>
+            {
+                while (true)
+                {
+                    System.Threading.Thread.Sleep(450);
+                    int v;
+                    lock (sGate) { v = sWanted; sWanted = -1; if (v < 0) { sRunning = false; return; } }
+                    SetStrength(v);
+                }
+            });
+        }
+
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        static void Log(string m)
+        {
+            try { System.IO.File.AppendAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "nightlight.log"), DateTime.Now.ToString("HH:mm:ss ") + m + "\r\n"); } catch { }
+        }
+
+        static void SetStrength(int pct)
+        {
+            var AE = System.Windows.Automation.AutomationElement.RootElement;
+            var byName = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Settings");
+            var strength = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Strength");
+            var isSlider = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Slider);
+            var both = new System.Windows.Automation.AndCondition(strength, isSlider);
+            System.Windows.Automation.AutomationElement win = null;
+            bool opened = false, done = false;
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ms-settings:nightlight") { UseShellExecute = true });
+                for (int i = 0; i < 80 && !done; i++)
+                {
+                    System.Threading.Thread.Sleep(150);
+                    try
+                    {
+                        System.Windows.Automation.AutomationElement w = AE.FindFirst(System.Windows.Automation.TreeScope.Children, byName);
+                        if (w == null) continue;
+                        if (win == null) { win = w; opened = true; }
+                        try { SetWindowPos((IntPtr)w.Current.NativeWindowHandle, IntPtr.Zero, -32000, -32000, 0, 0, 0x0001 | 0x0004 | 0x0010); } catch { }
+                        System.Windows.Automation.AutomationElement slider = w.FindFirst(System.Windows.Automation.TreeScope.Descendants, both);
+                        if (slider == null) continue;
+                        var rv = (System.Windows.Automation.RangeValuePattern)slider.GetCurrentPattern(System.Windows.Automation.RangeValuePattern.Pattern);
+                        rv.SetValue(pct);
+                        System.Threading.Thread.Sleep(300);
+                        done = Math.Abs(rv.Current.Value - pct) < 2;
+                        Log("set " + pct + " -> " + rv.Current.Value);
+                    }
+                    catch (Exception e) { Log("retry: " + e.Message); }
+                }
+                if (!done) Log("gave up setting " + pct);
+            }
+            catch (Exception e) { Log("error: " + e); }
+            finally
+            {
+                try { if (win != null && opened) ((System.Windows.Automation.WindowPattern)win.GetCurrentPattern(System.Windows.Automation.WindowPattern.Pattern)).Close(); } catch { }
+            }
         }
 
         public static bool Set(bool on)

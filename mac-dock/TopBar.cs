@@ -23,6 +23,7 @@ namespace MacDock
         public bool Separator;
         public bool Disabled;
         public bool Checked;
+        public Color? Dot; // colour swatch drawn at the right edge
 
         public static MenuEntry Sep() { return new MenuEntry { Separator = true }; }
 
@@ -48,6 +49,23 @@ namespace MacDock
         public bool launchpadGlass; // dock menu: Launchpad-style glass (set before the window is shown)
         int hover = -1;
         bool wasDown;
+        int blurDivisor;
+
+        // Blurred snapshot of the desktop behind the menu, taken at its FINAL position (callers move it after
+        // construction) and before it becomes visible.
+        void CaptureBackdrop()
+        {
+            if (backdrop != null) { backdrop.Dispose(); backdrop = null; }
+            try
+            {
+                using (var shot = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
+                {
+                    using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size);
+                    backdrop = GlassPanel.BlurBitmap(shot, blurDivisor);
+                }
+            }
+            catch { backdrop = null; }
+        }
 
         // Open: a ~120 ms ease-out fade of the whole window. Dismiss: an ~80 ms fade. Only the window opacity changes
         // per frame (the bitmap and the blur window stay put), so it costs next to nothing.
@@ -93,16 +111,7 @@ namespace MacDock
             int left = Math.Max(area.Left + 4, Math.Min(anchor.X, area.Right - width - 4));
             Bounds = new Rectangle(left, anchor.Y, width, height);
 
-            // Blurred snapshot of the desktop behind the menu (taken before it is shown), for the glass fill.
-            try
-            {
-                using (var shot = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
-                {
-                    using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size);
-                    backdrop = GlassPanel.BlurBitmap(shot, blurDivisor); // default = Control Center blur
-                }
-            }
-            catch { backdrop = null; }
+            this.blurDivisor = blurDivisor;
 
             timer.Interval = 16;
             timer.Tick += (s, e) => Poll();
@@ -124,6 +133,7 @@ namespace MacDock
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            CaptureBackdrop();
             animStart = clock.Elapsed.TotalMilliseconds;
             if (vsync == null) vsync = new VsyncDriver(this, AnimateFade);
             Redraw();
@@ -273,6 +283,12 @@ namespace MacDock
                         g.DrawString(e.Text, font, mb, new RectangleF(PadX + 18, row.Top, Width - PadX * 2 - 18, row.Height), left);
                         if (!string.IsNullOrEmpty(e.Shortcut))
                             g.DrawString(e.Shortcut, font, sb, new RectangleF(PadX, row.Top, Width - PadX * 2, row.Height), right);
+                        if (e.Dot.HasValue)
+                        {
+                            float d = 12, dx = Width - PadX - d + 2, dy = row.Top + (row.Height - d) / 2;
+                            using (var db = new SolidBrush(e.Dot.Value)) g.FillEllipse(db, dx, dy, d, d);
+                            using (var dp = new Pen(Color.FromArgb(70, 128, 128, 128))) g.DrawEllipse(dp, dx, dy, d, d);
+                        }
                     }
                 }
             }
@@ -336,7 +352,7 @@ namespace MacDock
             SystemInfo.UpdateFast();
             SystemInfo.UpdateNet();
 
-            Panels.Navigate += id => { if (iconRects.ContainsKey(id)) TogglePanel(id); };
+            Panels.Navigate += id => { if (iconRects.ContainsKey(id) || id == "localsend" || id == "nightlight") TogglePanel(id); };
 
             timer.Interval = 100;
             timer.Tick += (s, e) => Tick();
@@ -351,7 +367,7 @@ namespace MacDock
             CloseMenu();
             if (same) return;
 
-            RectangleF r = iconRects.ContainsKey(id) ? iconRects[id] : new RectangleF(Width - 100, 0, 30, BarHeight);
+            RectangleF r = iconRects.ContainsKey(id) ? iconRects[id] : (id == "localsend" || id == "nightlight") && iconRects.ContainsKey("control") ? iconRects["control"] : new RectangleF(Width - 100, 0, 30, BarHeight);
             panelId = id;
             panel = Panels.Create(id, new Point(Left + (int)(r.Left + r.Width / 2), Top + BarHeight), BarHeight, () =>
             {

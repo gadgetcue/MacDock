@@ -117,41 +117,84 @@ namespace MacDock
     {
         [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out Win32.RECT r);
 
+        // True while a fullscreen app owns the primary display (where the dock, top bar and island sit).
         public static bool Active { get; private set; }
 
         // A normal app window is in front (not the desktop, the shell or an empty foreground): drives the dock's auto-hide.
         public static bool AppInFront { get; private set; }
 
-        static readonly uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern int GetWindowLong(IntPtr h, int index);
+        [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
 
-        // Fullscreen = the foreground window covers its whole monitor. A normally maximized window doesn't:
-        // the top bar reserves screen space, so a maximized window starts below it.
+        static readonly uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        static int lastTick = Environment.TickCount - 1000;
+        static int streak; // consecutive samples that disagree with Active (debounce: a transition never flickers)
+
+        static bool Quns()
+        {
+            try { int st; return SHQueryUserNotificationState(out st) == 0 && (st == 2 || st == 3 || st == 4); } // busy, D3D fullscreen, presentation
+            catch { return false; }
+        }
+
+        // Fullscreen = the foreground window covers its whole (primary) monitor. A normally maximized window (caption + frame,
+        // zoomed) isn't, unless Windows itself reports a fullscreen state. Throttled, so every timer may call it.
         public static void Update()
         {
+            int now = Environment.TickCount;
+            if (now - lastTick < 120) return;
+            lastTick = now;
+
+            bool fs = false;
             IntPtr fg = Win32.GetForegroundWindow();
-            if (fg == IntPtr.Zero) { Active = false; AppInFront = false; return; }
-
-            uint pid;
-            NativeMethods.GetWindowThreadProcessId(fg, out pid);
-            if (pid == self) return; // our own menus or search: keep the current state
-
-            var cls = new StringBuilder(64);
-            NativeMethods.GetClassName(fg, cls, cls.Capacity);
-            string c = cls.ToString();
-            if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd")
+            if (fg == IntPtr.Zero) AppInFront = false;
+            else
             {
-                Active = false;
-                AppInFront = false;
-                return;
+                uint pid;
+                NativeMethods.GetWindowThreadProcessId(fg, out pid);
+                if (pid == self) return; // our own menus or search: keep the current state
+
+                var cls = new StringBuilder(64);
+                NativeMethods.GetClassName(fg, cls, cls.Capacity);
+                string c = cls.ToString();
+                if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") AppInFront = false;
+                else if (!NativeMethods.IsWindowVisible(fg) || NativeMethods.IsIconic(fg)) AppInFront = false;
+                else
+                {
+                    AppInFront = true;
+                    // Task View / Alt-Tab cover the screen but aren't apps.
+                    if (c != "MultitaskingViewFrame" && c != "XamlExplorerHostIslandWindow" && c != "TaskSwitcherWnd" && c != "ForegroundStaging")
+                    {
+                        Win32.RECT r;
+                        GetWindowRect(fg, out r);
+                        System.Windows.Forms.Screen scr = System.Windows.Forms.Screen.FromHandle(fg);
+                        Rectangle bounds = scr.Bounds;
+                        bool covers = r.Left <= bounds.Left && r.Top <= bounds.Top && r.Right >= bounds.Right && r.Bottom >= bounds.Bottom;
+                        if (covers && scr.Primary)
+                        {
+                            bool framed = (GetWindowLong(fg, -16) & 0x00C00000) != 0; // WS_CAPTION
+                            fs = !(framed && IsZoomed(fg)) || Quns();
+                        }
+                    }
+                }
             }
 
-            if (!NativeMethods.IsWindowVisible(fg) || NativeMethods.IsIconic(fg)) { Active = false; AppInFront = false; return; }
-            AppInFront = true;
+            if (fs == Active) { streak = 0; return; }
+            if (++streak >= 2) { streak = 0; Active = fs; if (fs) HideStrays(); }
+        }
 
-            Win32.RECT r;
-            GetWindowRect(fg, out r);
-            Rectangle bounds = System.Windows.Forms.Screen.FromHandle(fg).Bounds;
-            Active = r.Left <= bounds.Left && r.Top <= bounds.Top && r.Right >= bounds.Right && r.Bottom >= bounds.Bottom;
+        // Our topmost popups (menus, panels, previews) would otherwise float over the fullscreen app.
+        static void HideStrays()
+        {
+            try
+            {
+                foreach (System.Windows.Forms.Form f in new System.Collections.ArrayList(System.Windows.Forms.Application.OpenForms))
+                {
+                    string n = f.GetType().Name;
+                    if (f.Visible && (n == "GlassPanel" || n == "MenuPopup" || n == "WindowPreview" || n == "DownloadsFan")) f.Hide();
+                }
+            }
+            catch { }
         }
     }
 

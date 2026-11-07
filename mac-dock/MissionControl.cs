@@ -1,4 +1,4 @@
-// Mission Control: a full-screen overview of every open window, plus an "All Apps" page (like Launchpad)
+﻿// Mission Control: a full-screen overview of every open window, plus an "All Apps" page (like Launchpad)
 // where any installed app can be launched or added to the dock with its + button or by dragging it there.
 //
 // The dock, top bar and island are always-on-top, so they stay visible above this overview and an app
@@ -34,6 +34,7 @@ namespace MacDock
 
         sealed class Tile
         {
+            public string Shown { get { return ItemNames.Display(Target, Name); } }
             public string Name;
             public string Target;       // shell:AppsFolder\<id>
             public Bitmap Icon;
@@ -393,9 +394,9 @@ namespace MacDock
             {
                 Dictionary<string, int> index = LaunchpadOrder.IndexMap();
                 sorted = allTiles.OrderBy(t => { int i; return t.Target != null && index.TryGetValue(t.Target, out i) ? i : int.MaxValue; })
-                    .ThenBy(t => t.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+                    .ThenBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
             }
-            else sorted = allTiles.OrderBy(t => t.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+            else sorted = allTiles.OrderBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
             allTiles.Clear();
             allTiles.AddRange(sorted);
         }
@@ -404,8 +405,8 @@ namespace MacDock
         static List<Tile> SortTiles(List<Tile> list)
         {
             string mode = LaunchpadOrder.Mode;
-            if (mode == "name-asc") return list.OrderBy(t => t.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
-            if (mode == "name-desc") return list.OrderByDescending(t => t.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+            if (mode == "name-asc") return list.OrderBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
+            if (mode == "name-desc") return list.OrderByDescending(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
             return list;
         }
 
@@ -476,11 +477,11 @@ namespace MacDock
                 return;
             }
             tiles = allTiles
-                .Select(t => new { t, rank = t.Name.StartsWith(search, StringComparison.CurrentCultureIgnoreCase) ? 0
-                    : t.Name.IndexOf(" " + search, StringComparison.CurrentCultureIgnoreCase) >= 0 ? 1
-                    : t.Name.IndexOf(search, StringComparison.CurrentCultureIgnoreCase) >= 0 ? 2 : 3 })
+                .Select(t => new { t, rank = t.Shown.StartsWith(search, StringComparison.CurrentCultureIgnoreCase) ? 0
+                    : t.Shown.IndexOf(" " + search, StringComparison.CurrentCultureIgnoreCase) >= 0 ? 1
+                    : t.Shown.IndexOf(search, StringComparison.CurrentCultureIgnoreCase) >= 0 ? 2 : 3 })
                 .Where(x => x.rank < 3)
-                .OrderBy(x => x.rank).ThenBy(x => x.t.Name.Length)
+                .OrderBy(x => x.rank).ThenBy(x => x.t.Shown.Length)
                 .Select(x => x.t)
                 .ToList();
             tiles.AddRange(fileTiles.Take(Math.Max(0, 28 - tiles.Count)));
@@ -1205,7 +1206,7 @@ namespace MacDock
             {
                 foreach (Tile t in tiles)
                 {
-                    stamp = stamp * 31 + (t.Name != null ? t.Name.GetHashCode() : 0);
+                    stamp = stamp * 31 + (t.Shown != null ? t.Shown.GetHashCode() : 0);
                     stamp = stamp * 31 + t.Rect.X * 7 + t.Rect.Y;
                     if (t.Folder != null)
                     {
@@ -1295,7 +1296,7 @@ namespace MacDock
 
             nameFormat.FormatFlags |= StringFormatFlags.NoWrap;
             nameFormat.Trimming = StringTrimming.EllipsisCharacter;
-            g.DrawString(t.Name, titleFont, white, new Rectangle(cell.Left + 6, icon.Bottom + 10, cell.Width - 12, 22), nameFormat);
+            g.DrawString(t.Shown, titleFont, white, new Rectangle(cell.Left + 6, icon.Bottom + 10, cell.Width - 12, 22), nameFormat);
         }
 
         // A rounded glass tile with the first nine apps of the folder in a 3x3 grid, like macOS.
@@ -1328,7 +1329,7 @@ namespace MacDock
             {
                 g.FillPath(fill, p);
                 g.DrawPath(rim, p);
-                g.DrawString("‹  All Apps", titleFont, text, back, Typography.Format(StringAlignment.Center));
+                g.DrawString("â€¹  All Apps", titleFont, text, back, Typography.Format(StringAlignment.Center));
             }
 
             Rectangle name = FolderNameRect;
@@ -2049,8 +2050,8 @@ namespace MacDock
             string mode = LaunchpadOrder.Mode;
             var list = new List<MenuEntry>
             {
-                new MenuEntry { Text = "Name A–Z", Action = () => SetSort("name-asc"), Checked = mode == "name-asc" },
-                new MenuEntry { Text = "Name Z–A", Action = () => SetSort("name-desc"), Checked = mode == "name-desc" },
+                new MenuEntry { Text = "Name Aâ€“Z", Action = () => SetSort("name-asc"), Checked = mode == "name-asc" },
+                new MenuEntry { Text = "Name Zâ€“A", Action = () => SetSort("name-desc"), Checked = mode == "name-desc" },
                 new MenuEntry { Text = "Custom order", Action = () => SetSort("custom"), Checked = mode == "custom" }
             };
             Rectangle r = SortRect;

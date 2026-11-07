@@ -589,6 +589,71 @@ namespace MacDock
         }
     }
 
+    // Mini dock illustration for Settings > Dock: icon size and magnification follow the sliders; the pointer drives the zoom.
+    sealed class SetDockPreview : Control
+    {
+        const int Count = 7;
+        static readonly Color[] Cols = { Color.FromArgb(70, 140, 235), Color.FromArgb(235, 100, 90), Color.FromArgb(90, 190, 120), Color.FromArgb(240, 180, 70), Color.FromArgb(160, 110, 220), Color.FromArgb(70, 190, 200), Color.FromArgb(150, 150, 160) };
+        public int DockSize = 48;
+        public double Magnify = 1.75;
+        float mx = -1;
+
+        public SetDockPreview()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            BackColor = SetUi.Content;
+            Height = 150;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); mx = e.X; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); mx = -1; Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(SetUi.Content);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+            using (var path = SetUi.Round(r, 14))
+            {
+                using (var b = new LinearGradientBrush(r, Color.FromArgb(60, 80, 130), Color.FromArgb(30, 36, 60), 90f)) g.FillPath(b, path);
+                using (var p = new Pen(SetUi.CardLine)) g.DrawPath(p, path);
+            }
+            const float k = 0.6f; // preview scale
+            float s = DockSize * k, gap = 5, pad = 7;
+            float total = Count * s + (Count - 1) * gap;
+            float x0 = (Width - total) / 2f;
+            float center = mx >= 0 ? mx : x0 + total / 2f;
+            // zoom per icon: cosine falloff within ~2.2 icons of the pointer
+            var sc = new float[Count]; var xs = new float[Count];
+            float cx = x0 + s / 2f;
+            float reach = 2.2f * (s + gap), sum = 0;
+            for (int i = 0; i < Count; i++)
+            {
+                float d = Math.Abs(x0 + i * (s + gap) + s / 2f - center);
+                float t = d >= reach ? 0 : (float)(0.5 + 0.5 * Math.Cos(Math.PI * d / reach));
+                sc[i] = 1f + (float)(Magnify - 1) * t;
+                sum += s * sc[i] + (i < Count - 1 ? gap : 0);
+            }
+            float x = (Width - sum) / 2f;
+            float baseY = Height - 22 - pad;
+            float dockH = s + pad * 2;
+            using (var p = SetUi.Round(new RectangleF((Width - sum) / 2f - pad - 4, baseY - s - pad, sum + 2 * pad + 8, dockH), 16))
+            {
+                using (var b = new SolidBrush(Color.FromArgb(90, 255, 255, 255))) g.FillPath(b, p);
+                using (var pen = new Pen(Color.FromArgb(70, 255, 255, 255))) g.DrawPath(pen, p);
+            }
+            for (int i = 0; i < Count; i++)
+            {
+                float sz = s * sc[i];
+                var rc = new RectangleF(x, baseY - sz, sz, sz);
+                using (var p = SetUi.Round(rc, sz * 0.23f))
+                using (var b = new LinearGradientBrush(rc, ControlPaint.Light(Cols[i], 0.25f), Cols[i], 90f)) g.FillPath(b, p);
+                x += sz + gap;
+            }
+        }
+    }
+
     // ---------- power and wallpaper plumbing ----------
 
     static class SetSys
@@ -1151,9 +1216,29 @@ namespace MacDock
         {
             if (instance == null || instance.IsDisposed) instance = new SettingsForm();
             if (page != null) instance.GoTo(page, true);
+            if (instance.Visible) { instance.WindowState = FormWindowState.Normal; instance.Activate(); return; }
+            // Build everything off-screen at opacity 0, let it paint fully, then fade in.
+            instance.Opacity = 0;
+            instance.CreateControl();
+            instance.PerformLayout();
             instance.Show();
             instance.WindowState = FormWindowState.Normal;
             instance.Activate();
+            instance.Update();
+            var f = instance;
+            Point home = f.Location;
+            var sw = Stopwatch.StartNew();
+            var t = new System.Windows.Forms.Timer { Interval = 15 };
+            t.Tick += (s, e) =>
+            {
+                if (f.IsDisposed || f.WindowState != FormWindowState.Normal) { t.Dispose(); if (!f.IsDisposed) f.Opacity = 1; return; }
+                double k = Math.Min(1.0, sw.ElapsedMilliseconds / 180.0), ease = 1 - Math.Pow(1 - k, 3);
+                f.Opacity = ease;
+                f.Location = new Point(home.X, home.Y + (int)Math.Round(10 * (1 - ease)));
+                if (k >= 1.0) t.Dispose();
+            };
+            f.Location = new Point(home.X, home.Y + 10);
+            t.Start();
         }
 
         readonly SetSide side = new SetSide();
@@ -1308,6 +1393,13 @@ namespace MacDock
             Color[] dots = { Color.FromArgb(255, 95, 87), Color.FromArgb(254, 188, 46), Color.FromArgb(40, 200, 64) };
             for (int i = 0; i < 3; i++)
                 using (var b = new SolidBrush(dots[i])) g.FillEllipse(b, 20 + i * 26, 20, 16, 16);
+            if (lightsHover)
+                using (var p = new Pen(Color.FromArgb(150, 0, 0, 0), 2.2f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                {
+                    g.DrawLine(p, 24.5f, 24.5f, 31.5f, 31.5f); g.DrawLine(p, 31.5f, 24.5f, 24.5f, 31.5f);
+                    g.DrawLine(p, 50.5f, 28f, 57.5f, 28f);
+                    g.DrawLine(p, 76.5f, 28f, 83.5f, 28f); g.DrawLine(p, 80f, 24.5f, 80f, 31.5f);
+                }
             using (var p = new Pen(SetUi.Dim, 1.6f)) { p.EndCap = LineCap.Round; g.DrawEllipse(p, 30, 66, 9, 9); g.DrawLine(p, 38, 74, 42, 78); } // magnifier in the search pill
 
             // back / forward pill
@@ -1325,6 +1417,11 @@ namespace MacDock
             TextRenderer.DrawText(g, TitleOf(side.Selected), Typography.Text(15f, Weight.Semibold), new Rectangle(SideW + 90, 0, Math.Max(0, Width - SideW - 104), TopH), SetUi.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
 
+        bool lightsHover;
+        void SetLightsHover(bool v) { if (v != lightsHover) { lightsHover = v; Invalidate(new Rectangle(10, 10, 90, 36)); } }
+        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); SetLightsHover(e.X >= 14 && e.X < 92 && e.Y >= 14 && e.Y < 42); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); SetLightsHover(false); }
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -1336,6 +1433,7 @@ namespace MacDock
                 {
                     if (dot == 0) { Close(); return; }
                     if (dot == 1) { WindowState = FormWindowState.Minimized; return; }
+                    if (dot == 2) { MaximizedBounds = Screen.FromControl(this).WorkingArea; WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; return; }
                 }
             }
             if (e.X >= SideW + 14 && e.X < SideW + 72 && e.Y >= 17 && e.Y < 45)
@@ -1360,7 +1458,7 @@ namespace MacDock
         protected override CreateParams CreateParams
         {
             // CS_DROPSHADOW, plus WS_THICKFRAME so the borderless window can be dragged by its edges.
-            get { var cp = base.CreateParams; cp.ClassStyle |= 0x20000; cp.Style = (cp.Style | 0x40000) & ~0xC00000; return cp; }
+            get { var cp = base.CreateParams; cp.ClassStyle |= 0x20000; cp.Style = (cp.Style | 0x40000) & ~0xC00000; cp.ExStyle |= 0x02000000; /* WS_EX_COMPOSITED: no child flicker */ return cp; }
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -2027,6 +2125,33 @@ namespace MacDock
 
                 case "dock":
                     Head("Dock");
+                    {
+                        var prev = new SetDockPreview();
+                        prev.Tag = "card";
+                        prev.DockSize = DockForm.CurrentSize; prev.Magnify = DockForm.CurrentMagnify;
+                        Add(prev);
+                        double lastMag = DockForm.CurrentMagnify > 1.0 ? DockForm.CurrentMagnify : 1.75;
+                        double sizeSpan = DockForm.MaxSize - DockForm.MinSize, magLo = 1.2, magSpan = DockForm.MaxMagnify - 1.2;
+                        SetCard dc = NewCard();
+                        SetSlider magSlider = null;
+                        Action<int, double> push = (sz, mg) => { prev.DockSize = sz; prev.Magnify = mg; prev.Invalidate(); DockForm.Instance.ApplyDockSize(sz, mg); };
+                        SliderRow(dc, "Size", (DockForm.CurrentSize - DockForm.MinSize) / sizeSpan, true,
+                            v => push((int)Math.Round(DockForm.MinSize + v * sizeSpan), DockForm.CurrentMagnify));
+                        bool magOn = DockForm.CurrentMagnify > 1.0 + 0.001;
+                        SetRow mt = null;
+                        mt = Toggle(dc, "Magnification", magOn, on =>
+                        {
+                            if (magSlider != null) magSlider.Enabled = on;
+                            push(DockForm.CurrentSize, on ? lastMag : 1.0);
+                        });
+                        SetRow mr = SliderRow(dc, "Magnification amount", Math.Max(0, (lastMag - magLo) / magSpan), magOn, v =>
+                        {
+                            lastMag = magLo + v * magSpan;
+                            push(DockForm.CurrentSize, lastMag);
+                        });
+                        magSlider = (SetSlider)mr.Widget;
+                        Note("Small to large. The preview follows your pointer. These are the same settings as Dock Size and Magnification in the dock's right-click menu.");
+                    }
                     c = NewCard();
                     Toggle(c, "Show Dock", SetCfg.GetBool("show-dock", true), v => { SetCfg.SetBool("show-dock", v); DockForm.Instance.ApplyDockMode(); });
                     Toggle(c, "Auto-hide Dock", SetCfg.GetBool("auto-hide-dock", false), v => { SetCfg.SetBool("auto-hide-dock", v); DockForm.Instance.ApplyDockMode(); });

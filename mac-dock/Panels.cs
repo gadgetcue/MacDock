@@ -452,7 +452,7 @@ namespace MacDock
             using (var b = new SolidBrush(iconFill)) g.FillEllipse(b, ic);
             DrawGlyph(g, r.Glyph, ic, Lerp(fg, glyphOn, t), iconFill);
 
-            var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
+            var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             bool noSub = string.IsNullOrEmpty(r.Sub);
             using (var tb = new SolidBrush(fg))
                 g.DrawString(r.Text, tileTitle, tb, new Rectangle(rc.Left + 58, rc.Top + (noSub ? 22 : 12), rc.Width - 66, 20), left);
@@ -508,11 +508,33 @@ namespace MacDock
             GlassBase(g, rc, 32, hot);
             Color fg = light ? Color.FromArgb(28, 28, 30) : Color.White;
             MediaInfo m = Feed.Media;
-            var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
+            var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             // Artwork placeholder top-left, title in the middle-left, controls along the bottom.
             FillRound(g, new Rectangle(rc.Left + 18, rc.Top + 16, 44, 44), 10, Color.FromArgb(light ? 40 : 52, light ? 0 : 255, light ? 0 : 255, light ? 0 : 255));
+            if (m != null && m.Art != null)
+            {
+                var ar = new Rectangle(rc.Left + 18, rc.Top + 16, 44, 44);
+                using (var gp = new System.Drawing.Drawing2D.GraphicsPath())
+                {
+                    gp.AddArc(ar.X, ar.Y, 20, 20, 180, 90); gp.AddArc(ar.Right - 20, ar.Y, 20, 20, 270, 90);
+                    gp.AddArc(ar.Right - 20, ar.Bottom - 20, 20, 20, 0, 90); gp.AddArc(ar.X, ar.Bottom - 20, 20, 20, 90, 90);
+                    gp.CloseFigure();
+                    var oldClip = g.Clip; var oi = g.InterpolationMode;
+                    g.SetClip(gp, System.Drawing.Drawing2D.CombineMode.Intersect);
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    int sz = Math.Min(m.Art.Width, m.Art.Height);
+                    g.DrawImage(m.Art, ar, (m.Art.Width - sz) / 2, (m.Art.Height - sz) / 2, sz, sz, GraphicsUnit.Pixel);
+                    g.InterpolationMode = oi; g.Clip = oldClip;
+                }
+            }
+            bool hasArtist = m != null && !string.IsNullOrEmpty(m.Artist);
+            int tx = rc.Left + 72, tw = Math.Max(10, rc.Right - 18 - tx);
             using (var tb = new SolidBrush(fg))
-                g.DrawString(m != null && !string.IsNullOrEmpty(m.Title) ? m.Title : "Not Playing", tileTitle, tb, new Rectangle(rc.Left + 18, rc.Top + 70, rc.Width - 36, 20), left);
+            using (var ab = new SolidBrush(Color.FromArgb(150, fg)))
+            {
+                g.DrawString(m != null && !string.IsNullOrEmpty(m.Title) ? m.Title : "Not Playing", tileTitle, tb, new Rectangle(tx, rc.Top + (hasArtist ? 16 : 26), tw, 22), left);
+                if (hasArtist) g.DrawString(m.Artist, tileTitle, ab, new Rectangle(tx, rc.Top + 38, tw, 22), left);
+            }
 
             r.Hits.Clear();
             float by = rc.Bottom - 34, cx = rc.Left + rc.Width / 2f;
@@ -652,7 +674,7 @@ namespace MacDock
                     g.DrawPath(rim, path);
                 }
 
-                var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
+                var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
                 var right = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Alignment = StringAlignment.Far, Trimming = StringTrimming.EllipsisCharacter };
 
                 using (var textBrush = new SolidBrush(text))
@@ -897,12 +919,14 @@ namespace MacDock
             using (var b = new SolidBrush(iconFill)) g.FillEllipse(b, ic);
             DrawGlyph(g, r.Glyph, ic, Lerp(glyphOff, glyphOn, t), iconFill);
 
-            var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
+            var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             using (var tb = new SolidBrush(Lerp(textOff, textOn, t)))
-                g.DrawString(r.Text, tileTitle, tb, new Rectangle(rc.Left + 58, rc.Top + 12, rc.Width - 70, 20), left);
+                g.DrawString(r.Text, tileTitle, tb, new Rectangle(rc.Left + 58, string.IsNullOrEmpty(r.Sub) ? rc.Top + (rc.Height - 20) / 2 : rc.Top + 12, rc.Width - 66, 20), left);
             using (var sb = new SolidBrush(Lerp(subOff, subOn, t)))
-                g.DrawString(r.Sub ?? "", small, sb, new Rectangle(rc.Left + 58, rc.Top + 32, rc.Width - 70, 18), left);
+                g.DrawString(r.Sub ?? "", small, sb, new Rectangle(rc.Left + 58, rc.Top + 32, rc.Width - 66, 18), left);
         }
+
+        static Bitmap lsLogo;
 
         static void DrawGlyph(Graphics g, string glyph, Rectangle ic, Color c, Color cut)
         {
@@ -921,13 +945,28 @@ namespace MacDock
                             g.DrawString(ch, glyphFont, b, new RectangleF(ic.Left, ic.Top, ic.Width, ic.Height), center);
                         break;
                     }
-                    case "airdrop":
-                    case "airdropoff":
-                        g.FillEllipse(b, cx - 2.5f, cy - 2.5f, 5, 5);
-                        g.DrawArc(pen, cx - 6, cy - 6, 12, 12, 200, 140);
-                        g.DrawArc(pen, cx - 10, cy - 10, 20, 20, 200, 140);
-                        if (glyph == "airdropoff") g.DrawLine(pen, cx - 10, cy - 10, cx + 10, cy + 10);
+                    case "localsend":
+                    {
+                        // the real LocalSend logo (embedded resource), filling the icon circle
+                        if (lsLogo == null)
+                            try { using (var s = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("localsend.png")) lsLogo = new Bitmap(s); } catch { }
+                        if (lsLogo != null)
+                        {
+                            var old = g.InterpolationMode; g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                            // white monochrome logo, tinted to the glyph colour like the other icons
+                            var cm = new ColorMatrix(new float[][] {
+                                new float[] { 0, 0, 0, 0, 0 }, new float[] { 0, 0, 0, 0, 0 }, new float[] { 0, 0, 0, 0, 0 },
+                                new float[] { 0, 0, 0, c.A / 255f, 0 }, new float[] { c.R / 255f, c.G / 255f, c.B / 255f, 0, 1 } });
+                            using (var ia = new ImageAttributes())
+                            {
+                                ia.SetColorMatrix(cm);
+                                const int S = 24;
+                                g.DrawImage(lsLogo, new Rectangle(ic.Left + (ic.Width - S) / 2, ic.Top + (ic.Height - S) / 2, S, S), 0, 0, lsLogo.Width, lsLogo.Height, GraphicsUnit.Pixel, ia);
+                            }
+                            g.InterpolationMode = old;
+                        }
                         break;
+                    }
                     case "dark":
                         g.DrawEllipse(pen, cx - 8, cy - 8, 16, 16);
                         g.FillPie(b, cx - 8, cy - 8, 16, 16, 90, 180);
@@ -937,8 +976,30 @@ namespace MacDock
                         using (var cutBrush = new SolidBrush(cut)) g.FillEllipse(cutBrush, cx - 4, cy - 10, 13, 13);
                         break;
                     case "warm":
-                        using (var amber = new SolidBrush(Color.FromArgb(255, 159, 10))) g.FillEllipse(amber, cx - 6, cy - 6, 12, 12);
+                    {
+                        // sun: disc with eight rays (Night light)
+                        g.FillEllipse(b, cx - 4.5f, cy - 4.5f, 9, 9);
+                        for (int k = 0; k < 8; k++)
+                        {
+                            double a = k * Math.PI / 4;
+                            g.DrawLine(pen, cx + (float)Math.Cos(a) * 7.5f, cy + (float)Math.Sin(a) * 7.5f, cx + (float)Math.Cos(a) * 10f, cy + (float)Math.Sin(a) * 10f);
+                        }
                         break;
+                    }
+                    case "project":
+                        // two overlapping screens
+                        g.DrawRectangle(pen, cx - 9, cy - 8, 12, 9);
+                        g.FillRectangle(b, cx - 3, cy - 3, 12, 9);
+                        break;
+                    case "saver":
+                    {
+                        // battery with a plus
+                        g.DrawRectangle(pen, cx - 9, cy - 5, 16, 10);
+                        g.FillRectangle(b, cx + 8, cy - 2, 2, 4);
+                        using (var cutBrush = new SolidBrush(cut))
+                        { g.FillRectangle(cutBrush, cx - 6.5f, cy - 0.9f, 11, 1.8f); g.FillRectangle(cutBrush, cx - 1.9f, cy - 3.5f, 1.8f, 7); }
+                        break;
+                    }
                 }
             }
         }
@@ -1078,6 +1139,8 @@ namespace MacDock
                 case "sound": rows = SoundRows(null, null); break;
                 case "battery": rows = BatteryRows(); break;
                 case "control": rows = new List<PanelRow>(); break;
+                case "localsend": rows = new List<PanelRow> { PanelRow.Title("LocalSend"), PanelRow.Info("Status", "Looking for devices...") }; break;
+                case "nightlight": rows = NightLightRows(); break;
                 default: rows = ProfileRows(); break;
             }
 
@@ -1088,6 +1151,7 @@ namespace MacDock
             else if (id == "bluetooth") Background(panel, BluetoothRows);
             else if (id == "sound") Background(panel, () => { string def; List<string> outs = DeviceFeed.AudioOutputs(out def); return SoundRows(outs, def); });
             else if (id == "control") Background(panel, ControlRows);
+            else if (id == "localsend") Background(panel, () => LocalSendRows(panel));
             return panel;
         }
 
@@ -1103,6 +1167,46 @@ namespace MacDock
                 }
                 catch { }
             });
+        }
+
+        // Quick pass (multicast, ~1 s) shows the list straight away; the subnet scan then runs behind it and refreshes the list.
+        static List<PanelRow> LocalSendRows(GlassPanel panel, bool scan = false)
+        {
+            LocalSendNode n = LocalSend.Node;
+            var rows = new List<PanelRow>();
+            if (n == null) { rows.Add(PanelRow.Title("LocalSend")); rows.Add(PanelRow.Info("Status", LocalSend.Status)); return rows; }
+            rows.Add(PanelRow.Title("LocalSend", n.ReceiveEnabled, on => n.ReceiveEnabled = on));
+            if (!scan)
+            {
+                n.Discover(false);
+                System.Threading.Thread.Sleep(1200);
+                Task.Run(() =>
+                {
+                    try { n.Discover(true); } catch { }
+                    try { if (!panel.IsDisposed) panel.BeginInvoke(new Action(() => panel.SetRows(LocalSendRows(panel, true)))); } catch { }
+                });
+            }
+            List<LsPeer> peers = n.Peers();
+            rows.Add(PanelRow.Header("↓ RECEIVE"));
+            rows.Add(PanelRow.Info("This device", n.Alias));
+            string leaf = System.IO.Path.GetFileName(n.SaveDir.TrimEnd('\\', '/'));
+            rows.Add(PanelRow.Item("Save to  (change...)", string.IsNullOrEmpty(leaf) ? n.SaveDir : leaf, false, LocalSend.ChooseFolder));
+            if (!n.ReceiveEnabled) rows.Add(PanelRow.Info("Receiving", "Off (switch above)"));
+            rows.Add(PanelRow.Separator());
+            rows.Add(PanelRow.Header("↑ SEND TO"));
+            if (peers.Count == 0) rows.Add(PanelRow.Info("None found", "Open LocalSend on another device"));
+            foreach (LsPeer p in peers.Take(8))
+            {
+                LsPeer peer = p;
+                rows.Add(PanelRow.Item(peer.Alias, peer.Ip + (string.IsNullOrEmpty(peer.Model) ? "" : "  " + peer.Model), false, () => LocalSend.PickAndSend(peer)));
+            }
+            rows.Add(PanelRow.Separator());
+            PanelRow rescan = PanelRow.Button("Rescan", null);
+            rescan.KeepOpen = true;
+            rescan.Click = () => Background(panel, () => LocalSendRows(panel));
+            rows.Add(rescan);
+            if (!string.IsNullOrEmpty(LocalSend.Status)) rows.Add(PanelRow.Info("Last", LocalSend.Status));
+            return rows;
         }
 
         static List<PanelRow> WifiRows()
@@ -1242,13 +1346,13 @@ namespace MacDock
 
 
             PanelRow w = RadioTile("Wi-Fi", "WiFi", wifi, "wifi", "ms-settings:network-wifi");
-            if (wifi == true && !string.IsNullOrEmpty(ssid)) w.Sub = ssid;
+            if (wifi == true && !string.IsNullOrWhiteSpace(ssid)) w.Sub = ssid.Trim();
             rows.Add(PanelRow.At(w, 0, 0, Col, Row));
             rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Media, Text = "Now Playing" }, xr, 0, Col, Row * 2 + Gap));
             rows.Add(PanelRow.At(RadioTile("Bluetooth", "Bluetooth", bluetooth, "bluetooth", "ms-settings:bluetooth"), 0, Row + Gap, Col, Row));
 
             int y3 = (Row + Gap) * 2;
-            rows.Add(PanelRow.At(PanelRow.Tile("AirDrop", "Off", "airdropoff", false, false, Open("ms-settings:crossdevice")), 0, y3, Col, Row));
+            rows.Add(PanelRow.At(PanelRow.Tile("LocalSend", "", "localsend", false, false, Go("localsend")), 0, y3, Col, Row));
             rows.Add(PanelRow.At(round("stage", "Stage", () => WinUtil.Combo(WinUtil.VK_LWIN, 0x09)), xr, y3, Row, Row));
             rows.Add(PanelRow.At(round("mirror", "Mirroring", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'K')), W - Row, y3, Row, Row));
 
@@ -1258,6 +1362,12 @@ namespace MacDock
             rows.Add(PanelRow.At(round("sidebar", "Sidebar", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'W')), W - Row, y4, Row, Row));
 
             int y5 = y4 + Row + Gap;
+            rows.Add(PanelRow.At(NightLightTile(), 0, y5, Col, Row));
+            rows.Add(PanelRow.At(PanelRow.Tile("Project", "", "project", false, false, () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'P')), xr, y5, Col, Row));
+            y5 += Row + Gap;
+            rows.Add(PanelRow.At(BatterySaverTile(), 0, y5, Col, Row));
+            rows.Add(PanelRow.At(AirplaneTile(wifi, bluetooth), xr, y5, Col, Row));
+            y5 += Row + Gap;
             if (brightness >= 0)
             {
                 PanelRow sun = PanelRow.Slider(brightness / 100.0, v => Brightness.SetLatest((int)Math.Round(v * 100)));
@@ -1299,14 +1409,64 @@ namespace MacDock
         {
             bool? on = NightLight.IsOn();
             if (on == null) return PanelRow.Tile("Night Light", "Opens Settings", "warm", false, true, Open("ms-settings:nightlight"));
-            PanelRow tile = PanelRow.Tile("Night Light", on.Value ? "On" : "Off", "warm", on.Value, true, null);
+            return PanelRow.Tile("Night Light", on.Value ? "On" : "Off", "warm", on.Value, true, Go("nightlight"));
+        }
+
+        // Night Light menu: on/off switch and the strength slider (colour temperature, 6500 K = 0% down to 1200 K = 100%).
+        static List<PanelRow> NightLightRows()
+        {
+            bool? on = NightLight.IsOn();
+            var rows = new List<PanelRow>();
+            rows.Add(PanelRow.Title("Night Light", on, v => Task.Run(() => NightLight.Set(v))));
+            int pct = NightLight.Strength();
+            if (pct >= 0)
+            {
+                PanelRow s = PanelRow.Slider(pct / 100.0, v => NightLight.SetStrengthLatest((int)Math.Round(v * 100)));
+                rows.Add(PanelRow.Header("Strength"));
+                rows.Add(s);
+            }
+            else rows.Add(PanelRow.Info("Strength", "Not available"));
+            rows.Add(PanelRow.Separator());
+            rows.Add(PanelRow.Button("Night Light Settings...", Open("ms-settings:nightlight")));
+            return rows;
+        }
+
+        // Battery saver: state comes from Windows' power status; there is no public toggle, so a click opens its Settings page.
+        static PanelRow BatterySaverTile()
+        {
+            // Windows has no direct switch. Setting the "turn on at" level to 100% makes it engage whenever the PC runs on
+            // battery (immediately if already unplugged); 0 turns that off. The tile reads the real state plus that setting.
+            bool live = SetSys.BatterySaverOn();
+            bool armed = SetSys.BatterySaverLevel() >= 100;
+            PanelRow tile = PanelRow.Tile("Battery", live ? "Saver on" : armed ? "Saver armed" : "Saver off", "saver", live || armed, true, null);
+            tile.KeepOpen = true;
+            tile.Click = () =>
+            {
+                tile.Active = !tile.Active;
+                tile.Sub = tile.Active ? "Saver on" : "Saver off";
+                bool want = tile.Active;
+                Task.Run(() => SetSys.SetBatterySaverLevel(want ? 100 : 0));
+            };
+            return tile;
+        }
+
+        // Airplane mode = every radio off. Uses the same Radio API as Windows' own switch for Wi-Fi and Bluetooth.
+        static PanelRow AirplaneTile(bool? wifi, bool? bt)
+        {
+            if (!wifi.HasValue && !bt.HasValue) return PanelRow.Tile("Airplane", "Not available", "airplane", false, true, Open("ms-settings:network-airplanemode"));
+            bool on = wifi != true && bt != true;
+            PanelRow tile = PanelRow.Tile("Airplane", on ? "On" : "Off", "airplane", on, true, null);
             tile.KeepOpen = true;
             tile.Click = () =>
             {
                 tile.Active = !tile.Active;
                 tile.Sub = tile.Active ? "On" : "Off";
-                bool want = tile.Active;
-                Task.Run(() => NightLight.Set(want));
+                bool air = tile.Active;
+                Task.Run(() =>
+                {
+                    if (wifi.HasValue) DeviceFeed.SetRadio("WiFi", !air);
+                    if (bt.HasValue) DeviceFeed.SetRadio("Bluetooth", !air);
+                });
             };
             return tile;
         }

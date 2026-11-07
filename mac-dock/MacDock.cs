@@ -56,6 +56,8 @@ namespace MacDock
                 return;
             }
 
+            if (args.Any(a => a.Equals("--ls-selftest", StringComparison.OrdinalIgnoreCase))) { Environment.ExitCode = LocalSendTest.Run(args); return; }
+
             bool created;
             using (new System.Threading.Mutex(true, "MacDockSingleInstance", out created))
             {
@@ -107,7 +109,7 @@ namespace MacDock
                         if (!dock.IsHandleCreated || dock.IsDisposed) return;
                         dock.BeginInvoke((Action)(() =>
                         {
-                            try { dock.Reassert(); bar.Reposition(); island.Reposition(); DockForm.KeepOnTop(bar); DockForm.KeepOnTop(island); } catch (Exception ex) { Log(ex); }
+                            try { dock.Reassert(); bar.Reposition(); island.Reposition(); if (!Fullscreen.Active) { DockForm.KeepOnTop(bar); DockForm.KeepOnTop(island); } } catch (Exception ex) { Log(ex); }
                         }));
                     }
                     catch (Exception ex) { Log(ex); }
@@ -124,6 +126,7 @@ namespace MacDock
 
                 try
                 {
+                    LocalSend.EnsureStarted();
                     bar.Show();
                     island.Show();
                     Feed.Start();
@@ -133,7 +136,9 @@ namespace MacDock
                         try
                         {
                             if (dock.IsDisposed) return;
-                            if (!Fullscreen.Active && !dock.Visible) { dock.Show(); dock.Reassert(); }
+                            Fullscreen.Update();
+                            if (Fullscreen.Active) return; // a fullscreen app owns the display: leave dock, bar and island hidden
+                            if (!dock.Visible) { dock.Show(); dock.Reassert(); }
                             else DockForm.KeepOnTop(dock);
                             if (!bar.Visible) bar.Show();
                             if (!island.Visible) island.Show();
@@ -404,13 +409,13 @@ namespace MacDock
 
     sealed class DockForm : Form
     {
-        const int BaseSize = 48;        // icon size at rest (px)
-        const double MaxScale = 1.75;   // magnification under the cursor
+        static int BaseSize = 48;       // icon size at rest (px); see docksize.txt
+        static double MaxScale = 1.75;  // magnification under the cursor; 1 = off
         const int Gap = 8;              // space between icons
         const int GroupGap = 14;        // extra space between sections
         const int PadX = 12, PadY = 8;  // inner padding of the dock pill
         const int BottomMargin = 8;     // space between dock and the bottom of the screen
-        const int FormHeight = 150;     // room above the pill for magnified icons and labels
+        static int FormHeight { get { return (int)Math.Ceiling(BaseSize * Math.Max(1.0, MaxScale)) + 66; } }
         const int IconSource = 96;      // stored icon resolution, enough for max zoom
 
         // Motion. Magnification is a nearly critically damped spring: quick, no wobble. The launch bounce is
@@ -465,12 +470,12 @@ namespace MacDock
         MenuPopup popup; // the open right-click menu, if any
         Item previewItem;
         DateTime lastPreviewClose = DateTime.MinValue;
-        WindowPreview preview; // window thumbnails shown while hovering an app with several windows
+        Form preview; // window thumbnails shown while hovering an app with several windows
         DateTime hoverSince = DateTime.UtcNow;
         readonly Font labelFont = Typography.Text(9.5f, Weight.Medium);
         readonly Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
         readonly string configPath = AppPaths.Config;
-        readonly int pillHeight = BaseSize + 2 * PadY;
+        static int pillHeight { get { return BaseSize + 2 * PadY; } }
 
         List<Entry> entries = new List<Entry>();
         bool hideTaskbar = true;
@@ -495,8 +500,8 @@ namespace MacDock
         Spring hideSpring = new Spring(0);
         int fullscreenTick;
         const double HideOmega = 22, HideZeta = 1.0;
-        const float HideDistance = PillHeightConst + BottomMargin + 14;
-        const int PillHeightConst = BaseSize + 2 * PadY;
+        static float HideDistance { get { return PillHeightConst + BottomMargin + 14; } }
+        static int PillHeightConst { get { return BaseSize + 2 * PadY; } }
 
         public static DockForm Instance { get; private set; }
 
@@ -583,9 +588,45 @@ namespace MacDock
             Win32.SHAppBarMessage(1, ref data); // ABM_REMOVE
         }
 
+        // Dock size / magnification, kept next to the exe in docksize.txt ("size=48" / "magnify=1.75").
+        static string SizeFile { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "docksize.txt"); } }
+        static void LoadSize()
+        {
+            try
+            {
+                foreach (string line in File.ReadAllLines(SizeFile))
+                {
+                    string[] kv = line.Split('=');
+                    double v;
+                    if (kv.Length != 2 || !double.TryParse(kv[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v)) continue;
+                    if (kv[0].Trim() == "size") BaseSize = (int)Math.Max(28, Math.Min(88, v));
+                    else if (kv[0].Trim() == "magnify") MaxScale = Math.Max(1.0, Math.Min(2.2, v));
+                }
+            }
+            catch { }
+        }
+
+        public static int CurrentSize { get { return BaseSize; } }
+        public static double CurrentMagnify { get { return MaxScale; } }
+        public const int MinSize = 28, MaxSize = 88;
+        public const double MinMagnify = 1.0, MaxMagnify = 2.2;
+        public void ApplyDockSize(int size, double magnify) { SetDockSize(size, magnify); }
+
+        void SetDockSize(int size, double magnify)
+        {
+            BaseSize = Math.Max(28, Math.Min(88, size));
+            MaxScale = Math.Max(1.0, Math.Min(2.2, magnify));
+            try { File.WriteAllText(SizeFile, "size=" + BaseSize + "\nmagnify=" + MaxScale.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n"); } catch { }
+            if (preview != null) preview.Close();
+            FitCanvas();
+            if (ShowDockOn && !AutoHideOn && IsHandleCreated) ReserveBottom();
+            Invalidate();
+        }
+
         public DockForm()
         {
             Instance = this;
+            LoadSize();
             ReadDockSwitches();
             Genie.Install(); // the minimize / restore effect watches for windows being minimized and restored
             FormBorderStyle = FormBorderStyle.None;
@@ -709,7 +750,8 @@ namespace MacDock
             if (hoverIndex >= 0 && hoverIndex < items.Count)
             {
                 Item it = items[hoverIndex];
-                SizeF size = g.MeasureString(it.Label, labelFont, 400, StringFormat.GenericTypographic);
+                string shown = ItemNames.Display(it.Target, it.Label);
+                SizeF size = g.MeasureString(shown, labelFont, 400, StringFormat.GenericTypographic);
                 float cx = it.Rect.Left + it.Rect.Width / 2f;
                 float w = size.Width + 20, h = 24;
                 float x = Math.Max(4, Math.Min(Width - w - 4, cx - w / 2));
@@ -722,7 +764,7 @@ namespace MacDock
                     g.FillPolygon(b, new[] { new PointF(cx - 6, y + h - 0.5f), new PointF(cx + 6, y + h - 0.5f), new PointF(cx, y + h + 6) });
                 }
                 using (var tb = new SolidBrush(Color.White))
-                    g.DrawString(it.Label, labelFont, tb, new RectangleF(x, y, w, h), Typography.Format(StringAlignment.Center));
+                    g.DrawString(shown, labelFont, tb, new RectangleF(x, y, w, h), Typography.Format(StringAlignment.Center));
             }
         }
 
@@ -902,7 +944,7 @@ namespace MacDock
             if (hoverChanged) hoverSince = DateTime.UtcNow;
             // Moving straight from one icon to the next swaps the popup at once (no dwell, no gap); the old one closes
             // in the same tick the new one opens, so nothing flashes in between.
-            if (hover >= 0 && preview != null && previewItem != items[hover] && popup == null && dragItem == null)
+            if (hover >= 0 && preview != null && (previewItem == null || previewItem.Key != items[hover].Key) && popup == null && dragItem == null)
             {
                 preview.Close();
                 ShowPreview(items[hover]);
@@ -1140,7 +1182,7 @@ namespace MacDock
             if (hideTaskbar) TaskbarControl.EnsureHidden();
             Genie.Abort(); // an effect in flight was laid out for the old display
             UpdateReservation(); // moves the reserved strip to the display that is main now
-            if (!ShowDockOn) return; // a hidden dock stays hidden through sleep, unlock and display changes
+            if (!ShowDockOn || Fullscreen.Active) return; // a hidden dock stays hidden through sleep, unlock and display changes
             FitCanvas();
             KeepOnTop(this);
             Redraw();
@@ -1414,9 +1456,26 @@ namespace MacDock
         void ShowPreview(Item it)
         {
             hoverSince = DateTime.MaxValue; // once per hover
+            if (it.Kind == Kind.Folder)
+            {
+                Item dt = it;
+                DownloadsFan fan = null;
+                fan = new DownloadsFan(Environment.ExpandEnvironmentVariables(it.Target), PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), (int)it.Rect.Top - 44)), sp =>
+                {
+                    // The whole column from the icon down to the screen edge counts, so resting on the icon never closes the fan.
+                    Item cur = items.FirstOrDefault(x => x.Key == dt.Key) ?? dt; Rectangle r = RectangleToScreen(Rectangle.Round(cur.Rect));
+                    r.Inflate(8, 0);
+                    r.Y -= 60; r.Height = Screen.FromPoint(sp).Bounds.Bottom - r.Y + 40;
+                    return r.Contains(sp);
+                }, () => { if (preview == fan) { preview = null; lastPreviewClose = DateTime.UtcNow; } });
+                preview = fan;
+                previewItem = it;
+                fan.Show();
+                return;
+            }
             var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
             if (live.Count < 1) return;
-            Point c = PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), (int)it.Rect.Top - 18));
+            Point c = PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), (int)it.Rect.Top - 44));
             Item target = it;
             WindowPreview pv = null;
             pv = new WindowPreview(live, it.Icon, c, FocusWindow, sp =>
@@ -1711,7 +1770,7 @@ namespace MacDock
             }
             else if (it != null)
             {
-                list.Add(MenuEntry.Item(it.Label, null, null)); // header, greyed out
+                list.Add(MenuEntry.Item(ItemNames.Display(it.Target, it.Label), null, null)); // header, greyed out
 
                 if (it.Handles != null && it.Handles.Count > 0)
                 {
@@ -1734,6 +1793,41 @@ namespace MacDock
                 list.Add(MenuEntry.Sep());
             }
 
+            if (it != null && (it.Kind == Kind.App || it.Kind == Kind.Folder || it.Kind == Kind.Url || it.Kind == Kind.File))
+            {
+                Item rn = it;
+                list.Add(MenuEntry.Item("Rename...", null, () => BeginInvoke((Action)(() =>
+                {
+                    string curName = ItemNames.Display(rn.Target, rn.Label);
+                    string r = RenameBox.Show(curName);
+                    if (r == null || r == curName) return;
+                    ItemNames.Set(rn.Target, r);
+                    Invalidate();
+                }))));
+                if (ItemNames.Get(rn.Target) != null)
+                    list.Add(MenuEntry.Item("Reset Name", null, () => { ItemNames.Set(rn.Target, null); Invalidate(); }));
+                list.Add(MenuEntry.Sep());
+            }
+
+            if (it != null && it.Kind == Kind.Folder)
+            {
+                string cur = DownloadsFan.GetStyle();
+                list.Add(MenuEntry.Item((cur == "fan" ? "✓ " : "    ") + "View as Fan", null, () => DownloadsFan.SetStyle("fan")));
+                list.Add(MenuEntry.Item((cur == "grid" ? "✓ " : "    ") + "View as Grid", null, () => DownloadsFan.SetStyle("grid")));
+                list.Add(MenuEntry.Item((cur == "list" ? "✓ " : "    ") + "View as List", null, () => DownloadsFan.SetStyle("list")));
+                list.Add(MenuEntry.Sep());
+                string folderPath = it.Target;
+                string curColor = FolderColor.Get(folderPath);
+                foreach (var fc in FolderColor.Choices)
+                {
+                    string cname = fc.Key;
+                    var me = MenuEntry.Item((curColor == cname ? "✓ " : "    ") + "Folder Color: " + cname, null, () => { FolderColor.Set(folderPath, cname); RefreshIcons(); });
+                    me.Dot = fc.Value;
+                    list.Add(me);
+                }
+                list.Add(MenuEntry.Item("    Folder Color: Reset", null, () => { FolderColor.Set(folderPath, null); RefreshIcons(); }));
+                list.Add(MenuEntry.Sep());
+            }
             list.Add(MenuEntry.Item("Add folder to Dock...", null, () => PromptAddFolder()));
             list.Add(MenuEntry.Item("Add app or file to Dock...", null, () => PromptAddApp()));
             list.Add(MenuEntry.Item("Add website to Dock...", null, () => PromptAddWebsite()));
@@ -1746,7 +1840,9 @@ namespace MacDock
             menu.launchpadGlass = true;
             Rectangle area = Screen.FromPoint(screenAt).Bounds;
             int pillTop = Top + (int)Math.Round(pillRect.Top);
-            menu.Top = Math.Max(area.Top + 4, pillTop - menu.Height - 10);
+            int clearTop = pillTop; // clear the hover title label (drawn 36px above the icon) with a gap
+            if (it != null) clearTop = Math.Min(clearTop, Top + (int)Math.Round(it.Rect.Top) - 36);
+            menu.Top = Math.Max(area.Top + 4, clearTop - menu.Height - 8);
             popup = menu;
             menu.Show();
         }
@@ -1904,7 +2000,7 @@ namespace MacDock
                     return TrashIcon(RecycleBin.IsFull());
                 case Kind.Folder:
                     // Folders keep their own artwork, like the folder stacks in the macOS dock.
-                    return LoadShellIcon(it.Target, 0, 0) ?? ScaleIcon(SystemIcons.Application.ToBitmap());
+                    return FolderColor.Apply(it.Target, LoadShellIcon(it.Target, 0, 0) ?? ScaleIcon(SystemIcons.Application.ToBitmap()));
                 case Kind.Url:
                     // Drawn here instead of asking Windows for the ".url" icon: that lookup runs the browser's icon
                     // handler, which tries to write to the Favorites folder and trips Controlled Folder Access.

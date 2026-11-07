@@ -76,16 +76,6 @@ namespace MacDock
             int top = Math.Max(area.Top + 4, anchorTopCenter.Y - height);
             Bounds = new Rectangle(left, top, width, height);
 
-            try
-            {
-                using (var shot = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
-                {
-                    using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size);
-                    backdrop = GlassPanel.BlurBitmap(shot, 20);
-                }
-            }
-            catch { backdrop = null; }
-
             host = new ThumbHost();
             timer.Interval = 30;
             timer.Tick += (s, e) => Poll();
@@ -99,6 +89,17 @@ namespace MacDock
 
         public new void Show()
         {
+            // Grab the blurred desktop at the final position, right before the window appears.
+            try
+            {
+                using (var shot = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
+                {
+                    using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size);
+                    if (backdrop != null) backdrop.Dispose();
+                    backdrop = GlassPanel.BlurBitmap(shot, 20);
+                }
+            }
+            catch { backdrop = null; }
             base.Show();
             host.Bounds = Bounds;
             host.Show();
@@ -146,7 +147,7 @@ namespace MacDock
             NativeMethods.POINT p; NativeMethods.GetCursorPos(out p);
             Point sp = new Point(p.X, p.Y);
             Rectangle zone = Rectangle.Inflate(Bounds, 6, 0);
-            zone.Height += 50; // the gap down to the dock icon keeps the popup open
+            zone.Height += 76; // the gap down to the dock icon keeps the popup open
             bool over = Bounds.Contains(sp);
             if (!over && !keepOpen(sp) && !zone.Contains(sp)) { Close(); return; }
 

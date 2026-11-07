@@ -298,6 +298,16 @@ namespace MacDock
         void Step()
         {
             frame++;
+            Fullscreen.Update();
+            if (Fullscreen.Active)
+            {
+                if (Visible) Hide(); // step aside for the fullscreen app; the slow timer keeps polling
+                animating = false;
+                timer.Interval = 250;
+                timer.Start();
+                return;
+            }
+            if (!Visible) { Show(); Raise(); }
             if (frame % 20 == 0) Reposition();
             if (mode != lastRaiseMode || (DateTime.Now - lastRaise).TotalMilliseconds > 150) { lastRaiseMode = mode; Raise(); }
             CheckPower();

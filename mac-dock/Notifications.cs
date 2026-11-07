@@ -36,6 +36,7 @@ namespace MacDock
         public string Title;
         public string Artist;
         public bool Playing;
+        public System.Drawing.Bitmap Art;   // SMTC thumbnail, or null
     }
 
     // Minimal reflection helpers for WinRT objects.
@@ -485,14 +486,45 @@ namespace MacDock
                 string title = props == null ? null : (string)Rt.Get(props, "Title");
                 if (string.IsNullOrEmpty(title)) return null;
 
+                string artist = (string)Rt.Get(props, "Artist") ?? "";
+                string key = title + "\n" + artist;
+                if (key != artKey) { artKey = key; art = LoadArt(props); }
+
                 return new MediaInfo
                 {
                     Title = title,
-                    Artist = (string)Rt.Get(props, "Artist") ?? "",
+                    Artist = artist,
+                    Art = art,
                     Playing = Rt.Get(Rt.Call(session, "GetPlaybackInfo"), "PlaybackStatus").ToString() == "Playing"
                 };
             }
             catch { manager = null; session = null; return null; }
+        }
+
+        static string artKey;
+        static System.Drawing.Bitmap art;
+
+        static System.Drawing.Bitmap LoadArt(object props)
+        {
+            try
+            {
+                object thumb = Rt.Get(props, "Thumbnail");
+                if (thumb == null) return null;
+                object ras = Rt.CallAsync(thumb, "OpenReadAsync");
+                if (ras == null) return null;
+                Type ext = Type.GetType("System.IO.WindowsRuntimeStreamExtensions, System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089");
+                var m = ext.GetMethods().First(x => x.Name == "AsStreamForRead" && x.GetParameters().Length == 1);
+                using (var st = (Stream)m.Invoke(null, new[] { ras }))
+                using (var ms = new MemoryStream())
+                {
+                    st.CopyTo(ms);
+                    if (ms.Length == 0) return null;
+                    ms.Position = 0;
+                    using (var img = System.Drawing.Image.FromStream(ms))
+                        return new System.Drawing.Bitmap(img);
+                }
+            }
+            catch { return null; }
         }
 
         public static void TogglePlayPause() { Fire("TryTogglePlayPauseAsync"); }
