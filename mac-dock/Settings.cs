@@ -1,4 +1,4 @@
-﻿// MacDock settings window: a dark, macOS "System Settings"-style page (sidebar + grouped rows).
+// MacDock settings window: a dark, macOS "System Settings"-style page (sidebar + grouped rows).
 //
 // Launcher options are stored as "@key value" lines in dock.txt (the same file the dock reads), so changes made here
 // are picked up by the running dock (the taskbar option applies at once) and by the next start (the rest).
@@ -306,7 +306,7 @@ namespace MacDock
         public static void EnsureAutostart()
         {
             if (RegInt(ChoiceKey, "AutostartChoice", -1) == 0) return;
-            EnsureGuardTask();
+            if (RegInt(ChoiceKey, "GuardTask", 0) == 1) EnsureGuardTask(); // opt-in only (default off)
             try
             {
                 using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
@@ -374,10 +374,7 @@ namespace MacDock
         {
             try
             {
-                var psi = new ProcessStartInfo("cmd.exe", "/c ping 127.0.0.1 -n 3 >nul & start \"\" \"" + Application.ExecutablePath + "\"");
-                psi.CreateNoWindow = true;
-                psi.UseShellExecute = false;
-                Process.Start(psi);
+                Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--wait") { UseShellExecute = false });
                 Application.Exit();
             }
             catch (Exception ex) { MessageBox.Show("Could not restart MacDock:\n" + ex.Message, "MacDock"); }

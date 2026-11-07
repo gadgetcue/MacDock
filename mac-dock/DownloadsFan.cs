@@ -46,30 +46,70 @@ namespace MacDock
             catch { return false; }
         }
 
+        // Items (with their shell icons) are cached per folder and re-read only when the folder changes, so reopening is instant.
+        sealed class Loaded { public DateTime Stamp; public List<FanItem> List; public volatile bool ThumbsDone; }
+        static readonly Dictionary<string, Loaded> cache = new Dictionary<string, Loaded>(StringComparer.OrdinalIgnoreCase);
+        volatile List<FanItem> arrived;
+        volatile bool loading;
+        const int Cols = 5, CellW = 104, GPad = 14;
+        int CellH { get { return IconSize + 34; } }
+        int StepFor { get { return style == "list" ? 64 : Step; } }
+
+        string folder; Loaded cur; int thumbTick;
+        static readonly HashSet<string> inflight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        static Loaded Cached(string folder)
+        {
+            DateTime stamp = DateTime.MinValue;
+            try { stamp = Directory.GetLastWriteTimeUtc(folder); } catch { }
+            Loaded hit;
+            lock (cache) cache.TryGetValue(folder, out hit);
+            return hit != null && hit.Stamp == stamp ? hit : null;
+        }
+
+        // Reads the folder's newest items and their icons on a background thread. Called early (when the cursor nears a
+        // folder icon, and at startup) so the fan usually has everything ready the moment it opens.
+        public static void Prefetch(string folder)
+        {
+            if (Cached(folder) != null) return;
+            lock (inflight) { if (!inflight.Add(folder)) return; }
+            new Thread(() =>
+            {
+                try
+                {
+                    DateTime stamp = DateTime.MinValue;
+                    try { stamp = Directory.GetLastWriteTimeUtc(folder); } catch { }
+                    var list = new List<FanItem>();
+                    try
+                    {
+                        foreach (FileSystemInfo f in new DirectoryInfo(folder).EnumerateFileSystemInfos()
+                            .Where(f => (f.Attributes & (FileAttributes.Hidden | FileAttributes.System)) == 0)
+                            .Where(f => { string e = f.Extension.ToLowerInvariant(); return e != ".crdownload" && e != ".tmp" && e != ".part" && e != ".partial"; })
+                            .OrderByDescending(f => f.CreationTimeUtc > f.LastWriteTimeUtc ? f.CreationTimeUtc : f.LastWriteTimeUtc)
+                            .Take(MaxItems))
+                            list.Add(new FanItem { Path = f.FullName, Name = f.Name, IsDir = f is DirectoryInfo });
+                    }
+                    catch { }
+                    foreach (FanItem it in list) it.Icon = DockForm.LoadShellIcon(it.Path, 0, 0);
+                    var ld = new Loaded { Stamp = stamp, List = list };
+                    lock (cache) cache[folder] = ld;
+                    foreach (FanItem it in list.Where(x => !x.IsDir && IsImage(x.Path)).ToList())
+                    { try { it.Thumb = MakeThumb(it.Path); } catch { } }
+                    ld.ThumbsDone = true;
+                }
+                finally { lock (inflight) inflight.Remove(folder); }
+            }) { IsBackground = true, Priority = ThreadPriority.BelowNormal }.Start();
+        }
+
         public DownloadsFan(string folder, Point anchorTopCenter, Func<Point, bool> keepOpen, Action closed)
         {
-            this.keepOpen = keepOpen; this.closed = closed;
+            t0 = clk.ElapsedTicks; this.keepOpen = keepOpen; this.closed = closed;
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true; StartPosition = FormStartPosition.Manual;
-
-            try
-            {
-                var di = new DirectoryInfo(folder);
-                foreach (FileSystemInfo f in di.GetFileSystemInfos()
-                    .Where(f => (f.Attributes & (FileAttributes.Hidden | FileAttributes.System)) == 0)
-                    .Where(f => { string e = f.Extension.ToLowerInvariant(); return e != ".crdownload" && e != ".tmp" && e != ".part" && e != ".partial"; })
-                    .OrderByDescending(f => f.CreationTimeUtc > f.LastWriteTimeUtc ? f.CreationTimeUtc : f.LastWriteTimeUtc)
-                    .Take(MaxItems))
-                    items.Add(new FanItem { Path = f.FullName, Name = f.Name, IsDir = f is DirectoryInfo });
-            }
-            catch { }
-
-            int n = Math.Max(1, items.Count);
             style = GetStyle();
-            bool grid = style == "grid";
-            int step = style == "list" ? 64 : Step;
-            int cols = 5, cellW = 104, cellH = IconSize + 34, gpad = 14;
-            int rowsN = (n + cols - 1) / cols;
-            int height = grid ? rowsN * cellH + gpad * 2 + 12 : n * step + IconSize + 40;
+            labelsLeft = true;
+
+            // The window is sized for a full stack up front, so it can appear before any file has been read.
+            int height = style == "grid" ? 2 * CellH + GPad * 2 + 12 : MaxItems * StepFor + IconSize + 40;
             Rectangle area = Screen.FromPoint(anchorTopCenter).WorkingArea;
             int left = Math.Max(area.Left, Math.Min(anchorTopCenter.X - 300, area.Right - WinW));
             int top = Math.Max(area.Top, anchorTopCenter.Y - height);
@@ -77,50 +117,48 @@ namespace MacDock
             height = Bounds.Height;
             origin = new Point(anchorTopCenter.X - left, height);
 
-            // Newest (index 0) sits lowest, closest to the dock; the stack bends toward the screen centre like the Dock's fan.
-            int dir = 1; // curve to the right
-            int usedCols = Math.Min(cols, n);
-            int pw = usedCols * cellW + gpad * 2;
-            panel = new Rectangle(Math.Max(6, Math.Min(WinW - pw - 6, origin.X - pw / 2)), height - rowsN * cellH - gpad * 2 - 6, pw, rowsN * cellH + gpad * 2);
-            for (int i = 0; i < items.Count; i++)
-            {
-                if (grid)
-                {
-                    int r = i / cols, c = i % cols;
-                    // newest at the bottom-left, rows climbing upward
-                    int cx = panel.Left + gpad + c * cellW + cellW / 2;
-                    int ty = panel.Bottom - gpad - (r + 1) * cellH;
-                    items[i].Rect = new Rectangle(cx - IconSize / 2, ty + 2, IconSize, IconSize);
-                }
-                else
-                {
-                    double curve = style == "list" ? 0 : 8.0;
-                    int cx = origin.X + dir * (int)(Math.Pow(i, 1.6) * curve);
-                    cx = Math.Max(IconSize / 2 + 4, Math.Min(WinW - IconSize / 2 - 4, cx));
-                    int cy = height - IconSize / 2 - 6 - i * step;
-                    items[i].Rect = new Rectangle(cx - IconSize / 2, cy - IconSize / 2, IconSize, IconSize);
-                }
-                items[i].Icon = DockForm.LoadShellIcon(items[i].Path, 0, 0);
-            }
-            labelsLeft = true;
+            this.folder = folder;
+            Loaded hit = Cached(folder);
+            if (hit != null) { cur = hit; items.AddRange(hit.List); Layout(); }
+            else { loading = true; Prefetch(folder); }
 
-            var imgs = items.Where(x => !x.IsDir && IsImage(x.Path)).ToList();
-            if (imgs.Count > 0)
-            {
-                var th = new Thread(() =>
-                {
-                    foreach (FanItem it in imgs) { try { it.Thumb = MakeThumb(it.Path); } catch { } }
-                    thumbsReady = true;
-                }) { IsBackground = true };
-                th.Start();
-            }
-
+            Log("ctor done " + ((clk.ElapsedTicks - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0.0") + "ms cached=" + (hit != null));
             timer.Interval = 15;
             timer.Tick += (s, e) => Poll();
         }
 
-        readonly bool labelsLeft;
-        readonly string style;
+        // Places the icons: the Dock's curved fan, a straight list, or a grid panel.
+        void Layout()
+        {
+            int n = Math.Max(1, items.Count), height = Height;
+            bool grid = style == "grid";
+            int step = StepFor, rowsN = (n + Cols - 1) / Cols;
+            int pw = Math.Min(Cols, n) * CellW + GPad * 2;
+            panel = new Rectangle(Math.Max(6, Math.Min(WinW - pw - 6, origin.X - pw / 2)), height - rowsN * CellH - GPad * 2 - 6, pw, rowsN * CellH + GPad * 2);
+            for (int i = 0; i < items.Count; i++)
+            {
+                items[i].Hot = 0;
+                if (grid)
+                {
+                    int r = i / Cols, c = i % Cols;
+                    int cx = panel.Left + GPad + c * CellW + CellW / 2;
+                    int ty = panel.Bottom - GPad - (r + 1) * CellH;
+                    items[i].Rect = new Rectangle(cx - IconSize / 2, ty + 2, IconSize, IconSize);
+                }
+                else
+                {
+                    // Newest (index 0) sits lowest, closest to the dock; the stack bends to the right.
+                    double curve = style == "list" ? 0 : 8.0;
+                    int cx = origin.X + (int)(Math.Pow(i, 1.6) * curve);
+                    cx = Math.Max(IconSize / 2 + 4, Math.Min(WinW - IconSize / 2 - 4, cx));
+                    int cy = height - IconSize / 2 - 6 - i * step;
+                    items[i].Rect = new Rectangle(cx - IconSize / 2, cy - IconSize / 2, IconSize, IconSize);
+                }
+            }
+        }
+
+        bool labelsLeft;
+        string style;
         Rectangle panel;
 
         static string StyleFile { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fanstyle.txt"); } }
@@ -163,7 +201,7 @@ namespace MacDock
 
         public new void Show()
         {
-            born = DateTime.UtcNow; // icons are loaded in the constructor; start the animation only now
+            Log("Show after ctor " + ((clk.ElapsedTicks - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0.0") + "ms");
             born = DateTime.UtcNow; // restart the clock: building a big folder (Downloads) can take longer than the animation itself
             base.Show();
             Draw();
@@ -230,7 +268,7 @@ namespace MacDock
                 // Dragging an item out: drop it on the Recycle Bin icon, Explorer, the desktop...
                 string path = items[pressIdx].Path;
                 pressIdx = -1; dragging = true;
-                try { DoDragDrop(new DataObject(DataFormats.FileDrop, new[] { path }), DragDropEffects.Move | DragDropEffects.Copy); } catch { }
+                try { DoDragDrop(new DataObject(DataFormats.FileDrop, new[] { path }), DragDropEffects.Move | DragDropEffects.Copy | DragDropEffects.Link); } catch { }
                 dragging = false;
                 Close();
                 return;
@@ -243,7 +281,10 @@ namespace MacDock
             wasDown = down;
             if ((Win32.GetAsyncKeyState(0x1B) & 0x8000) != 0) { Close(); return; }
 
-            if (thumbsReady) { thumbsReady = false; dirty = true; }
+            if (loading) { Loaded ld = Cached(folder); if (ld != null) { cur = ld; arrived = ld.List; } }
+            var got = arrived;
+            if (got != null) { Log("items arrived +" + ((clk.ElapsedTicks - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0.0") + "ms"); arrived = null; if (cur == null) cur = Cached(folder); items.AddRange(got); Layout(); loading = false; born = DateTime.UtcNow; hover = -1; dirty = true; }
+            if (cur != null && !cur.ThumbsDone && (++thumbTick % 6) == 0) dirty = true; // thumbnails are still arriving
             if (dirty || Animating) Draw();
         }
 
@@ -308,10 +349,14 @@ namespace MacDock
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); } catch { }
         }
 
+        static readonly System.Diagnostics.Stopwatch clk = System.Diagnostics.Stopwatch.StartNew();
+        long t0, drawN; double drawSum, drawMax;
+        static readonly bool Dbg = File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fan.debug"));
+        static void Log(string s) { if (!Dbg) return; try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fan.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " " + s + Environment.NewLine); } catch { } }
         void Draw()
         {
             if (!IsHandleCreated) return;
-            dirty = false;
+            dirty = false; long dt0 = clk.ElapsedTicks;
             if (surface == null) surface = new Surface(Width, Height);
             using (Graphics g = surface.Begin())
             {
@@ -386,7 +431,7 @@ namespace MacDock
                             g.DrawString(Display(it), font, tb, lr, fmt);
                     }
                 }
-                if (items.Count == 0)
+                if (items.Count == 0 && !loading)
                 {
                     using (var b = new SolidBrush(Color.FromArgb(220, 38, 38, 42)))
                     using (GraphicsPath gp = Layered.RoundedRect(new RectangleF(origin.X - 80, Height - 70, 160, 28), 8))
@@ -395,7 +440,16 @@ namespace MacDock
                         g.DrawString("Folder is empty", font, tb, new RectangleF(origin.X - 80, Height - 70, 160, 28), fmt);
                 }
             }
-            surface.Present(Handle, Left, Top, 255);
+            long te = clk.ElapsedTicks; surface.Present(Handle, Left, Top, 255);
+            double dd = (clk.ElapsedTicks - dt0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency, ppr = (clk.ElapsedTicks - te) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            drawN++; drawSum += dd; if (dd > drawMax) drawMax = dd;
+            if (drawN <= 3 || drawN % 20 == 0) Log("frame " + drawN + " draw=" + dd.ToString("0.0") + "ms (present " + ppr.ToString("0.0") + "ms) avg=" + (drawSum / drawN).ToString("0.0") + " max=" + drawMax.ToString("0.0"));
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (Dbg) { string st = Environment.StackTrace; int k = st.IndexOf("OnFormClosing"); Log("closing from: " + st.Substring(Math.Max(0, k), Math.Min(600, st.Length - Math.Max(0, k))).Replace(Environment.NewLine, " | ")); }
+            base.OnFormClosing(e);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -410,7 +464,6 @@ namespace MacDock
             if (disposing)
             {
                 timer.Dispose(); if (surface != null) surface.Dispose();
-                foreach (FanItem it in items) { if (it.Icon != null) it.Icon.Dispose(); if (it.Thumb != null) it.Thumb.Dispose(); }
             }
             base.Dispose(disposing);
         }

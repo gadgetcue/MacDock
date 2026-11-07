@@ -58,6 +58,9 @@ namespace MacDock
 
             if (args.Any(a => a.Equals("--ls-selftest", StringComparison.OrdinalIgnoreCase))) { Environment.ExitCode = LocalSendTest.Run(args); return; }
 
+            // "--wait" (used by Restart): give the previous instance a moment to exit before taking the single-instance lock.
+            if (args.Any(a => a.Equals("--wait", StringComparison.OrdinalIgnoreCase))) System.Threading.Thread.Sleep(2500);
+
             bool created;
             using (new System.Threading.Mutex(true, "MacDockSingleInstance", out created))
             {
@@ -470,6 +473,9 @@ namespace MacDock
         MenuPopup popup; // the open right-click menu, if any
         Item previewItem;
         DateTime lastPreviewClose = DateTime.MinValue;
+        int dropIndex = -1;                      // dock item under a file drag in progress (-1 = none)
+        DateTime dropSince = DateTime.MaxValue;  // when the drag started resting on dropIndex
+        Item dropHot;                            // item highlighted as a valid drop target
         Form preview; // window thumbnails shown while hovering an app with several windows
         DateTime hoverSince = DateTime.UtcNow;
         readonly Font labelFont = Typography.Text(9.5f, Weight.Medium);
@@ -733,6 +739,14 @@ namespace MacDock
                     }
 
                     if (it == dragItem) continue; // drawn last, lifted above the others
+                    if (it == dropHot) // file drag resting here: it will take the drop
+                    {
+                        RectangleF hr = RectangleF.Inflate(it.Rect, 5, 5);
+                        using (GraphicsPath hp = RoundedRect(hr, 14))
+                        using (var hf = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
+                        using (var hb = new Pen(Color.FromArgb(190, 255, 255, 255), 2f))
+                        { g.FillPath(hf, hp); g.DrawPath(hb, hp); }
+                    }
                     DrawIcon(g, it, it.Rect);
                     if (it.Handles.Count > 0) // running indicator, like the macOS dot
                         g.FillEllipse(dot, it.Rect.Left + it.Rect.Width / 2 - 2, pillRect.Bottom - 6, 4, 4);
@@ -941,16 +955,25 @@ namespace MacDock
 
             bool hoverChanged = hover != hoverIndex;
             hoverIndex = hover;
-            if (hoverChanged) hoverSince = DateTime.UtcNow;
+            if (hoverChanged) { hoverSince = DateTime.UtcNow; if (hover >= 0 && hover < items.Count && items[hover].Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(items[hover].Target)); }
             // Moving straight from one icon to the next swaps the popup at once (no dwell, no gap); the old one closes
             // in the same tick the new one opens, so nothing flashes in between.
-            if (hover >= 0 && preview != null && (previewItem == null || previewItem.Key != items[hover].Key) && popup == null && dragItem == null)
+            if (dropIndex >= 0 && dropIndex < items.Count && popup == null && dragItem == null)
+            {
+                // A file drag is resting on an icon: after ~600 ms an app's window strip springs open.
+                Item di = items[dropIndex];
+                if (preview != null && (previewItem == null || previewItem.Key != di.Key)) preview.Close();
+                else if (preview == null && di.Kind == Kind.App && di.Handles.Count > 0 && (DateTime.UtcNow - dropSince).TotalMilliseconds >= 600)
+                    ShowPreview(di);
+            }
+            else if (dropIndex >= 0) { }
+            else if (hover >= 0 && preview != null && (previewItem == null || previewItem.Key != items[hover].Key) && popup == null && dragItem == null)
             {
                 preview.Close();
                 ShowPreview(items[hover]);
             }
             else if (hover >= 0 && preview == null && popup == null && dragItem == null &&
-                     ((DateTime.UtcNow - hoverSince).TotalMilliseconds > 350 || (DateTime.UtcNow - lastPreviewClose).TotalMilliseconds < 400))
+                     ((DateTime.UtcNow - hoverSince).TotalMilliseconds > (items[hover].Kind == Kind.Folder ? 120 : 350) || (DateTime.UtcNow - lastPreviewClose).TotalMilliseconds < 400))
                 ShowPreview(items[hover]);
             LayoutItems();
 
@@ -1266,6 +1289,7 @@ namespace MacDock
             }
 
             items = list;
+            foreach (Item fi in list) if (fi.Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(fi.Target)); // warm the fan caches
             if (hoverIndex >= items.Count) hoverIndex = -1;
             refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue) ? 500 : 2000;
             FitCanvas();
@@ -1902,32 +1926,103 @@ namespace MacDock
             base.OnDragEnter(e);
             bool ok = e.Data.GetDataPresent(AppDragFormat) || e.Data.GetDataPresent(DataFormats.FileDrop) || e.Data.GetDataPresent(DataFormats.UnicodeText);
             e.Effect = ok ? DragDropEffects.Copy : DragDropEffects.None;
+            UpdateDropTarget(e);
+        }
+
+        int ItemAtDrag(DragEventArgs e)
+        {
+            Point c = PointToClient(new Point(e.X, e.Y));
+            return IndexAt(c.X, c.Y);
         }
 
         bool OverTrash(DragEventArgs e)
         {
-            Point c = PointToClient(new Point(e.X, e.Y));
-            int i = IndexAt(c.X, c.Y);
+            int i = ItemAtDrag(e);
             return i >= 0 && items[i].Kind == Kind.Trash;
+        }
+
+        static DragDropEffects Pick(DragDropEffects allowed, params DragDropEffects[] prefer)
+        {
+            foreach (DragDropEffects p in prefer) if ((allowed & p) != 0) return p;
+            return DragDropEffects.None;
+        }
+
+        // Which effect (cursor) the icon under a file drag offers; also tracks the highlight and the hover dwell.
+        void UpdateDropTarget(DragEventArgs e)
+        {
+            int i = ItemAtDrag(e);
+            string[] files = e.Data.GetDataPresent(DataFormats.FileDrop) ? e.Data.GetData(DataFormats.FileDrop) as string[] : null;
+            if (i != dropIndex) { dropIndex = i; dropSince = DateTime.UtcNow; }
+            Item hot = null;
+            if (files != null && i >= 0)
+            {
+                Item it = items[i];
+                DragDropEffects eff = DragDropEffects.None;
+                if (it.Kind == Kind.Trash) eff = Pick(e.AllowedEffect, DragDropEffects.Move, DragDropEffects.Copy);
+                else if (it.Kind == Kind.Folder) eff = DockDrop.Choose(files, Environment.ExpandEnvironmentVariables(it.Target), e.KeyState, e.AllowedEffect);
+                else if (it.Kind == Kind.App && DockDrop.CanOpenWith(it.Target)) eff = Pick(e.AllowedEffect, DragDropEffects.Copy, DragDropEffects.Link, DragDropEffects.Move);
+                else eff = Pick(e.AllowedEffect, DragDropEffects.Copy, DragDropEffects.Link, DragDropEffects.Move); // anything else just pins the file
+                if (it.Kind == Kind.Trash || it.Kind == Kind.Folder || it.Kind == Kind.App && DockDrop.CanOpenWith(it.Target))
+                {
+                    e.Effect = eff;
+                    if (eff != DragDropEffects.None) hot = it;
+                }
+                else e.Effect = eff;
+            }
+            else if (files != null) e.Effect = Pick(e.AllowedEffect, DragDropEffects.Copy, DragDropEffects.Link, DragDropEffects.Move);
+            if (hot != dropHot) { dropHot = hot; Redraw(); }
         }
 
         protected override void OnDragOver(DragEventArgs e)
         {
             base.OnDragOver(e);
-            if (e.Data.GetDataPresent(DataFormats.FileDrop) && OverTrash(e)) e.Effect = DragDropEffects.Move;
+            UpdateDropTarget(e);
+        }
+
+        protected override void OnDragLeave(EventArgs e)
+        {
+            base.OnDragLeave(e);
+            // The cursor may be moving onto a window preview: that closes itself, so leave it alone.
+            dropIndex = -1; dropSince = DateTime.MaxValue;
+            if (dropHot != null) { dropHot = null; Redraw(); }
         }
 
         protected override void OnDragDrop(DragEventArgs e)
         {
             base.OnDragDrop(e);
+            int di = ItemAtDrag(e);
+            Item target = di >= 0 ? items[di] : null;
+            dropIndex = -1; dropSince = DateTime.MaxValue;
+            if (dropHot != null) { dropHot = null; Redraw(); }
 
-            // Files dropped on the Recycle Bin icon go to the Recycle Bin.
-            string[] doomed = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (doomed != null && OverTrash(e))
+            string[] dropped = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (dropped != null && target != null)
             {
-                // Deferred so the drag source (Explorer) isn't blocked while confirmation/progress UI shows.
-                BeginInvoke((Action)(() => { RecycleBin.Delete(doomed); RebuildItems(); }));
-                return;
+                if (target.Kind == Kind.Trash)
+                {
+                    // Deferred so the drag source (Explorer) isn't blocked while confirmation/progress UI shows.
+                    BeginInvoke((Action)(() => { RecycleBin.Delete(dropped); RebuildItems(); }));
+                    return;
+                }
+                if (target.Kind == Kind.Folder)
+                {
+                    string dest = Environment.ExpandEnvironmentVariables(target.Target);
+                    DragDropEffects eff = DockDrop.Choose(dropped, dest, e.KeyState, e.AllowedEffect);
+                    if (eff != DragDropEffects.None) DockDrop.Transfer((string[])dropped.Clone(), dest, eff, null);
+                    return;
+                }
+                if (target.Kind == Kind.App && DockDrop.CanOpenWith(target.Target))
+                {
+                    string[] files = (string[])dropped.Clone();
+                    if (preview != null) preview.Close();
+                    if (DockDrop.OpenWith(target.Target, files) && target.Handles.Count == 0)
+                    {
+                        target.LaunchStart = DateTime.Now;
+                        target.BounceVelocity = BounceLaunchSpeed;
+                        refreshTimer.Interval = 500;
+                    }
+                    return;
+                }
             }
 
             // From Mission Control: "name\ntarget".
@@ -1939,10 +2034,9 @@ namespace MacDock
                 return;
             }
 
-            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files != null)
+            if (dropped != null)
             {
-                foreach (string f in files) AddPath(f);
+                foreach (string f in dropped) AddPath(f);
                 return;
             }
             string text = e.Data.GetData(DataFormats.UnicodeText) as string;
@@ -2110,6 +2204,24 @@ namespace MacDock
         internal static Bitmap Tile(Bitmap icon)
         {
             const int S = IconSource;
+            // Icons that already are a full rounded-square tile (macOS-style, transparent corners) keep their own shape:
+            // no extra plate behind them, scaled so the tile fills the slot.
+            Rectangle full;
+            if (IsFullTile(icon, out full))
+            {
+                var bare = new Bitmap(S, S);
+                using (Graphics g = Graphics.FromImage(bare))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.Clear(Color.Transparent);
+                    g.DrawImage(icon, new Rectangle(1, 1, S - 2, S - 2), full, GraphicsUnit.Pixel);
+                }
+                icon.Dispose();
+                return bare;
+            }
+
             Color top, bottom;
             if (AverageLuminance(icon) > 0.72)
             {
@@ -2143,6 +2255,34 @@ namespace MacDock
             }
             icon.Dispose();
             return tile;
+        }
+
+        // A "full tile" icon: transparent corners, and a large, almost solid, roughly square body (bounds filled > 85%).
+        static bool IsFullTile(Bitmap icon, out Rectangle bounds)
+        {
+            bounds = Rectangle.Empty;
+            try
+            {
+                int w = icon.Width, h = icon.Height, minX = w, minY = h, maxX = -1, maxY = -1;
+                for (int y = 0; y < h; y += 2)
+                    for (int x = 0; x < w; x += 2)
+                        if (icon.GetPixel(x, y).A > 100)
+                        {
+                            if (x < minX) minX = x; if (x > maxX) maxX = x;
+                            if (y < minY) minY = y; if (y > maxY) maxY = y;
+                        }
+                if (maxX < 0) return false;
+                int bw = maxX - minX + 2, bh = maxY - minY + 2;
+                if (bw < w * 0.6 || bh < h * 0.6 || Math.Abs(bw - bh) > Math.Max(bw, bh) * 0.06) return false;
+                if (icon.GetPixel(minX, minY).A > 100) return false; // top-left corner of the body must be rounded away
+                int solid = 0, total = 0;
+                for (int y = minY; y <= maxY; y += 2)
+                    for (int x = minX; x <= maxX; x += 2) { total++; if (icon.GetPixel(x, y).A > 200) solid++; }
+                if (total == 0 || solid < total * 0.85) return false;
+                bounds = new Rectangle(minX, minY, bw, bh);
+                return true;
+            }
+            catch { return false; }
         }
 
         // True when (nearly) every pixel is transparent: the shell returns that for some Store exes.

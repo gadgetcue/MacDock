@@ -45,6 +45,8 @@ namespace MacDock
         Bitmap backdrop;
         int hover = -1;
         bool wasDown = true;
+        bool dragMode;                  // opened while a file drag was in progress (button held)
+        int dwellIdx = -1; DateTime dwellSince;
 
         public WindowPreview(List<IntPtr> windows, Bitmap icon, Point anchorTopCenter, Action<IntPtr> focus, Func<Point, bool> keepOpen, Action closed)
         {
@@ -100,6 +102,7 @@ namespace MacDock
                 }
             }
             catch { backdrop = null; }
+            dragMode = (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0;
             base.Show();
             host.Bounds = Bounds;
             host.Show();
@@ -160,6 +163,19 @@ namespace MacDock
             if (idx != hover) { hover = idx; Redraw(); }
 
             bool down = (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0;
+            if (dragMode)
+            {
+                // Spring-loaded: resting a dragged file on a thumbnail brings that window forward so the drop can land on it.
+                if (!down) { dragMode = false; wasDown = false; return; }
+                if (idx != dwellIdx) { dwellIdx = idx; dwellSince = DateTime.UtcNow; }
+                else if (idx >= 0 && (DateTime.UtcNow - dwellSince).TotalMilliseconds >= 500)
+                {
+                    IntPtr dw = tiles[idx].Window;
+                    Close();
+                    focus(dw);
+                }
+                return;
+            }
             if (down && !wasDown && idx >= 0)
             {
                 IntPtr w = tiles[idx].Window;

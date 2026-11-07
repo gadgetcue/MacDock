@@ -11,7 +11,6 @@ namespace MacDock
 {
     static class Win32
     {
-        public delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
@@ -32,12 +31,13 @@ namespace MacDock
         [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
         [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder sb, int max);
-        [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int id, HookProc proc, IntPtr module, uint thread);
-        [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hook);
-        [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessage(string name);
         [DllImport("shell32.dll")] public static extern UIntPtr SHAppBarMessage(uint msg, ref APPBARDATA data);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
+        public delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int id, HookProc proc, IntPtr module, uint thread);
+        [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hook);
+        [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
     }
 
     static class WinUtil

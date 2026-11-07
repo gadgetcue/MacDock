@@ -1,4 +1,4 @@
-﻿// Mission Control: a full-screen overview of every open window, plus an "All Apps" page (like Launchpad)
+// Mission Control: a full-screen overview of every open window, plus an "All Apps" page (like Launchpad)
 // where any installed app can be launched or added to the dock with its + button or by dragging it there.
 //
 // The dock, top bar and island are always-on-top, so they stay visible above this overview and an app
@@ -1013,10 +1013,20 @@ namespace MacDock
                         g.DrawLine(caret, cx, box.Top + box.Height * 0.3f, cx, box.Bottom - box.Height * 0.3f);
                 Rectangle sort = SortRect;
                 using (var fill = new SolidBrush(Color.FromArgb(LaunchpadOrder.Mode == "custom" ? 70 : 40, 255, 255, 255)))
-                using (var dot = new SolidBrush(Color.FromArgb(150, 255, 255, 255)))
+                using (var ink = new Pen(Color.FromArgb(200, 255, 255, 255), 1.8f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
                 {
+                    SmoothingMode oldSm = g.SmoothingMode;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
                     if (LaunchpadOrder.Mode == "custom") g.FillEllipse(fill, sort);
-                    for (int d = -1; d <= 1; d++) g.FillEllipse(dot, sort.Left + 20 - 2 + d * 8, sort.Top + 16 - 2, 4, 4);
+                    float sx = sort.Left + 20f, sy = sort.Top + 16f;
+                    // Sort glyph: three lines shrinking downward with an up/down arrow pair beside them.
+                    g.DrawLine(ink, sx - 9f, sy - 5f, sx + 1f, sy - 5f);
+                    g.DrawLine(ink, sx - 9f, sy,      sx - 2f, sy);
+                    g.DrawLine(ink, sx - 9f, sy + 5f, sx - 5f, sy + 5f);
+                    g.DrawLine(ink, sx + 6f, sy - 5f, sx + 6f, sy + 5f);
+                    g.DrawLine(ink, sx + 3.5f, sy + 2.5f, sx + 6f, sy + 5f);
+                    g.DrawLine(ink, sx + 8.5f, sy + 2.5f, sx + 6f, sy + 5f);
+                    g.SmoothingMode = oldSm;
                 }
             }
         }
@@ -2149,7 +2159,7 @@ namespace MacDock
                     ProcessStartInfo psi;
                     if (family != null)
                         psi = new ProcessStartInfo("powershell.exe",
-                            "-NoProfile -ExecutionPolicy Bypass -Command \"$p = Get-AppxPackage | ? { $_.PackageFamilyName -eq '" + family + "' -and -not $_.NonRemovable }; if (-not $p) { exit 2 }; $p | Remove-AppxPackage -ErrorAction Stop\"")
+                            "-NoProfile -Command \"$p = Get-AppxPackage | ? { $_.PackageFamilyName -eq '" + family + "' -and -not $_.NonRemovable }; if (-not $p) { exit 2 }; $p | Remove-AppxPackage -ErrorAction Stop\"")
                         { UseShellExecute = false, CreateNoWindow = true };
                     else
                         psi = new ProcessStartInfo("cmd.exe", "/c \"" + win32Cmd + "\"") { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden };
