@@ -2,7 +2,7 @@
 rem Builds MacDock.exe with the .NET Framework compiler that ships with Windows (no SDK needed).
 cd /d "%~dp0"
 set CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe
-"%CSC%" /nologo /target:winexe /optimize+ /unsafe /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Data.dll /r:Microsoft.VisualBasic.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Management.dll /out:MacDock.exe *.cs
+"%CSC%" /nologo /target:winexe /optimize+ /win32icon:macdock.ico /unsafe /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Data.dll /r:Microsoft.VisualBasic.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Management.dll /out:MacDock.exe *.cs
 if errorlevel 1 (
     echo Build failed.
     pause
