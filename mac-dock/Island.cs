@@ -24,7 +24,7 @@ namespace MacDock
         const int CanvasW = 520, CanvasH = 340, TopY = 0;
         // Idle: a round dot exactly as tall as the status bar.
         static readonly int IdleW = TopBar.BarHeight - 1, IdleH = TopBar.BarHeight - 1;
-        const int HeaderH = 70, MediaH = 56, RowH = 46, FooterH = 44;
+        const int HeaderH = 70, MediaH = 56, RowH = 46, FooterH = 44, TabH = 36, ClipRowH = 34, ClipMax = 5;
 
         readonly Timer timer = new Timer();
         // The pill is an under-damped spring, so it overshoots slightly when it opens, like the real island.
@@ -68,6 +68,9 @@ namespace MacDock
         Color powerColor;
         bool powerInitialized, lastOnAc, lowShown;
         string copyText;
+        // Clipboard history (text), newest first; shown on the panel's Clipboard tab. Click an item to copy it back.
+        readonly List<string> clipHistory = new List<string>();
+        bool clipTab;
 
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool AddClipboardFormatListener(IntPtr hwnd);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
@@ -86,6 +89,11 @@ namespace MacDock
                     catch { System.Threading.Thread.Sleep(25); }
                 }
                 if (string.IsNullOrWhiteSpace(text)) return;
+                string full = text.Trim();
+                if (full.Length > 2000) full = full.Substring(0, 2000);
+                clipHistory.Remove(full);
+                clipHistory.Insert(0, full);
+                if (clipHistory.Count > 20) clipHistory.RemoveAt(clipHistory.Count - 1);
                 text = System.Text.RegularExpressions.Regex.Replace(text.Trim(), @"\s+", " ");
                 if (text.Length > 120) text = text.Substring(0, 120);
                 if (mode == Mode.Panel || mode == Mode.Notif) return;
@@ -407,8 +415,13 @@ namespace MacDock
 
         int PanelHeight()
         {
+            int h = HeaderH + (Feed.Media != null ? MediaH : 0) + TabH;
+            if (clipTab)
+            {
+                int cr = Math.Min(ClipMax, clipHistory.Count);
+                return h + (cr > 0 ? cr * ClipRowH + FooterH : 30) + 6;
+            }
             int rows = Math.Min(3, Feed.History.Count);
-            int h = HeaderH + (Feed.Media != null ? MediaH : 0);
             h += rows > 0 ? rows * RowH + FooterH : 30;
             return h + 6;
         }
@@ -685,6 +698,10 @@ namespace MacDock
             float y = HeaderH;
             if (Feed.Media != null) { DrawMediaPeek(g, pill, white, gray, left, alpha); y += MediaH; }
 
+            DrawTabs(g, pill, y, white, gray, alpha);
+            y += TabH;
+            if (clipTab) { DrawClipboard(g, pill, y, white, gray, alpha); return; }
+
             if (Feed.History.Count == 0)
             {
                 var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
@@ -729,6 +746,70 @@ namespace MacDock
                 g.FillPath(fillB, path);
             var mid = new StringFormat(left) { Alignment = StringAlignment.Center };
             g.DrawString("Clear", bodyFont, white, new RectangleF(clear.Left, clear.Top, clear.Width, clear.Height), mid);
+        }
+
+        // Segmented switch: Notifications | Clipboard.
+        void DrawTabs(Graphics g, RectangleF pill, float y, Brush white, Brush gray, int alpha)
+        {
+            float w = 112, h = 24, x0 = pill.Left + pill.Width / 2 - w, ty = pill.Top + y + 2;
+            var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            for (int i = 0; i < 2; i++)
+            {
+                bool on = (i == 1) == clipTab;
+                var r = new Rectangle((int)(x0 + i * w), (int)ty, (int)w, (int)h);
+                bool toClip = i == 1;
+                hits.Add(new Hit { Rect = r, Click = () => { clipTab = toClip; } });
+                if (on)
+                    using (var path = Layered.RoundedRect(r, 12))
+                    using (var fb = new SolidBrush(A(Color.FromArgb(56, 255, 255, 255), alpha)))
+                        g.FillPath(fb, path);
+                g.DrawString(i == 0 ? "Notifications" : "Clipboard", nameFont, on ? white : gray, r, center);
+            }
+        }
+
+        void DrawClipboard(Graphics g, RectangleF pill, float y, Brush white, Brush gray, int alpha)
+        {
+            var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            if (clipHistory.Count == 0)
+            {
+                g.DrawString("Nothing copied yet", bodyFont, gray, new RectangleF(pill.Left, pill.Top + y, pill.Width, 28), center);
+                return;
+            }
+            int rows = Math.Min(ClipMax, clipHistory.Count);
+            var fmt = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+            Point cur = PointToClient(Cursor.Position);
+            for (int i = 0; i < rows; i++)
+            {
+                string text = clipHistory[i];
+                var r = new Rectangle((int)pill.Left + 10, (int)(pill.Top + y + i * ClipRowH), (int)pill.Width - 20, ClipRowH - 2);
+                hits.Add(new Hit { Rect = r, Click = () => CopyBack(text) });
+                if (r.Contains(cur))
+                    using (var path = Layered.RoundedRect(r, 10))
+                    using (var fb = new SolidBrush(A(Color.FromArgb(34, 255, 255, 255), alpha)))
+                        g.FillPath(fb, path);
+                string line = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+                g.DrawString(line, bodyFont, white, new RectangleF(r.Left + 12, r.Top, r.Width - 24, r.Height), fmt);
+            }
+            y += rows * ClipRowH;
+            var clear = new Rectangle((int)(pill.Left + pill.Width / 2 - 45), (int)(pill.Top + y + 8), 90, 26);
+            hits.Add(new Hit { Rect = clear, Click = () => clipHistory.Clear() });
+            using (var path = Layered.RoundedRect(clear, 13))
+            using (var fillB = new SolidBrush(A(Color.FromArgb(46, 255, 255, 255), alpha)))
+                g.FillPath(fillB, path);
+            g.DrawString("Clear", bodyFont, white, clear, center);
+        }
+
+        // Puts a history item back on the clipboard (moved to the top), and confirms with the Copied pill.
+        void CopyBack(string text)
+        {
+            try { Clipboard.SetText(text, TextDataFormat.UnicodeText); }
+            catch { return; }
+            clipHistory.Remove(text);
+            clipHistory.Insert(0, text);
+            copyText = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+            if (copyText.Length > 120) copyText = copyText.Substring(0, 120);
+            mode = Mode.Copy;
+            until = DateTime.Now.AddSeconds(1.4);
         }
 
         // ---------- clicks ----------

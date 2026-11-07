@@ -463,6 +463,8 @@ namespace MacDock
         readonly Timer animTimer = new Timer();
         readonly Timer refreshTimer = new Timer();
         MenuPopup popup; // the open right-click menu, if any
+        Item previewItem;
+        DateTime lastPreviewClose = DateTime.MinValue;
         WindowPreview preview; // window thumbnails shown while hovering an app with several windows
         DateTime hoverSince = DateTime.UtcNow;
         readonly Font labelFont = Typography.Text(9.5f, Weight.Medium);
@@ -898,7 +900,15 @@ namespace MacDock
             bool hoverChanged = hover != hoverIndex;
             hoverIndex = hover;
             if (hoverChanged) hoverSince = DateTime.UtcNow;
-            if (hover >= 0 && preview == null && popup == null && dragItem == null && (DateTime.UtcNow - hoverSince).TotalMilliseconds > 350)
+            // Moving straight from one icon to the next swaps the popup at once (no dwell, no gap); the old one closes
+            // in the same tick the new one opens, so nothing flashes in between.
+            if (hover >= 0 && preview != null && previewItem != items[hover] && popup == null && dragItem == null)
+            {
+                preview.Close();
+                ShowPreview(items[hover]);
+            }
+            else if (hover >= 0 && preview == null && popup == null && dragItem == null &&
+                     ((DateTime.UtcNow - hoverSince).TotalMilliseconds > 350 || (DateTime.UtcNow - lastPreviewClose).TotalMilliseconds < 400))
                 ShowPreview(items[hover]);
             LayoutItems();
 
@@ -1414,8 +1424,9 @@ namespace MacDock
                 Rectangle r = RectangleToScreen(Rectangle.Round(target.Rect));
                 r.Inflate(4, 20);
                 return r.Contains(sp);
-            }, () => { if (preview == pv) preview = null; });
+            }, () => { if (preview == pv) { preview = null; lastPreviewClose = DateTime.UtcNow; } });
             preview = pv;
+            previewItem = it;
             pv.Show();
         }
 
