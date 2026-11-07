@@ -4,6 +4,8 @@ A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds 
 
 ![Desktop with dock and menu bar](docs/desktop.png)
 
+See the [changelog](CHANGELOG.md) for what's new in v1.2.
+
 ## Installation
 Requires Windows 11 (Windows 10 mostly works). No .NET SDK needed.
 
@@ -30,6 +32,10 @@ Requires Windows 11 (Windows 10 mostly works). No .NET SDK needed.
 - **Settings app**: dock, theme and icon options.
 - **Icon packs**: `.icns` icon packs in `icons/` and `dark-icons/`, with optional macosicons.com lookup.
 - **Web apps**: Brave, Edge and Chrome "Install as app" windows are treated as their own apps.
+- **LocalSend**: AirDrop-style file sharing with nearby devices.
+- **Downloads and folder fan**: dock folders open as a Fan, Grid or List, with folder colors, rename and drag to the Recycle Bin.
+- **Media tile and more Control Center tiles**: now-playing artwork and title, Night light, Project, Battery saver, Airplane mode.
+- **Fullscreen aware**: the dock, bar and island hide for fullscreen apps.
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
 ## Screenshots
