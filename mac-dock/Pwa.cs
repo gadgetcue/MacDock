@@ -14,7 +14,7 @@ namespace MacDock
 {
     static class Pwa
     {
-        const string AppsFolder = @"shell:AppsFolder\";
+        internal const string AppsFolder = @"shell:AppsFolder\";
 
         // True for the AppsFolder id of a Chromium web app.
         public static bool IsWebAppId(string id)

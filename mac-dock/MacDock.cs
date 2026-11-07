@@ -1221,6 +1221,11 @@ namespace MacDock
             Kind kind;
             if (!TryClassify(e.Target, out kind)) return;
             if (kind == Kind.App && !pinnedApps.Add(e.Target)) return;
+            if (kind == Kind.App)
+            {
+                string exe = MatchRunning(running, e.Target);
+                if (exe != null) pinnedApps.Add(exe); // keeps the running-only duplicate out of the dock
+            }
             list.Add(NewItem(kind, e.Target, e.Label, e, e.Section, running));
         }
 
@@ -1237,7 +1242,8 @@ namespace MacDock
             // Universal lookup: a running app's window carries its own AppUserModelID, which names the Start-menu entry
             // (proper name + icon) no matter how odd the exe is called.
             List<IntPtr> win;
-            if (kind == Kind.App && !ShellIcons.IsAppsFolderItem(target) && running.TryGetValue(target, out win))
+            string runKey = kind == Kind.App ? MatchRunning(running, target) : null;
+            if (runKey != null && !ShellIcons.IsAppsFolderItem(target) && running.TryGetValue(runKey, out win))
             {
                 foreach (IntPtr h in win.Take(3))
                 {
@@ -1255,8 +1261,79 @@ namespace MacDock
             it.Icon = GetIcon(it);
 
             List<IntPtr> handles;
-            if (kind == Kind.App && running.TryGetValue(target, out handles)) it.Handles = handles;
+            if (runKey != null && running.TryGetValue(runKey, out handles)) it.Handles = handles;
             return it;
+        }
+
+        static readonly System.Text.RegularExpressions.Regex PkgVersion = new System.Text.RegularExpressions.Regex(@"(WindowsApps\\[^_\\]+)_[^_\\]+_", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        static readonly Dictionary<string, string> LnkCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // Store packages carry their version in the folder name, which changes on update; ignore it when comparing.
+        static string NormPath(string p) { return PkgVersion.Replace(p, "$1_*_"); }
+
+        static string ResolveLnk(string path)
+        {
+            string r;
+            if (LnkCache.TryGetValue(path, out r)) return r;
+            r = null;
+            try
+            {
+                dynamic sh = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
+                r = (string)sh.CreateShortcut(path).TargetPath;
+                r = string.IsNullOrEmpty(r) ? null : Environment.ExpandEnvironmentVariables(r);
+            }
+            catch { }
+            LnkCache[path] = r;
+            return r;
+        }
+
+        // Finds the key in `running` (an exe path) that belongs to a pinned target: the exe itself, the exe a .lnk points
+        // at, or, for Start-menu / Store items, the exe whose window carries that AppUserModelID (or whose path ends
+        // the item's "{KnownFolder}\Sub\App.exe" id).
+        static string MatchRunning(Dictionary<string, List<IntPtr>> running, string target)
+        {
+            if (string.IsNullOrEmpty(target)) return null;
+            if (running.ContainsKey(target)) return target;
+
+            string id = Pwa.IdOfTarget(target);
+            if (id == null)
+            {
+                string exe = target;
+                if (target.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)) exe = ResolveLnk(target);
+                if (exe == null) return null;
+                if (running.ContainsKey(exe)) return exe;
+                string n = NormPath(exe);
+                foreach (string k in running.Keys)
+                    if (string.Equals(NormPath(k), n, StringComparison.OrdinalIgnoreCase)) return k;
+                return null;
+            }
+
+            foreach (KeyValuePair<string, List<IntPtr>> kv in running)
+            {
+                if (kv.Key.StartsWith(Pwa.AppsFolder, StringComparison.OrdinalIgnoreCase)) continue; // web apps match by exact key above
+                foreach (IntPtr h in kv.Value.Take(4))
+                {
+                    string a = Pwa.AumidOfWindow(h);
+                    if (!string.IsNullOrEmpty(a) && string.Equals(a, id, StringComparison.OrdinalIgnoreCase)) return kv.Key;
+                }
+            }
+            // Store apps: "<Name>_<publisherId>!<App>" matches the exe under WindowsApps\<Name>_<version>_<arch>__<publisherId>.
+            int bang = id.IndexOf('!'), us = id.LastIndexOf('_', bang > 0 ? bang : id.Length - 1);
+            if (bang > 0 && us > 0)
+            {
+                string pkg = id.Substring(0, us), pub = id.Substring(us + 1, bang - us - 1);
+                foreach (string k in running.Keys)
+                    if (k.IndexOf("\\WindowsApps\\" + pkg + "_", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        k.IndexOf("__" + pub + "\\", StringComparison.OrdinalIgnoreCase) >= 0) return k;
+            }
+            int brace = id.IndexOf("}\\", StringComparison.Ordinal);
+            if (id.StartsWith("{") && brace > 0)
+            {
+                string tail = "\\" + id.Substring(brace + 2);
+                foreach (string k in running.Keys)
+                    if (k.EndsWith(tail, StringComparison.OrdinalIgnoreCase)) return k;
+            }
+            return null;
         }
 
         static string DefaultLabel(Kind kind, string target)
