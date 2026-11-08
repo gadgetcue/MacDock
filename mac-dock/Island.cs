@@ -508,6 +508,8 @@ namespace MacDock
                 fmtRight = new StringFormat(fmtLeft) { Alignment = StringAlignment.Far };
             }
             StringFormat left = fmtLeft, right = fmtRight;
+            // Grayscale grid-fit AA: ClearType showed colour fringes on the layered window.
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             Color white = A(Color.White, alpha), gray = A(Color.FromArgb(150, 255, 255, 255), alpha);
 
             using (var wb = new SolidBrush(white))

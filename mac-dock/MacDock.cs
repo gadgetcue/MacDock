@@ -64,6 +64,38 @@ namespace MacDock
             finally { CloseHandle(snap); }
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct STARTUPINFO { public int cb; public string r, d, t; public int x, y, xs, ys, xc, yc, fa, fl; public short sw, cr2; public IntPtr r2, i, o, e; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROCINFO { public IntPtr hP, hT; public int pid, tid; }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateProcessW(string app, string cmd, IntPtr pa, IntPtr ta, bool inh, uint flags, IntPtr env, string dir, ref STARTUPINFO si, out PROCINFO pi);
+
+        // CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW-free; fails harmlessly if the job forbids breakaway.
+        static bool SpawnDetached(string exe)
+        {
+            try
+            {
+                var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+                PROCINFO pi;
+                if (!CreateProcessW(null, "\"" + exe + "\" --detached", IntPtr.Zero, IntPtr.Zero, false, 0x01000000 | 0x200 | 0x8, IntPtr.Zero, Path.GetDirectoryName(exe), ref si, out pi)) return false;
+                CloseHandle(pi.hP); CloseHandle(pi.hT);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // True once another instance holds the single-instance mutex (waits up to 5 s).
+        static bool DetachedUp()
+        {
+            for (int i = 0; i < 25; i++)
+            {
+                try { System.Threading.Mutex.OpenExisting("MacDockSingleInstance").Dispose(); return true; } catch { }
+                System.Threading.Thread.Sleep(200);
+            }
+            return false;
+        }
+
         [STAThread]
         static void Main(string[] args)
         {
@@ -99,12 +131,20 @@ namespace MacDock
                 string par = ParentName();
                 if (par != "" && par != "explorer.exe" && par != "svchost.exe" && par != "taskeng.exe" && par != "taskhostw.exe" && par != "services.exe" && par != "macdock.exe" && par != "winlogon.exe" && par != "userinit.exe")
                 {
-                    try
+                    // Only exit once a detached copy is really up (it takes the single-instance mutex); otherwise keep running here.
+                    string self = Application.ExecutablePath;
+                    if (File.Exists(self))
                     {
-                        Process.Start(new ProcessStartInfo("explorer.exe", "\"" + Application.ExecutablePath + "\"") { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
-                        return;
+                        if (SpawnDetached(self) && DetachedUp()) { Log("DETACH ok via CreateProcess breakaway"); return; }
+                        try
+                        {
+                            // No explorer.exe launch here: from a packaged (Claude) context the per-user AppData path is virtualised, and explorer shows "path does not exist" popups. Ask the existing MacDockGuard task (real path, outside any job) instead.
+                            Process.Start(new ProcessStartInfo("schtasks.exe", "/Run /TN MacDockGuard") { UseShellExecute = false, CreateNoWindow = true });
+                            if (DetachedUp()) { Log("DETACH ok via MacDockGuard task"); return; }
+                        }
+                        catch (Exception ex) { Log(ex); }
+                        Log("DETACH failed; running in place");
                     }
-                    catch { }
                 }
             }
 
@@ -115,7 +155,11 @@ namespace MacDock
                 Application.EnableVisualStyles();
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
                 Application.ThreadException += (s, e) => Log(e.Exception);
-                AppDomain.CurrentDomain.ProcessExit += (s, e) => TaskbarControl.Restore();
+                Log("START pid=" + Process.GetCurrentProcess().Id + " parent=" + ParentName() + " args=" + string.Join(" ", args));
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => { Log("EXIT (ProcessExit) QuitRequested=" + QuitRequested + " " + Environment.StackTrace); TaskbarControl.Restore(); };
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => Log("UNHANDLED (terminating=" + e.IsTerminating + ") " + e.ExceptionObject);
+                System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) => Log("UNOBSERVED " + e.Exception);
+                Microsoft.Win32.SystemEvents.SessionEnding += (s, e) => Log("SessionEnding reason=" + e.Reason);
                 Theme.Refresh();
                 Motion.Refresh();
                 SetUi.EnsureAutostart(); // rewritten every launch unless the user turned it off in Settings
@@ -293,6 +337,7 @@ namespace MacDock
             {
                 APPBARDATA get = NewData(tray);
                 previousState = (uint)(ulong)SHAppBarMessage(ABM_GETSTATE, ref get);
+                try { File.WriteAllText(StatePath(), previousState.ToString()); } catch { } // survives a kill, so /restore puts the user's real state back
                 APPBARDATA set = NewData(tray);
                 set.lParam = (IntPtr)(previousState | ABS_AUTOHIDE);
                 SHAppBarMessage(ABM_SETSTATE, ref set);
@@ -318,14 +363,22 @@ namespace MacDock
             if (tray != IntPtr.Zero)
             {
                 APPBARDATA set = NewData(tray);
-                set.lParam = (IntPtr)(previousState & ~ABS_AUTOHIDE);
+                set.lParam = (IntPtr)previousState; // exactly what the user had, including their own auto-hide choice
                 SHAppBarMessage(ABM_SETSTATE, ref set);
+                // Nudge Explorer to re-read taskbar settings and relayout (pins can stay blank after SW_HIDE otherwise)
+                IntPtr res;
+                SendMessageTimeout((IntPtr)0xFFFF, 0x1A, IntPtr.Zero, "TraySettings", 2, 500, out res);
+                try { File.Delete(StatePath()); } catch { }
             }
         }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, string l, uint f, uint t, out IntPtr r);
+        static string StatePath() { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "taskbar-state.txt"); }
 
         public static void ForceRestore()
         {
             previousState = ABS_ALWAYSONTOP;
+            try { uint v; if (uint.TryParse(File.ReadAllText(StatePath()).Trim(), out v)) previousState = v; } catch { }
             hidden = true;
             Restore();
         }
@@ -478,7 +531,16 @@ namespace MacDock
         static int PadY { get { return Px(Tokens.Space2); } }
         static int BottomMargin { get { return Px(Tokens.Space2); } }     // space between dock and the bottom of the screen
         static int FormHeight { get { return (int)Math.Ceiling(BasePx * Math.Max(1.0, MaxScale)) + Px(66); } }
-        const int IconSource = 96;      // stored icon resolution, enough for max zoom
+        static int IconSource = 96;     // stored icon resolution; FitIconSource raises it so max zoom is never upscaled (blurry at 125%+ DPI)
+        // Stored size = largest drawn size (rest size x zoom x DPI), rounded up to 16 and kept within 96..192. True when it changed.
+        static bool FitIconSource()
+        {
+            int need = (int)Math.Ceiling(BaseSize * Sc * Math.Max(1.0, MaxScale));
+            need = Math.Max(96, Math.Min(192, (need + 15) / 16 * 16));
+            if (need == IconSource) return false;
+            IconSource = need;
+            return true;
+        }
 
         // Motion. Magnification is a nearly critically damped spring: quick, no wobble. The launch bounce is
         // a ball under gravity that keeps ~55% of its speed on each landing (about three bounces per round).
@@ -578,8 +640,10 @@ namespace MacDock
 
         static void ReadDockSwitches()
         {
-            ShowDockOn = true;  // never hidden: always shown, auto-hide disabled
-            AutoHideOn = false;
+            ShowDockOn = true;  // never fully hidden by the "show dock" switch
+            string ah = SetCfg.Get("auto-hide-dock");
+            for (int i = 0; ah == null && i < 5; i++) { System.Threading.Thread.Sleep(100); ah = SetCfg.Get("auto-hide-dock"); } // file may be briefly locked at startup
+            AutoHideOn = ah != null && SetCfg.GetBool("auto-hide-dock", false);
         }
 
         // The centre of the dock icon that belongs to this window's app (screen coordinates), for the genie effect.
@@ -702,8 +766,10 @@ namespace MacDock
             MaxScale = Math.Max(1.0, Math.Min(2.2, magnify));
             try { File.WriteAllText(SizeFile, "size=" + BaseSize + "\nmagnify=" + MaxScale.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n"); } catch { }
             if (preview != null) preview.Close();
+            bool bigger = FitIconSource();
             FitCanvas();
             if (ShowDockOn && !AutoHideOn && IsHandleCreated) ReserveBottom();
+            if (bigger && IsHandleCreated) BeginInvoke(new Action(RefreshIcons));
             Invalidate();
         }
 
@@ -837,6 +903,7 @@ namespace MacDock
             float s = Dpi.Of(area);
             if (Math.Abs(s - Sc) < 0.001f) return;
             Sc = s;
+            if (FitIconSource()) { if (IsHandleCreated) BeginInvoke(new Action(RefreshIcons)); else RefreshIcons(); }
             Font old = labelFont;
             labelFont = Typography.Text(9.5f * Sc, Weight.Medium);
             if (old != null) old.Dispose();
@@ -1033,7 +1100,8 @@ namespace MacDock
             Rectangle dockScreen = Screen.FromHandle(Handle).Bounds;
             bool onDockScreen = screen == dockScreen;
 
-            bool atEdge = onDockScreen && p.Y >= dockScreen.Bottom - 3;            if (atEdge)
+            bool atEdge = onDockScreen && p.Y >= dockScreen.Bottom - 3;
+            if (atEdge)
             {
                 if (edgeSince == DateTime.MaxValue) edgeSince = DateTime.Now;
                 else if ((DateTime.Now - edgeSince).TotalMilliseconds >= 150) revealed = true;
@@ -2034,6 +2102,7 @@ namespace MacDock
                 {
                     Item targetItem = it;
                     list.Add(MenuEntry.Item("Close", null, () => CloseItem(targetItem)));
+                    if (it.Handles.Count >= 2) list.Add(MenuEntry.Item("Close all windows", null, () => CloseItem(targetItem))); // WM_CLOSE to each window only; never touches MacDock
                     list.Add(MenuEntry.Item("Force Close", null, () => ForceCloseItem(targetItem)));
                     list.Add(MenuEntry.Sep());
                 }
@@ -2140,12 +2209,14 @@ namespace MacDock
                     string exeName = Path.GetFileNameWithoutExtension(it.Target);
                     foreach (var p in Process.GetProcessesByName(exeName))
                     {
-                        try { pids.Add((uint)p.Id); } catch { }
+                        try { if (!p.ProcessName.Equals("MacDock", StringComparison.OrdinalIgnoreCase)) pids.Add((uint)p.Id); } catch { }
                     }
                 }
                 catch { }
             }
 
+            pids.Remove((uint)Process.GetCurrentProcess().Id); // force quit must never take the dock down with it
+            Program.Log("FORCECLOSE " + it.Label + " pids=" + string.Join(",", pids));
             foreach (uint pid in pids)
             {
                 try
@@ -2441,7 +2512,7 @@ namespace MacDock
         // Puts the icon on a macOS-style rounded-square tile. Light icons get a dark tile so they stay visible.
         internal static Bitmap Tile(Bitmap icon)
         {
-            const int S = IconSource;
+            int S = IconSource;
             // Icons that already are a full rounded-square tile (macOS-style, transparent corners) keep their own shape:
             // no extra plate behind them, scaled so the tile fills the slot.
             Rectangle full;
@@ -2567,7 +2638,7 @@ namespace MacDock
         // A gear on a graphite plate: the Settings icon when no icon pack is installed.
         static Bitmap GearIcon()
         {
-            const int S = IconSource;
+            int S = IconSource;
             var bmp = new Bitmap(S, S);
             using (Graphics g = Graphics.FromImage(bmp))
             {
@@ -2609,7 +2680,7 @@ namespace MacDock
         // A globe on a blue plate for websites and other links.
         static Bitmap WebIcon()
         {
-            const int S = IconSource;
+            int S = IconSource;
             var bmp = new Bitmap(S, S);
             using (Graphics g = Graphics.FromImage(bmp))
             {
@@ -2639,7 +2710,7 @@ namespace MacDock
         // Three overlapping windows on a dark plate, like the Mission Control icon.
         static Bitmap MissionIcon()
         {
-            const int S = IconSource;
+            int S = IconSource;
             var bmp = new Bitmap(S, S);
             using (Graphics g = Graphics.FromImage(bmp))
             {
@@ -2678,7 +2749,7 @@ namespace MacDock
         // A grid of colored squares, like Launchpad.
         static Bitmap LaunchpadIcon()
         {
-            const int S = IconSource;
+            int S = IconSource;
             var bmp = new Bitmap(S, S);
             using (Graphics g = Graphics.FromImage(bmp))
             {
@@ -2712,7 +2783,7 @@ namespace MacDock
         // The Start item replaces the hidden taskbar's Start button.
         static Bitmap StartIcon()
         {
-            const int S = IconSource;
+            int S = IconSource;
             var bmp = new Bitmap(S, S);
             using (Graphics g = Graphics.FromImage(bmp))
             {

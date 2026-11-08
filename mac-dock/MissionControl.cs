@@ -238,8 +238,8 @@ namespace MacDock
             if (glassComp != null) { glassComp.Dispose(); glassComp = null; }
             tBuilt = System.Diagnostics.Stopwatch.GetTimestamp();
 
-            caretTimer.Interval = 530;
-            caretTimer.Tick += (s, e) => { if (hold || search.Length == 0) return; caretOn = !caretOn; lastStaticKey = int.MinValue; dirty = true; };
+            caretTimer.Interval = 55;
+            caretTimer.Tick += (s, e) => PulseCaret();
             if (!prewarm) caretTimer.Start();
 
             AllowDrop = true; // tiles can be dropped on each other, on folders and back out of a folder
@@ -618,7 +618,7 @@ namespace MacDock
             }
         }
         Rectangle ChipRow { get { Rectangle pn = PanelRect; return new Rectangle(pn.Left + 24, pn.Top + 18, pn.Width - 48, 38); } }
-        Rectangle SortRect { get { Rectangle pl = PillRect; return new Rectangle(pl.Right - 74, pl.Top + (pl.Height - 32) / 2, 40, 32); } }
+        Rectangle SortRect { get { Rectangle pl = PillRect; return new Rectangle(pl.Right - 70, pl.Top + (pl.Height - 32) / 2, 32, 32); } }
         Rectangle PanelClip { get { Rectangle pn = PanelRect, a = ContentArea; return new Rectangle(pn.Left, a.Top - 10, pn.Width, pn.Bottom - a.Top + 10); } }
 
         static readonly string[] Categories = { "All", "Productivity & Finance", "Creativity", "Utilities", "Information & Reading", "Games", "Entertainment", "Social" };
@@ -950,6 +950,35 @@ namespace MacDock
         }
         // One UpdateLayeredWindow per frame. While animating, the frame is drawn scaled (anchored bottom-centre, where the
         // dock is) into a scratch surface; at rest it goes straight out.
+        Rectangle caretRect, caretBox; float caretCx; Bitmap caretPatch;
+        static float CaretPulse() { double t = (Environment.TickCount & 0x7fffffff) % 900 / 900.0; return (float)(0.22 + 0.78 * (0.5 - 0.5 * Math.Cos(2 * Math.PI * t))); }
+        static void DrawCaretMark(Graphics g, Rectangle box, float cx)
+        {
+            SmoothingMode sm = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var caret = new Pen(Color.FromArgb((int)(235 * CaretPulse()), 255, 255, 255), 1.8f))
+                g.DrawLine(caret, cx, box.Top + box.Height * 0.3f, cx, box.Bottom - box.Height * 0.3f);
+            g.SmoothingMode = sm;
+        }
+        // Repaints just the caret over the saved pill pixels and presents only that rectangle.
+        void PulseCaret()
+        {
+            if (hold || dirty || closing || prog < 1 || page != Page.Apps || openFolder != null || surface == null || caretPatch == null || caretRect.IsEmpty) return;
+            try
+            {
+                using (Graphics g = Graphics.FromImage(surface.Bitmap))
+                {
+                    g.SetClip(caretRect);
+                    g.CompositingMode = CompositingMode.SourceCopy;
+                    g.DrawImageUnscaled(caretPatch, caretRect.Location);
+                    g.CompositingMode = CompositingMode.SourceOver;
+                    DrawCaretMark(g, caretBox, caretCx);
+                }
+                PresentFrame(caretRect);
+            }
+            catch { }
+        }
+
         void PresentFrame(Rectangle band)
         {
             if (tFirstPres == 0) tFirstPres = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1120,10 +1149,10 @@ namespace MacDock
 
                 // Floating search pill: wide dark glass, "A" glyph, large light placeholder, blinking caret, "..." button.
                 Rectangle box = PillRect;
-                using (GraphicsPath sh = Layered.RoundedRect(Rectangle.Inflate(box, 3, 6), (int)(box.Height * 0.4) + 4))
+                using (GraphicsPath sh = Layered.RoundedRect(Rectangle.Inflate(box, 3, 6), (Rectangle.Inflate(box, 3, 6).Height) / 2))
                 using (var shb = new SolidBrush(Color.FromArgb(46, 0, 0, 0)))
                     g.FillPath(shb, sh);
-                using (GraphicsPath p = Layered.RoundedRect(box, (int)(box.Height * 0.4)))
+                using (GraphicsPath p = Layered.RoundedRect(box, box.Height / 2))
                 {
                     if (deskBlur != null)
                         using (var tex = new TextureBrush(deskBlur, WrapMode.Clamp)) g.FillPath(tex, p);
@@ -1132,10 +1161,15 @@ namespace MacDock
                         g.FillPath(grad, p);
                     using (var sheen = new LinearGradientBrush(box, Color.FromArgb(34, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), LinearGradientMode.Vertical))
                         g.FillPath(sheen, p);
-                    using (var rim = new Pen(Color.FromArgb(70, 255, 255, 255), 1f))
-                        g.DrawPath(rim, p);
+                    var rr = new RectangleF(box.Left + 0.5f, box.Top + 0.5f, box.Width - 1f, box.Height - 1f);
+                    SmoothingMode rimSm = g.SmoothingMode;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    using (GraphicsPath rp = Layered.RoundedRect(rr, rr.Height / 2f))
+                    using (var rim = new Pen(Color.FromArgb(95, 255, 255, 255), 1f))
+                        g.DrawPath(rim, rp);
+                    g.SmoothingMode = rimSm;
                 }
-                float gs = box.Height * 0.34f / 440f, gx = box.Left + 58, gy = box.Top + box.Height / 2f;
+                float gs = box.Height * 0.34f / 440f, gx = box.Left + box.Height * 0.66f, gy = box.Top + box.Height / 2f;
                 using (var pen = new Pen(Color.FromArgb(120, 255, 255, 255), 72f * gs) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 {
                     g.DrawLine(pen, gx - 207 * gs, gy + 220 * gs, gx + 48 * gs, gy - 220 * gs);   // left leg
@@ -1143,14 +1177,18 @@ namespace MacDock
                     g.DrawLine(pen, gx - 262 * gs, gy + 105 * gs, gx + 263 * gs, gy + 105 * gs);  // crossbar
                 }
                 bool empty = search.Length == 0;
-                int tx = box.Left + 116;
-                Rectangle tr = new Rectangle(tx, box.Top, box.Width - 116 - 90, box.Height);
+                int tx = box.Left + (int)(box.Height * 1.33f);
+                Rectangle tr = new Rectangle(tx, box.Top, SortRect.Left - (int)(box.Height * 0.12f) - tx, box.Height);
                 using (var text = new SolidBrush(empty ? Color.FromArgb(190, 255, 255, 255) : Color.White))
                     g.DrawString(empty ? "Applications" : search, pillFont, text, tr, Typography.Format());
                 float cx = tx + (empty ? 0 : g.MeasureString(search, pillFont, 900, StringFormat.GenericTypographic).Width + 2);
-                if (caretOn)
-                    using (var caret = new Pen(Color.FromArgb(235, 255, 255, 255), 1.8f))
-                        g.DrawLine(caret, cx, box.Top + box.Height * 0.3f, cx, box.Bottom - box.Height * 0.3f);
+                {
+                    float chh = box.Height * 0.4f;
+                    caretBox = box; caretCx = cx;
+                    caretRect = Rectangle.Intersect(new Rectangle((int)cx - 6, (int)(box.Top + (box.Height - chh) / 2f) - 4, 12, (int)chh + 8), new Rectangle(0, 0, surface.Width, surface.Height));
+                    try { if (caretPatch != null) caretPatch.Dispose(); caretPatch = caretRect.Width > 0 && caretRect.Height > 0 ? surface.Bitmap.Clone(caretRect, PixelFormat.Format32bppPArgb) : null; } catch { caretPatch = null; }
+                    DrawCaretMark(g, caretBox, caretCx);
+                }
                 Rectangle sort = SortRect;
                 using (var fill = new SolidBrush(Color.FromArgb(LaunchpadOrder.Mode == "custom" ? 70 : 40, 255, 255, 255)))
                 using (var ink = new Pen(Color.FromArgb(200, 255, 255, 255), 1.8f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
@@ -1158,7 +1196,7 @@ namespace MacDock
                     SmoothingMode oldSm = g.SmoothingMode;
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     if (LaunchpadOrder.Mode == "custom") g.FillEllipse(fill, sort);
-                    float sx = sort.Left + 20f, sy = sort.Top + 16f;
+                    float sx = sort.Left + 16f, sy = sort.Top + 16f;
                     // Sort glyph: three lines shrinking downward with an up/down arrow pair beside them.
                     g.DrawLine(ink, sx - 9f, sy - 5f, sx + 1f, sy - 5f);
                     g.DrawLine(ink, sx - 9f, sy,      sx - 2f, sy);
@@ -2403,7 +2441,7 @@ namespace MacDock
         {
             if (disposing)
             {
-                timer.Dispose(); caretTimer.Dispose();
+                timer.Dispose(); caretTimer.Dispose(); if (caretPatch != null) { caretPatch.Dispose(); caretPatch = null; }
                 if (deskBlur != null) deskBlur.Dispose();
             }
             base.Dispose(disposing);

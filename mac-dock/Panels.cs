@@ -217,15 +217,23 @@ namespace MacDock
             try
             {
                 Rectangle area = Screen.FromPoint(anchor).Bounds;
-                int w = panelWidth + Gutter * 2, h = 560 + Gutter * 2;
+                int w = panelWidth + Gutter * 2, h = 760 + Gutter * 2; // tall enough for the LocalSend device list
                 int x = Math.Max(area.Left, Math.Min(anchor.X - w / 2, area.Right - w));
                 int y = anchor.Y - Gutter + 6;
                 backdropRect = new Rectangle(x, y, w, Math.Min(h, area.Bottom - y));
-                using (var shot = new Bitmap(backdropRect.Width, backdropRect.Height, PixelFormat.Format32bppPArgb))
+                // Same as MenuPopup: capture a 64 px margin so the blur has real neighbours at the edges, then crop.
+                Rectangle cap = Rectangle.Intersect(Rectangle.Inflate(backdropRect, 64, 64), SystemInformation.VirtualScreen);
+                using (var shot = new Bitmap(cap.Width, cap.Height, PixelFormat.Format32bppPArgb))
                 {
                     using (Graphics g = Graphics.FromImage(shot))
-                        g.CopyFromScreen(backdropRect.Location, Point.Empty, backdropRect.Size);
-                    backdrop = BlurBitmap(shot);
+                        g.CopyFromScreen(cap.Location, Point.Empty, cap.Size);
+                    using (Bitmap big = BlurBitmap(shot))
+                    {
+                        var crop = new Bitmap(backdropRect.Width, backdropRect.Height, PixelFormat.Format32bppPArgb);
+                        using (Graphics cg = Graphics.FromImage(crop))
+                            cg.DrawImage(big, new Rectangle(0, 0, crop.Width, crop.Height), new Rectangle(backdropRect.Left - cap.Left, backdropRect.Top - cap.Top, crop.Width, crop.Height), GraphicsUnit.Pixel);
+                        backdrop = crop;
+                    }
                 }
             }
             catch { backdrop = null; }

@@ -1,20 +1,22 @@
-﻿# MacDock
+# MacDock
 
 A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds with the compiler that ships with Windows, so no SDK is needed.
 
-![Desktop with dock and menu bar](screenshots/v1.4/desktop.jpg)
+![Desktop with dock and menu bar](screenshots/v1.5/desktop.jpg)
 
-See the [changelog](CHANGELOG.md) for what's new in v1.4.
+See the [changelog](CHANGELOG.md) for what's new in v1.5.
 
 ## Installation guide
 **Requirements:** Windows 11 (Windows 10 mostly works), x64, .NET Framework 4.x (already part of Windows). No admin rights and no SDK needed.
 
-1. Download `MacDock-v1.4.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v1.4.zip SHA256`.
+1. Download `MacDock-v1.5.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v1.5.zip SHA256`.
 2. Extract the zip to any folder (right-click > Extract All).
 3. Double-click `Install.bat`. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
 4. MacDock is copied to `%LOCALAPPDATA%\MacDock`, a Start Menu shortcut is created, and the dock starts. It also starts at login (toggle in MacDock Settings).
 
 If Defender blocks or quarantines it, see [Why does Windows Defender flag MacDock?](#why-does-windows-defender-flag-macdock).
+
+**Quitting:** quitting MacDock from its menu restores the Windows taskbar automatically. If MacDock is killed while the taskbar is hidden, run `MacDock.exe /restore`.
 
 **Start / restart:** open *MacDock* from the Start Menu, or run `%LOCALAPPDATA%\MacDock\bin\MacDock.exe`. To restart it, exit MacDock and start it again from the Start Menu. If the taskbar stays hidden after a crash, run `MacDock.exe /restore` (or `mac-dock\restore-taskbar.bat` from the repo).
 
@@ -55,28 +57,23 @@ You do not have to take our word for it:
 - **Fullscreen aware**: the dock, bar and island hide for fullscreen apps.
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
-## Screenshots (v1.4)
-![Desktop with dock and menu bar](screenshots/v1.4/desktop.jpg)
+## Screenshots (v1.5)
+![Desktop with dock and menu bar](screenshots/v1.5/desktop.jpg)
 
-![Dock magnification](screenshots/v1.4/dock-magnify.jpg)
+![Dock magnification](screenshots/v1.5/dock-magnify.jpg)
 
-![Dock right-click menu](screenshots/v1.4/dock-menu.jpg)
+![Launchpad with the search pill](screenshots/v1.5/launchpad.jpg)
 
-![Launchpad](screenshots/v1.4/launchpad.jpg)
+![Control Center](screenshots/v1.5/control-center.jpg)
 
-![Control Center](screenshots/v1.4/control-center.jpg)
+![MacDock Settings](screenshots/v1.5/settings.jpg)
 
-![Dynamic Island](screenshots/v1.4/island.jpg)
+![Apple menu](screenshots/v1.5/apple-menu.jpg)
 
-![LocalSend panel](screenshots/v1.4/localsend-panel.jpg)
+Screenshots were taken on dark mode only; light mode was not captured for this release.
 
-![Share with MacDock LocalSend in Explorer](screenshots/v1.4/localsend-sendto.jpg)
-
-![Window previews](screenshots/v1.4/window-preview.jpg)
-
-![Downloads fan](screenshots/v1.4/downloads-fan.jpg)
-
-![Apple menu](screenshots/v1.4/apple-menu.jpg)
+## Memory use
+Measured on the v1.5 build on Windows 11 (1920x1080) with the dock idle: **~7-43 MB working set** (about 24 MB average over a minute; Windows trims it), **~92-103 MB private bytes**, and a **peak working set of ~140 MB** since launch (start-up and opening Launchpad). Numbers vary with how many apps you pin and which icon packs you load.
 ## Videos
 - [Demo 1](docs/demo-1.mp4)
 - [Demo 2](docs/demo-2.mp4)
@@ -97,8 +94,4 @@ An optional macosicons.com API key goes in `dock.txt` as `@macosicons-key = YOUR
 
 ## Credits
 Fonts: Inter (SIL Open Font License). Icons in `icons/` and `dark-icons/` belong to their respective authors.
-
-
-
-
 
