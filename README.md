@@ -1,27 +1,39 @@
-# MacDock
+﻿# MacDock
 
 A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds with the compiler that ships with Windows, so no SDK is needed.
 
-![Desktop with dock and menu bar](docs/desktop.png)
+![Desktop with dock and menu bar](screenshots/v1.4/desktop.png)
 
-See the [changelog](CHANGELOG.md) for what's new in v1.3.
+See the [changelog](CHANGELOG.md) for what's new in v1.4.
 
-## Installation
-Requires Windows 11 (Windows 10 mostly works). No .NET SDK needed.
+## Installation guide
+**Requirements:** Windows 11 (Windows 10 mostly works), x64, .NET Framework 4.x (already part of Windows). No admin rights and no SDK needed.
 
-1. Download the latest release zip from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest).
-2. Unzip it anywhere.
-3. Run `Install.bat`.
+1. Download `MacDock-v1.4.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v1.4.zip SHA256`.
+2. Extract the zip to any folder (right-click > Extract All).
+3. Double-click `Install.bat`. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
+4. MacDock is copied to `%LOCALAPPDATA%\MacDock`, a Start Menu shortcut is created, and the dock starts. It also starts at login (toggle in MacDock Settings).
 
-`Install.bat` copies MacDock to `%LOCALAPPDATA%\MacDock` (no admin needed), adds a Start Menu shortcut and launches it. It starts at login by default (toggle in MacDock Settings), and a small `MacDockGuard` scheduled task relaunches the dock if it is killed.
+If Defender blocks or quarantines it, see [Why does Windows Defender flag MacDock?](#why-does-windows-defender-flag-macdock).
 
-**Uninstall:** run `Uninstall.bat` from the unzipped release. It restores the taskbar, stops MacDock, removes autostart, the guard task and the shortcut, and deletes the install folder. Pins and settings in `%APPDATA%\MacDock` are kept until you delete that folder.
+**Start / restart:** open *MacDock* from the Start Menu, or run `%LOCALAPPDATA%\MacDock\bin\MacDock.exe`. To restart it, exit MacDock and start it again from the Start Menu. If the taskbar stays hidden after a crash, run `MacDock.exe /restore` (or `mac-dock\restore-taskbar.bat` from the repo).
 
-## Antivirus and SmartScreen note
-The release exe is **unsigned**, so Windows SmartScreen or Defender heuristics may flag it (it uses a global keyboard hook and window APIs, as any dock or shell replacement does). You can:
-- Build it from source yourself (see below); the code is open.
-- Verify the download against the SHA256 listed in the release notes (`certutil -hashfile MacDock.exe SHA256`).
+**Uninstall:** run `Uninstall.bat` from the extracted folder (or `%LOCALAPPDATA%\MacDock\Uninstall.bat`). It restores the taskbar, stops MacDock, removes autostart, the optional guard task and the shortcut, and deletes the install folder. Pins and settings in `%APPDATA%\MacDock` are kept until you delete that folder.
 
+## Why does Windows Defender flag MacDock?
+Short version: **it is a false positive**, but it is understandable why it happens.
+
+- **Unsigned, new, self-built.** The exe is built with the C# compiler that ships with Windows and has no code-signing certificate. Unsigned executables with few downloads have no reputation, so SmartScreen and Defender's cloud heuristics treat them cautiously.
+- **It does the things a shell does.** MacDock uses global/low-level Windows hooks (keyboard, gestures), enumerates and thumbnails other apps' windows (window enumeration, DWM), applies glass effects with `SetWindowCompositionAttribute`, simulates input, hides or replaces taskbar behavior, and registers startup entries. Heuristic engines associate that combination with keyloggers and droppers, even though here it is used for the dock, menu bar and window previews.
+- **What it does not do:** MacDock has no account and no analytics or telemetry code. Its network use is limited to LocalSend transfers with devices on your LAN, the optional macosicons.com icon lookup, and fetching favicons for website pins.
+
+You do not have to take our word for it:
+- The source is fully open in this repo. Read it, or build it yourself: `mac-dock\build.bat` (run it from a folder path without a `#` in it).
+- Check the zip's SHA256 (listed in each release) and upload the file to [VirusTotal](https://www.virustotal.com/); a few engines may flag it heuristically.
+
+**If Defender quarantined it:** Windows Security > Virus & threat protection > Protection history > select the item > Actions > **Restore** (or Allow on device). To stop it being re-flagged, add an exclusion: Virus & threat protection > Manage settings > Exclusions > Add or remove exclusions > Add an exclusion > Folder > `%LOCALAPPDATA%\MacDock`. Then re-run `Install.bat`.
+
+**Help us:** you can report the false positive to Microsoft at <https://www.microsoft.com/en-us/wdsi/filesubmission> (choose "Software developer", upload the exe). Each accepted report improves detection for everyone.
 ## Features
 - **Dock**: magnification, running indicators, drag to reorder, drop files on apps, and a working Recycle Bin. Pins live in `dock.txt` (apps, folders, files, websites, `ms-settings:` links).
 - **Genie minimize**: windows are sucked into their dock icon and flow back out, drawn from live window thumbnails.
@@ -43,17 +55,20 @@ The release exe is **unsigned**, so Windows SmartScreen or Defender heuristics m
 - **Fullscreen aware**: the dock, bar and island hide for fullscreen apps.
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
-## Screenshots
-![Dock](docs/dock.png)
+## Screenshots (v1.4)
+![Desktop with dock and menu bar](screenshots/v1.4/desktop.png)
 
-![Dock magnification](docs/dock-magnify.png)
+![Dock magnification](screenshots/v1.4/dock-magnify.png)
 
-![Control Center](docs/control-center.png)
+![Launchpad](screenshots/v1.4/launchpad.png)
 
-![Dynamic Island notifications](docs/notifications.png)
+![Control Center](screenshots/v1.4/control-center.png)
 
-![Launchpad](docs/launchpad.png)
+![Dock right-click menu](screenshots/v1.4/dock-menu.png)
 
+![Downloads fan](screenshots/v1.4/downloads-fan.png)
+
+![Apple menu](screenshots/v1.4/apple-menu.png)
 ## Videos
 - [Demo 1](docs/demo-1.mp4)
 - [Demo 2](docs/demo-2.mp4)
@@ -74,3 +89,7 @@ An optional macosicons.com API key goes in `dock.txt` as `@macosicons-key = YOUR
 
 ## Credits
 Fonts: Inter (SIL Open Font License). Icons in `icons/` and `dark-icons/` belong to their respective authors.
+
+
+
+

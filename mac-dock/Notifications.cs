@@ -125,16 +125,89 @@ namespace MacDock
             if (built) return;
             built = true;
             lastBuild = DateTime.Now;
+            Watch();
             Apply(Enumerate());
         }
 
         static DateTime lastBuild = DateTime.MinValue;
+        static volatile bool startMenuChanged;
+        static readonly List<FileSystemWatcher> watchers = new List<FileSystemWatcher>();
+
+        // A shortcut added or removed in the Start Menu forces the next Refresh, whatever the throttle says.
+        static void Watch()
+        {
+            foreach (string dir in StartMenuDirs())
+            {
+                try
+                {
+                    var w = new FileSystemWatcher(dir) { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite };
+                    FileSystemEventHandler h = (o, e) => startMenuChanged = true;
+                    w.Created += h; w.Deleted += h; w.Changed += h; w.Renamed += (o, e) => startMenuChanged = true;
+                    w.EnableRaisingEvents = true;
+                    watchers.Add(w);
+                }
+                catch { }
+            }
+        }
+
+        static IEnumerable<string> StartMenuDirs()
+        {
+            string[] dirs = {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"Microsoft\Windows\Start Menu\Programs") };
+            foreach (string d in dirs) if (Directory.Exists(d)) yield return d;
+        }
+
+        // Start Menu shortcut name -> its resolved targets. Several shortcuts can share a name.
+        static Dictionary<string, List<string>> ShortcutTargets()
+        {
+            var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                Type t = Type.GetTypeFromProgID("WScript.Shell");
+                object sh = Activator.CreateInstance(t);
+                foreach (string dir in StartMenuDirs())
+                    foreach (string lnk in Directory.GetFiles(dir, "*.lnk", SearchOption.AllDirectories))
+                    {
+                        string target = null;
+                        try
+                        {
+                            object sc = t.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, sh, new object[] { lnk });
+                            target = sc.GetType().InvokeMember("TargetPath", BindingFlags.GetProperty, null, sc, null) as string;
+                            if (!string.IsNullOrEmpty(target)) target = Environment.ExpandEnvironmentVariables(target);
+                        }
+                        catch { }
+                        string name = Path.GetFileNameWithoutExtension(lnk);
+                        List<string> l;
+                        if (!map.TryGetValue(name, out l)) map[name] = l = new List<string>();
+                        l.Add(target);
+                    }
+            }
+            catch (Exception ex) { Program.Log(ex); }
+            return map;
+        }
+
+        // A target on a local drive that no longer exists (an uninstalled program). Empty, URL, shell: and Store targets are never "missing".
+        static bool TargetMissing(string target)
+        {
+            if (string.IsNullOrEmpty(target) || target.Length < 3 || target[1] != ':' || target[2] != '\\') return false;
+            if (target.IndexOf(@"\WindowsApps\", StringComparison.OrdinalIgnoreCase) >= 0) return false; // Store folder: not listable, so absence proves nothing
+            return !File.Exists(target) && !Directory.Exists(target);
+        }
+
+        // The existing shortcut targets the Start Menu holds for an app name, for matching it to an uninstall entry.
+        public static List<string> TargetsFor(string name)
+        {
+            List<string> l;
+            return ShortcutTargets().TryGetValue(name, out l) ? l.Where(x => !string.IsNullOrEmpty(x)).ToList() : new List<string>();
+        }
 
         // Reads the AppsFolder again, so apps installed since (a Brave or Edge web app, a new program) show up without
         // restarting MacDock. At most every ten seconds. Returns true when the list changed.
         public static bool Refresh()
         {
-            if (!built || (DateTime.Now - lastBuild).TotalSeconds < 10) return false;
+            if (!built || ((DateTime.Now - lastBuild).TotalSeconds < 10 && !startMenuChanged)) return false;
+            startMenuChanged = false;
             lastBuild = DateTime.Now;
             List<KeyValuePair<string, string>> fresh = Enumerate();
             if (fresh.Count == 0) return false;
@@ -172,11 +245,19 @@ namespace MacDock
                 object shell = Activator.CreateInstance(shellType);
                 object folder = shellType.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { "shell:AppsFolder" });
                 object items = folder.GetType().InvokeMember("Items", BindingFlags.InvokeMethod, null, folder, null);
+                Dictionary<string, List<string>> links = ShortcutTargets();
                 foreach (object item in (IEnumerable)items)
                 {
                     string name = (string)item.GetType().InvokeMember("Name", BindingFlags.GetProperty, null, item, null);
                     string id = (string)item.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, item, null);
                     if (string.IsNullOrWhiteSpace(name) || string.IsNullOrEmpty(id)) continue;
+                    // Leftovers of uninstalled programs: an id that is a missing path, or a name whose every Start Menu shortcut points at a missing file.
+                    if (id.IndexOf('!') < 0)
+                    {
+                        List<string> l;
+                        if (TargetMissing(id)) continue;
+                        if (links.TryGetValue(name, out l) && l.Count > 0 && l.All(TargetMissing)) continue;
+                    }
                     list.Add(new KeyValuePair<string, string>(name, id));
                 }
             }

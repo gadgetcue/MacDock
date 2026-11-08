@@ -73,7 +73,7 @@ namespace MacDock
         readonly Font pillFont = Typography.Text(26f);
         readonly System.Windows.Forms.Timer caretTimer = new System.Windows.Forms.Timer();
         bool caretOn = true;
-        readonly IntPtr previousForeground;
+        IntPtr previousForeground; bool hold; long spareBorn; static MissionControl spare; static System.Windows.Forms.Timer spareTimer;
 
         readonly List<Card> cards = new List<Card>();
         readonly List<Tile> allTiles = new List<Tile>();
@@ -90,8 +90,19 @@ namespace MacDock
         string search = "";
         List<Tile> fileTiles = new List<Tile>(); // Spotlight file results for the current search
         int fileSeq;
-        Spring fade = new Spring(0);
+        // Open/close: a short, subtle genie-style grow from the dock (scale + fade), time-based and eased via Tokens.
+        // Windows "Animation effects" off (Motion.Reduced) makes both instant.
+        const double OpenSecs = 0.16, CloseSecs = 0.10; // Windows 11 Start: ~250 ms decelerate slide-up + fade in, quicker drop out
+        double prog;                     // 0 = hidden, 1 = fully open
         double fadeGoal = 1;
+        // Start-menu motion: opening decelerates hard (quartic ease-out), closing accelerates away (ease-in); alpha leads the slide.
+        double Eased { get { return closing ? 1 - Tokens.EaseIn(1 - prog) : Quart(prog); } }
+        double FadeEased { get { double t = Math.Min(1.0, prog * (closing ? 1.0 : 2.2)); return closing ? 1 - Tokens.EaseIn(1 - t) : Quart(t); } }
+        static double Quart(double t) { t = 1 - Math.Max(0, Math.Min(1, t)); return 1 - t * t * t * t; }
+        long tTrig, tShot, tBuilt, tTiles, tLay, tRend, tShow; bool firstLogged;
+        int riseMax = -1;                     // pixels the frame travels while fading in
+        // Frame-time log (open and close): min/avg/max/1%-low of the vsync interval plus present cost.
+        readonly double[] animDt = new double[128]; int animN; 
         Spring scroll = new Spring(0);
         double scrollGoal, maxScroll;
         string openFolder;         // the folder being viewed on the All Apps page, or null for the main grid
@@ -132,11 +143,16 @@ namespace MacDock
                 return;
             }
 
-            current = new MissionControl(Page.Apps);
-            current.Show();
-            WinUtil.Focus(current.Handle);
-            current.Activate();
-            RaiseChrome();
+            long tt = System.Diagnostics.Stopwatch.GetTimestamp();
+            MissionControl sp = spare; spare = null;
+            if (sp != null && (sp.IsDisposed || Environment.TickCount - sp.spareBorn > 300000 || sp.Bounds != DockForm.DockScreen.Bounds)) { try { sp.Close(); } catch { } sp = null; }
+            if (sp != null) { current = sp; sp.WakeFromSpare(tt); }
+            else current = new MissionControl(Page.Apps);
+            current.tTrig = tt; current.Show(); long q1 = System.Diagnostics.Stopwatch.GetTimestamp();
+            WinUtil.Focus(current.Handle); long q2 = System.Diagnostics.Stopwatch.GetTimestamp();
+            current.Activate(); long q3 = System.Diagnostics.Stopwatch.GetTimestamp();
+            RaiseChrome(); long q4 = System.Diagnostics.Stopwatch.GetTimestamp(); double qf = System.Diagnostics.Stopwatch.Frequency / 1000.0;
+            current.stepLog = string.Format(" T[show {0:0} focus {1:0} activate {2:0} chrome {3:0}]", (q1 - tt) / qf, (q2 - q1) / qf, (q3 - q2) / qf, (q4 - q3) / qf);
         }
 
         // The dock, top bar and island stay above the overview; being topmost too, it would otherwise cover them.
@@ -146,6 +162,23 @@ namespace MacDock
                 if (f is TopBar || f is IslandForm) DockForm.KeepOnTop(f);
             if (DockForm.Instance != null) DockForm.Instance.Reassert();
         }
+
+        // Like Start: clicking into another app dismisses it. Our own popups / the dock (same process) don't.
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            if (closing || disposedFlag) return;
+            BeginInvoke(new Action(() =>
+            {
+                if (closing || disposedFlag) return;
+                IntPtr fg = Win32.GetForegroundWindow();
+                if (fg == IntPtr.Zero || fg == Handle) return;
+                uint pid; GetWindowThreadProcessId(fg, out pid);
+                if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return;
+                suppressRestore = true; BeginClose();
+            }));
+        }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 
         protected override void OnActivated(EventArgs e)
         {
@@ -174,10 +207,10 @@ namespace MacDock
         {
         }
 
-        MissionControl(Page startPage)
+        MissionControl(Page startPage, bool prewarm = false)
         {
-            page = startPage;
-            previousForeground = Win32.GetForegroundWindow();
+            page = startPage; hold = prewarm;
+            previousForeground = prewarm ? IntPtr.Zero : Win32.GetForegroundWindow();
             // Topmost, so no other window can cover it (e.g. after a menu popup closes and focus moves on); its blur
             // sits in the same layer, just below it. The dock and bars are raised back above it by RaiseChrome.
             backdrop.AlwaysOnTop = true;
@@ -186,31 +219,70 @@ namespace MacDock
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            Bounds = Screen.PrimaryScreen.Bounds;
+            Bounds = DockForm.DockScreen.Bounds;
 
-            try
+            // Grab the screen now (must be before we show), but blur it on a worker while the tiles are built.
+            blurTask = null;
+            if (!prewarm) try
             {
-                using (var shot = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb))
-                {
-                    using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size);
-                    deskBlur = GlassPanel.BlurBitmap(shot); if (glassComp != null) { glassComp.Dispose(); glassComp = null; }
-                }
+                Bitmap shot = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb);
+                using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size);
+                pendingShot = shot;
             }
-            catch { deskBlur = null; }
+            catch { blurTask = null; }
 
-            BuildTiles();
-            LayoutAll();
+            tShot = System.Diagnostics.Stopwatch.GetTimestamp();
+            BuildTiles(); tTiles = System.Diagnostics.Stopwatch.GetTimestamp();
+            LayoutAll(); tLay = System.Diagnostics.Stopwatch.GetTimestamp();
+            deskBlur = null; // first frame is tint-only; the real blur is swapped in from Step() when the worker finishes
+            if (glassComp != null) { glassComp.Dispose(); glassComp = null; }
+            tBuilt = System.Diagnostics.Stopwatch.GetTimestamp();
 
             caretTimer.Interval = 530;
-            caretTimer.Tick += (s, e) => { caretOn = !caretOn; lastStaticKey = int.MinValue; dirty = true; };
-            caretTimer.Start();
+            caretTimer.Tick += (s, e) => { if (hold || search.Length == 0) return; caretOn = !caretOn; lastStaticKey = int.MinValue; dirty = true; };
+            if (!prewarm) caretTimer.Start();
 
             AllowDrop = true; // tiles can be dropped on each other, on folders and back out of a folder
             vsync = new VsyncDriver(this, Step);
             timer.Interval = 16;
-            timer.Tick += (s, e) => Step();
-            timer.Start();
+            timer.Tick += (s, e) => { if (!hold) Step(); };
             clock.Reset();
+            if (prewarm) { spareBorn = Environment.TickCount; var hh = Handle; dirty = false; } else timer.Start(); // prewarm: create the window and render it once, hidden
+        }
+
+        // A hidden, rendered copy is kept ready so opening only has to show it.
+        public static void Prewarm()
+        {
+            if (spare != null || current != null) return;
+            try { spare = new MissionControl(Page.Apps, true); } catch { spare = null; return; }
+            // Let the icons arrive, redraw the hidden frame once with them, then hand its memory back to Windows.
+            var rt = new System.Windows.Forms.Timer { Interval = 2500 };
+            rt.Tick += (s, e) => { rt.Stop(); rt.Dispose(); MissionControl sp = spare; if (sp == null || sp.IsDisposed || sp.disposedFlag || current != null) return; try { sp.lastStaticKey = int.MinValue; sp.Render(); } catch { } MemTrim.Soon(500); };
+            rt.Start();
+        }
+        public static void PrewarmSoon(int ms)
+        {
+            if (spareTimer != null) { spareTimer.Stop(); spareTimer.Dispose(); }
+            spareTimer = new System.Windows.Forms.Timer { Interval = ms };
+            spareTimer.Tick += (s, e) => { spareTimer.Stop(); if (current == null) Prewarm(); };
+            spareTimer.Start();
+        }
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr p, IntPtr a, IntPtr b);
+        static System.Windows.Forms.Timer trimT;
+        static void TrimSoon()
+        {
+            if (trimT != null) { trimT.Stop(); trimT.Dispose(); }
+            trimT = new System.Windows.Forms.Timer { Interval = 1500 };
+            trimT.Tick += (s, e) => { trimT.Stop(); try { GC.Collect(2, GCCollectionMode.Forced, true); SetProcessWorkingSetSize(System.Diagnostics.Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1)); } catch { } };
+            trimT.Start();
+        }
+        void WakeFromSpare(long tt)
+        {
+            previousForeground = Win32.GetForegroundWindow();
+            try { Bitmap shot = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb); using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size); pendingShot = shot; } catch { }
+            tShot = tTiles = tLay = tBuilt = System.Diagnostics.Stopwatch.GetTimestamp();
+            hold = false; prog = 0; fadeGoal = 1; tTrig = tt; caretOn = true;
+            clock.Reset(); caretTimer.Start(); timer.Start();
         }
 
         protected override CreateParams CreateParams
@@ -256,9 +328,11 @@ namespace MacDock
             foreach (Card c in cards) if (c.Thumb != null) c.Thumb.Dispose();
             foreach (Bitmap b in exeIcons.Values) b.Dispose();
             if (surface != null) surface.Dispose();
-            if (gridCache != null) gridCache.Dispose();
+            if (gridCache != null) { if (sGrid != null) sGrid.Dispose(); sGrid = gridCache; sGridStamp = gridStamp; sGridIcons = new HashSet<string>(); foreach (Tile gt in gridHasIcon) if (gt.Target != null) sGridIcons.Add(gt.Target); gridCache = null; }
             backdrop.Dispose();
             if (current == this) current = null;
+            if (!hold) PrewarmSoon(1200);
+            MemTrim.Soon(2500);
 
             if (!suppressRestore) WinUtil.Focus(previousForeground);
         }
@@ -356,7 +430,6 @@ namespace MacDock
         // IconPack.Reset disposes the pack bitmaps this cache shares, so drop them and reload.
         public static void ResetIcons()
         {
-            lock (tileIconCache) { tileIconCache.Clear(); iconsFailed.Clear(); iconsLoading.Clear(); }
             Preload();
         }
 
@@ -570,7 +643,7 @@ namespace MacDock
         {
             chipRects.Clear();
             int x = 0;
-            using (Graphics g = CreateGraphics())
+            using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
                 foreach (string c in Categories)
                 {
                     int w = (int)Math.Ceiling(g.MeasureString(c, titleFont, 600, StringFormat.GenericTypographic).Width) + 36;
@@ -733,13 +806,32 @@ namespace MacDock
 
         // ---------- animation ----------
 
+        void FlushAnimLog()
+        {
+            int n = animN; animN = 0;
+            if (n < 2) return;
+            try
+            {
+                double min = double.MaxValue, max = 0, sum = 0;
+                for (int i = 0; i < n; i++) { double v = animDt[i] * 1000; if (v < min) min = v; if (v > max) max = v; sum += v; }
+                Array.Sort(animDt, 0, n);
+                double p99 = animDt[Math.Min(n - 1, (int)Math.Ceiling(n * 0.99) - 1)] * 1000;
+                System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\MacDock\mac-dock\launchpad_anim.txt",
+                    string.Format("{0:s} {1} frames {2} dt ms min {3:0.0} avg {4:0.0} p99 {5:0.0} max {6:0.0}\r\n", DateTime.Now, closing ? "close" : "open", n, min, sum / n, p99, max));
+            }
+            catch { }
+        }
+
         int perfN; double perfSum, perfDt; long pBg, pBlit, pPresent, pMask, pTiles, pFoot;
         void Step()
         {
             if (disposedFlag) return;
-            double dt = vsync.Frame(clock.Next());
-            fade.Step(fadeGoal, 26, 1.0, dt);
-            bool moving = !fade.IsSettled(fadeGoal, 0.003);
+            long sT0 = System.Diagnostics.Stopwatch.GetTimestamp(); double dt = vsync.Frame(clock.Next()); if (stepLog.Length < 200 && tTrig != 0) stepLog += string.Format(" S@{0:0}+{1:0}", (sT0 - tTrig) / (System.Diagnostics.Stopwatch.Frequency / 1000.0), (System.Diagnostics.Stopwatch.GetTimestamp() - sT0) / (System.Diagnostics.Stopwatch.Frequency / 1000.0));
+            double dur = Tokens.Duration(closing ? CloseSecs : OpenSecs);
+            if (dur <= 0.0001) prog = fadeGoal;
+            else if (prog < fadeGoal) { if (closing || (pendingShot == null && blurTask == null) || prog > 0) prog = Math.Min(fadeGoal, prog + Math.Min(dt, 0.017) / dur); } // nothing is shown until the blurred backdrop is ready
+            else if (prog > fadeGoal) prog = Math.Max(fadeGoal, prog - Math.Min(dt, 0.017) / dur);
+            bool moving = prog != fadeGoal;
 
             if (!scroll.IsSettled(scrollGoal, 0.3))
             {
@@ -748,12 +840,24 @@ namespace MacDock
                 dirty = true;
             }
 
-            if (closing && fade.Value < 0.02)
+            if (closing && prog <= 0.001)
             {
+                FlushAnimLog();
                 Close();
                 return;
             }
 
+            if (pendingShot != null && !closing)
+            {
+                Bitmap shot2 = pendingShot; pendingShot = null;
+                Rectangle? rgn = null; if (page == Page.Apps) { Rectangle pr0 = PanelRect; rgn = Rectangle.Union(Rectangle.Inflate(pr0, 24, 24), new Rectangle(pr0.Left, Math.Max(0, pr0.Top - 220), pr0.Width, 230)); }
+                blurTask = System.Threading.Tasks.Task.Run(() => { try { Bitmap bl = GlassPanel.BlurBitmap(shot2, 20, rgn); glassPre = ComposeGlass(bl, rgn); return bl; } finally { shot2.Dispose(); } });
+            }
+            if (blurTask != null && blurTask.IsCompleted && !closing)
+            {
+                try { deskBlur = blurTask.Result; glassComp = glassPre; glassPre = null; } catch { deskBlur = null; }
+                blurTask = null; backdrop.HideBackdrop(); lastStaticKey = int.MinValue; dirty = true;
+            }
             if (dirty)
             {
                 dirty = false;
@@ -766,8 +870,11 @@ namespace MacDock
             {
                 // Only the fade is running: reuse the last frame and just change the window's opacity.
                 if (surface == null) Render();
-                else surface.Present(Handle, Left, Top, (byte)Math.Max(0, Math.Min(255, (int)Math.Round(fade.Value * 255))));
+                else PresentFrame(Rectangle.Empty);
             }
+            if (!moving && !closing && Environment.TickCount - lastTrimTick > 700) { lastTrimTick = Environment.TickCount; MemTrim.Now(false); }
+            if (moving && animN < animDt.Length) animDt[animN++] = dt;
+            if (!moving && animN > 0) FlushAnimLog();
             if (moving) Kick();
             else { if (vsync.Active) vsync.Sleep(); timer.Interval = 50; if (!timer.Enabled) timer.Start(); }
         }
@@ -777,6 +884,7 @@ namespace MacDock
         void Render()
         {
             if (!IsHandleCreated || disposedFlag) return;
+            if (tRend == 0) tRend = System.Diagnostics.Stopwatch.GetTimestamp(); nRender++;
             if (surface == null) surface = new Surface(Width, Height);
 
             // While only the tile grid moves (scrolling, hover, icons arriving) the header, search box and background
@@ -807,7 +915,7 @@ namespace MacDock
                     pFoot += System.Diagnostics.Stopwatch.GetTimestamp() - d0;
                 }
                 long q1 = System.Diagnostics.Stopwatch.GetTimestamp();
-                surface.Present(Handle, Left, Top, (byte)Math.Max(0, Math.Min(255, (int)Math.Round(fade.Value * 255))), band);
+                PresentFrame(band);
                 pPresent += System.Diagnostics.Stopwatch.GetTimestamp() - q1;
                 return;
             }
@@ -825,25 +933,57 @@ namespace MacDock
                     g.CompositingMode = CompositingMode.SourceOver;
                 }
 
-                DrawHeader(g);
+                long r1 = System.Diagnostics.Stopwatch.GetTimestamp(); DrawHeader(g); long r2 = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (page == Page.Windows) DrawCards(g);
                 else DrawTiles(g);
+                long r3 = System.Diagnostics.Stopwatch.GetTimestamp();
                 DrawFooter(g);
+                if (rdbg == null) { double Fq = System.Diagnostics.Stopwatch.Frequency / 1000.0; rdbg = string.Format(" pre {0:0.0} header {1:0.0} tiles {2:0.0} footer {3:0.0}", (r1 - tRend) / Fq, (r2 - r1) / Fq, (r3 - r2) / Fq, (System.Diagnostics.Stopwatch.GetTimestamp() - r3) / Fq); }
             }
 
-            byte opacity = (byte)Math.Max(0, Math.Min(255, (int)Math.Round(fade.Value * 255)));
-            surface.Present(Handle, Left, Top, opacity);
+            PresentFrame(Rectangle.Empty);
             bool appsBlur = page == Page.Apps;
             if (appsBlur != backdropForApps) { backdrop.HideBackdrop(); backdropForApps = appsBlur; }
-            if (appsBlur && deskBlur != null) { }
+            if (hold || (appsBlur && (deskBlur != null || pendingShot != null || blurTask != null))) { }
             else if (appsBlur) { Rectangle pr = PanelRect; backdrop.Place(new Rectangle(Left + pr.Left, Top + pr.Top, pr.Width, pr.Height), 28, Handle); }
             else backdrop.Place(Bounds, 0, Handle);
         }
-        bool backdropForApps;
+        // One UpdateLayeredWindow per frame. While animating, the frame is drawn scaled (anchored bottom-centre, where the
+        // dock is) into a scratch surface; at rest it goes straight out.
+        void PresentFrame(Rectangle band)
+        {
+            if (tFirstPres == 0) tFirstPres = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!firstLogged && tTrig != 0 && !closing && prog > 0)
+            {
+                firstLogged = true; double F = System.Diagnostics.Stopwatch.Frequency / 1000.0; long n = System.Diagnostics.Stopwatch.GetTimestamp();
+                try { System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\MacDock\mac-dock\launchpad_anim.txt", string.Format("{0:s} trigger->first frame {1:0.0} ms (ctor shot+blur {2:0.0}, tiles+layout {3:0.0}, rest {4:0.0}) [tiles {5:0.0}, layout {6:0.0}, blurwait {7:0.0}, show->render {8:0.0}, render {9:0.0}{10} renders {11} firstPres->now {12:0.0} prog {13:0.00}{14}]\r\n", DateTime.Now, (n - tTrig) / F, (tShot - tTrig) / F, (tBuilt - tShot) / F, (n - tBuilt) / F, (tTiles - tShot) / F, (tLay - tTiles) / F, (tBuilt - tLay) / F, (tRend - tBuilt) / F, (n - tRend) / F, rdbg, nRender, (n - tFirstPres) / F, prog, stepLog)); } catch { }
+            }
+            double e = Eased;
+            byte a = (byte)Math.Max(0, Math.Min(255, (int)Math.Round(FadeEased * 255)));
+            if (prog >= 1 || Motion.Reduced) { if (band.IsEmpty) surface.Present(Handle, Left, Top, a); else surface.Present(Handle, Left, Top, a, band); return; }
+            // No redraw or scaling: the cached frame only fades and rises a few pixels (position + alpha in one call).
+            if (riseMax < 0) riseMax = 0; // Start slides up ~36 px
+            surface.Present(Handle, Left, Top + (int)Math.Round((1 - e) * riseMax), a);
+        }
+        int lastTrimTick;
+        string stepLog = ""; int nRender; long tFirstPres; string rdbg; bool backdropForApps;
         Bitmap glassComp;
         Bitmap deskBlur; // the desktop, blurred once when the overview opens (same glass as Control Center)
         static readonly Color PanelTint = Color.FromArgb(96, 36, 38, 48);
 
+        Bitmap pendingShot; Bitmap glassPre; System.Threading.Tasks.Task<Bitmap> blurTask; static Bitmap sGrid; static int sGridStamp; static HashSet<string> sGridIcons;
+        static Bitmap ComposeGlass(Bitmap blur, Rectangle? region = null)
+        {
+            var c = new Bitmap(blur.Width, blur.Height, PixelFormat.Format32bppPArgb);
+            using (Graphics cg = Graphics.FromImage(c))
+            {
+                if (region.HasValue) cg.SetClip(region.Value);
+                cg.CompositingMode = CompositingMode.SourceCopy; cg.DrawImage(blur, 0, 0, blur.Width, blur.Height);
+                cg.CompositingMode = CompositingMode.SourceOver;
+                using (var tint = new SolidBrush(PanelTint)) cg.FillRectangle(tint, 0, 0, c.Width, c.Height);
+            }
+            return c;
+        }
         void EnsureGlassComp()
         {
             if (glassComp != null && glassComp.Width == deskBlur.Width && glassComp.Height == deskBlur.Height) return;
@@ -1231,6 +1371,11 @@ namespace MacDock
                 }
             }
 
+            if (gridCache == null && sGrid != null && stamp == sGridStamp && sGrid.Width == Width)
+            {
+                gridCache = sGrid; sGrid = null; gridStamp = stamp; gridHasIcon.Clear();
+                foreach (Tile t in tiles) { if (t.Folder == null && t.Target != null && sGridIcons != null && sGridIcons.Contains(t.Target)) { if (t.Icon == null) lock (tileIconCache) tileIconCache.TryGetValue(t.Target, out t.Icon); if (t.Icon != null) gridHasIcon.Add(t); } }
+            }
             if (gridCache == null || stamp != gridStamp)
             {
                 gridStamp = stamp;
@@ -2023,12 +2168,8 @@ namespace MacDock
                 if (current != null) list.Add(MenuEntry.Item("Remove from Folder", null, () => MoveToFolder(t, null)));
 
                 string family = StoreFamily(t.Target);
-                string win32Cmd = family == null ? FindUninstallCommand(t.Name) : null;
-                if (family != null || win32Cmd != null) // system apps without an uninstall entry get no item
-                {
-                    list.Add(MenuEntry.Sep());
-                    list.Add(MenuEntry.Item("Uninstall", null, () => UninstallTile(t, family, win32Cmd)));
-                }
+                list.Add(MenuEntry.Sep());
+                list.Add(MenuEntry.Item("Uninstall", null, () => UninstallTile(t, family)));
             }
 
             // The same frosted popup as the dock's menu; it closes on Esc or a click outside it.
@@ -2105,6 +2246,21 @@ namespace MacDock
         // The uninstall command of a desktop app, found by its display name in the Uninstall registry keys.
         static string FindUninstallCommand(string name)
         {
+            List<string> targets = AppDirectory.TargetsFor(name); // the app's Start Menu shortcut target(s), to match by install location
+            Func<Microsoft.Win32.RegistryKey, bool> byLocation = app =>
+            {
+                foreach (string v in new[] { "InstallLocation", "DisplayIcon" })
+                {
+                    string loc = (app.GetValue(v) as string ?? "").Trim('"');
+                    int comma = loc.LastIndexOf(',');
+                    if (v == "DisplayIcon" && comma > 0) loc = loc.Substring(0, comma).Trim('"');
+                    if (loc.Length < 6) continue;
+                    foreach (string tg in targets)
+                        if (string.Equals(tg, loc, StringComparison.OrdinalIgnoreCase) || tg.StartsWith(loc.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+                }
+                return false;
+            };
+            string byPath = null;
             const string sub = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
             var keys = new[] {
                 new KeyValuePair<Microsoft.Win32.RegistryKey, string>(Microsoft.Win32.Registry.LocalMachine, sub),
@@ -2125,8 +2281,9 @@ namespace MacDock
                                 if (string.IsNullOrEmpty(display)) continue;
                                 if (app.GetValue("SystemComponent") is int && (int)app.GetValue("SystemComponent") == 1) continue;
                                 string cmd = (app.GetValue("QuietUninstallString") ?? app.GetValue("UninstallString")) as string;
-                                if (string.IsNullOrWhiteSpace(cmd)) continue;
+                                if (string.IsNullOrWhiteSpace(cmd) || !UninstallerExists(cmd)) continue; // a leftover entry whose uninstaller is gone
                                 if (string.Equals(display, name, StringComparison.OrdinalIgnoreCase)) return FixMsi(cmd);
+                                if (byPath == null && byLocation(app)) byPath = FixMsi(cmd);
                                 if (loose == null && Math.Min(display.Length, name.Length) >= 4 &&
                                     (display.StartsWith(name, StringComparison.OrdinalIgnoreCase) || name.StartsWith(display, StringComparison.OrdinalIgnoreCase)))
                                     loose = FixMsi(cmd);
@@ -2135,7 +2292,17 @@ namespace MacDock
                 }
                 catch { }
             }
-            return loose;
+            return byPath ?? loose;
+        }
+
+        // False when the command starts with a full path to an executable that is not there.
+        static bool UninstallerExists(string cmd)
+        {
+            string c = cmd.Trim(), exe = null;
+            if (c.StartsWith("\"")) { int q = c.IndexOf('"', 1); if (q > 0) exe = c.Substring(1, q - 1); }
+            else { int e = c.IndexOf(".exe", StringComparison.OrdinalIgnoreCase); if (e > 0) exe = c.Substring(0, e + 4); }
+            if (exe == null || exe.Length < 3 || exe[1] != ':') return true; // msiexec, rundll32 etc.: resolved by Windows
+            return System.IO.File.Exists(Environment.ExpandEnvironmentVariables(exe));
         }
 
         // MSI entries often say "msiexec /I{guid}" (modify); uninstalling needs /X.
@@ -2146,9 +2313,21 @@ namespace MacDock
             return cmd + " /passive /norestart";
         }
 
-        void UninstallTile(Tile t, string family, string win32Cmd)
+        void UninstallTile(Tile t, string family)
         {
+            string win32Cmd = family == null ? FindUninstallCommand(t.Name) : null;
+            if (family == null && win32Cmd == null)
+            {
+                // Portable app or a bare shortcut: nothing registered to run, and files are never deleted blindly.
+                MessageBox.Show(this, "No working uninstaller found for " + t.Name + " (its uninstall entry is missing or points at a deleted file). Nothing was changed.", "Uninstall", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             if (MessageBox.Show(this, "Uninstall " + t.Name + "?", "Uninstall", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            if (Environment.GetEnvironmentVariable("MACDOCK_UNINSTALL_DRYRUN") == "1")
+            {
+                MessageBox.Show(this, "Dry run. Would run:\n" + (family != null ? "Remove-AppxPackage (family " + family + ")" : win32Cmd), "Uninstall", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
             ThreadPool.QueueUserWorkItem(_ =>
             {
@@ -2162,9 +2341,34 @@ namespace MacDock
                             "-NoProfile -Command \"$p = Get-AppxPackage | ? { $_.PackageFamilyName -eq '" + family + "' -and -not $_.NonRemovable }; if (-not $p) { exit 2 }; $p | Remove-AppxPackage -ErrorAction Stop\"")
                         { UseShellExecute = false, CreateNoWindow = true };
                     else
-                        psi = new ProcessStartInfo("cmd.exe", "/c \"" + win32Cmd + "\"") { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden };
+                    {
+                        // Launch the uninstaller itself (not through cmd) so an elevation request surfaces as a UAC prompt.
+                        string exe = null, args = "";
+                        string c = win32Cmd.Trim();
+                        if (c.StartsWith("\""))
+                        {
+                            int q = c.IndexOf('"', 1);
+                            if (q > 0) { exe = c.Substring(1, q - 1); args = c.Substring(q + 1).Trim(); }
+                        }
+                        else
+                        {
+                            int e = c.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+                            if (e > 0) { exe = c.Substring(0, e + 4); args = c.Substring(e + 4).Trim(); }
+                        }
+                        psi = exe != null
+                            ? new ProcessStartInfo(exe, args) { UseShellExecute = true }
+                            : new ProcessStartInfo("cmd.exe", "/c \"" + win32Cmd + "\"") { UseShellExecute = true };
+                    }
 
-                    using (Process p = Process.Start(psi))
+                    Process started;
+                    try { started = Process.Start(psi); }
+                    catch (System.ComponentModel.Win32Exception wx)
+                    {
+                        if (wx.NativeErrorCode != 740 || !psi.UseShellExecute) throw;
+                        psi.Verb = "runas"; // the uninstaller needs administrator rights: ask through UAC
+                        started = Process.Start(psi);
+                    }
+                    using (Process p = started)
                     {
                         p.WaitForExit();
                         ok = p.ExitCode == 0 || p.ExitCode == 3010;

@@ -1083,6 +1083,49 @@ namespace MacDock
         int hover = -1, off;
         public event Action<string> Picked;
         string iconFont;
+        struct InkFit { public float Size; public Point Off; }
+        static readonly Dictionary<string, InkFit> inkFits = new Dictionary<string, InkFit>();
+
+        // Icon glyphs differ in drawn size and sit off the font's line box. Scale each so its visible pixels span ~13px
+        // of the 24px plate, and shift it so those pixels are centred.
+        static InkFit FitGlyph(string glyph, string fontName)
+        {
+            InkFit fit;
+            if (inkFits.TryGetValue(glyph, out fit)) return fit;
+            fit = new InkFit { Size = 9f };
+            try
+            {
+                float size = 9f;
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    using (var font = new Font(fontName, size))
+                    using (var bmp = new Bitmap(40, 40))
+                    {
+                        using (Graphics bg = Graphics.FromImage(bmp))
+                        {
+                            bg.Clear(Color.Black);
+                            TextRenderer.DrawText(bg, glyph, font, new Rectangle(0, 0, 40, 40), Color.White, Color.Black, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                        }
+                        int minX = 40, minY = 40, maxX = -1, maxY = -1;
+                        for (int y = 0; y < 40; y++)
+                            for (int x = 0; x < 40; x++)
+                                if (bmp.GetPixel(x, y).R > 90)
+                                {
+                                    if (x < minX) minX = x; if (x > maxX) maxX = x;
+                                    if (y < minY) minY = y; if (y > maxY) maxY = y;
+                                }
+                        if (maxX < 0) break;
+                        int dim = Math.Max(maxX - minX + 1, maxY - minY + 1);
+                        if (pass == 0) { size = Math.Max(7f, Math.Min(13f, size * 13f / dim)); continue; }
+                        fit.Size = size;
+                        fit.Off = new Point((int)Math.Round(20.0 - (minX + maxX + 1) / 2.0), (int)Math.Round(20.0 - (minY + maxY + 1) / 2.0));
+                    }
+                }
+            }
+            catch { }
+            inkFits[glyph] = fit;
+            return fit;
+        }
 
         public SetSide()
         {
@@ -1186,8 +1229,13 @@ namespace MacDock
                     using (var b = new SolidBrush(SetUi.Tile(it.Color))) g.FillPath(b, path);
                     if (iconFont != null && it.Glyph.Length == 1 && it.Glyph[0] >= 0xE000)
                     {
-                        using (var font = new Font(iconFont, 9f))
-                            TextRenderer.DrawText(g, it.Glyph, font, Rectangle.Round(icon), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                        InkFit fit = FitGlyph(it.Glyph, iconFont);
+                        using (var font = new Font(iconFont, fit.Size))
+                        {
+                            Rectangle gr = Rectangle.Round(icon);
+                            gr.Offset(fit.Off.X, fit.Off.Y);
+                            TextRenderer.DrawText(g, it.Glyph, font, gr, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                        }
                     }
                     else
                     {
@@ -1341,7 +1389,7 @@ namespace MacDock
             side.All.Add(new SetSide.Item { Kind = 2, Name = user, Key = "Launcher settings", Glyph = user.Length > 0 ? user.Substring(0, 1).ToUpperInvariant() : "M" });
             side.All.Add(new SetSide.Item { Kind = 3, Name = "MACDOCK" });
             page("general", "General", "", Color.FromArgb(142, 142, 147));
-            page("appearance", "Appearance", "", Color.FromArgb(52, 52, 56));
+            page("appearance", "Appearance", "", Color.FromArgb(99, 99, 106));
             page("dock", "Dock", "", Color.FromArgb(90, 90, 96));
             page("menubar", "Menu Bar & Island", "", Color.FromArgb(120, 120, 128));
             page("launchpad", "Launchpad", "", Color.FromArgb(94, 92, 230));
@@ -1430,7 +1478,7 @@ namespace MacDock
                 {
                     if (dot == 0) { Close(); return; }
                     if (dot == 1) { WindowState = FormWindowState.Minimized; return; }
-                    if (dot == 2) { MaximizedBounds = Screen.FromControl(this).WorkingArea; WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; return; }
+                    if (dot == 2) { MaximizedBounds = Avail();WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; return; }
                 }
             }
             if (e.X >= SideW + 14 && e.X < SideW + 72 && e.Y >= 17 && e.Y < 45)
@@ -1504,11 +1552,58 @@ namespace MacDock
             Invalidate();
         }
 
+        [StructLayout(LayoutKind.Sequential)] struct WINPOS { public IntPtr hwnd, after; public int x, y, cx, cy; public uint flags; }
+        [StructLayout(LayoutKind.Sequential)] struct MINMAX { public Point ptReserved; public Size ptMaxSize; public Point ptMaxPosition; public Size ptMinTrackSize; public Size ptMaxTrackSize; }
+
+        // The screen's work area, minus the dock when it sits at the bottom: Settings never covers the dock.
+        Rectangle Avail()
+        {
+            Rectangle wa = Screen.FromControl(this).WorkingArea;
+            DockForm dock = DockForm.Instance;
+            if (dock != null && !dock.IsDisposed && dock.Visible)
+            {
+                Rectangle db = dock.Bounds;
+                if (db.IntersectsWith(wa) && db.Top > wa.Top + wa.Height / 2) wa.Height = Math.Max(300, db.Top - wa.Top);
+            }
+            return wa;
+        }
+
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == 0x0083 && m.WParam != IntPtr.Zero) { m.Result = IntPtr.Zero; return; } // WM_NCCALCSIZE: no frame
+            if (m.Msg == 0x0083&& m.WParam != IntPtr.Zero) { m.Result = IntPtr.Zero; return; } // WM_NCCALCSIZE: no frame
             if (m.Msg == 0x0086) { m.Result = (IntPtr)1; return; } // WM_NCACTIVATE: skip the frame repaint that draws a title bar
             if (m.Msg == 0x0085) { m.Result = IntPtr.Zero; return; } // WM_NCPAINT: never draw a caption/frame
+            if (m.Msg == 0x0046 && WindowState == FormWindowState.Normal) // WM_WINDOWPOSCHANGING: stay above the dock
+            {
+                var wp = (WINPOS)Marshal.PtrToStructure(m.LParam, typeof(WINPOS));
+                if ((wp.flags & 0x0002) == 0 || (wp.flags & 0x0001) == 0) // not both NOMOVE and NOSIZE
+                {
+                    Rectangle av = Avail();
+                    int x = wp.x, y = wp.y, cx = wp.cx, cy = wp.cy;
+                    if ((wp.flags & 0x0001) != 0) { cx = Width; cy = Height; } // NOSIZE: keep the current size
+                    if (cy > av.Height) cy = av.Height;
+                    if (cx > av.Width) cx = av.Width;
+                    if (y + cy > av.Bottom) y = av.Bottom - cy;
+                    if (y < av.Top) y = av.Top;
+                    if (wp.x != x || wp.y != y || wp.cx != cx || wp.cy != cy)
+                    {
+                        if ((wp.flags & 0x0002) == 0 || (wp.flags & 0x0001) == 0) { wp.x = x; wp.y = y; wp.flags &= ~0x0002u; }
+                        if ((wp.flags & 0x0001) == 0) { wp.cx = cx; wp.cy = cy; }
+                        Marshal.StructureToPtr(wp, m.LParam, false);
+                    }
+                }
+            }
+            if (m.Msg == 0x0024) // WM_GETMINMAXINFO: maximizing fills the area above the dock, not the screen
+            {
+                base.WndProc(ref m);
+                Rectangle av = Avail(), mon = Screen.FromControl(this).Bounds;
+                var mm = (MINMAX)Marshal.PtrToStructure(m.LParam, typeof(MINMAX));
+                mm.ptMaxPosition = new Point(av.Left - mon.Left, av.Top - mon.Top);
+                mm.ptMaxSize = new Size(av.Width, av.Height);
+                mm.ptMaxTrackSize = new Size(av.Width, av.Height);
+                Marshal.StructureToPtr(mm, m.LParam, false);
+                return;
+            }
             if (m.Msg == 0x0084 && WindowState == FormWindowState.Normal) // WM_NCHITTEST
             {
                 long lp = m.LParam.ToInt64();

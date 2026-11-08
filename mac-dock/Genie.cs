@@ -163,8 +163,10 @@ namespace MacDock
     // reused: showing it and registering the slices takes a few milliseconds, creating it would take over a hundred.
     sealed class GenieOverlay : Form
     {
-        const int Slices = 44;
-        const double MinimizeMs = 460, RestoreMs = 380;
+        const int MaxSlices = 44;        // every slice costs one DWM call per frame: too many and the frames stutter
+        const double MinimizeMs = 500, RestoreMs = 420;
+        const double Delay = 0.44;       // how much later the top starts than the bottom (0 = whole window at once)
+        const double FadeFrom = 0.90;    // the last tenth of the way fades out, so nothing pops off at the icon
 
         [DllImport("dwmapi.dll")] static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
         [DllImport("dwmapi.dll")] static extern int DwmUnregisterThumbnail(IntPtr thumb);
@@ -193,7 +195,7 @@ namespace MacDock
 
         const uint TNP_DEST = 0x1, TNP_SOURCE = 0x2, TNP_OPACITY = 0x4, TNP_VISIBLE = 0x8;
 
-        readonly IntPtr[] thumbs = new IntPtr[Slices];
+        readonly IntPtr[] thumbs = new IntPtr[MaxSlices];
         readonly Stopwatch clock = new Stopwatch();
         readonly VsyncDriver vsync;
         readonly Timer watchdog = new Timer { Interval = 2000 }; // whatever happens, an effect does not outlive this
@@ -202,6 +204,9 @@ namespace MacDock
         Point target;        // the dock icon's centre (screen coordinates)
         bool minimizing, running;
         int srcW, srcH;
+        readonly long[] last = new long[MaxSlices * 3]; // what each slice was last given, so unchanged slices cost no DWM call
+        double frameT;        // animation time actually shown (ms): follows the clock, but a late or early tick cannot make a big jump
+        int slices = MaxSlices; // chosen per window: about one slice per 14 px of height
         IntPtr hiddenWindow;  // the real window, made see-through while it is being drawn by the effect (restore only)
         int hiddenStyle;
 
@@ -249,8 +254,11 @@ namespace MacDock
             if (DwmQueryThumbnailSourceSize(first, out size) != 0 || size.cx < 40 || size.cy < 40) { DwmUnregisterThumbnail(first); return false; }
             srcW = size.cx;
             srcH = size.cy;
+            slices = Math.Max(28, Math.Min(MaxSlices, rest.Height / 22));
+            Array.Clear(last, 0, last.Length);
+            frameT = 0;
             thumbs[0] = first;
-            for (int i = 1; i < Slices; i++)
+            for (int i = 1; i < slices; i++)
             {
                 IntPtr t;
                 if (DwmRegisterThumbnail(Handle, source, out t) != 0 || t == IntPtr.Zero) return false;
@@ -259,7 +267,7 @@ namespace MacDock
 
             running = true;
             if (!minimizing) HideReal(source);
-            Layout(minimizing ? 0 : 1); // in place when minimizing; collapsed in the icon when restoring (the first frame)
+            Layout(0); // first frame: in place when minimizing, collapsed in the icon when restoring (Layout maps t = 0 to both)
             if (!Visible) Show();
             // Under the dock, so the window disappears into its icon.
             DockForm dock = DockForm.Instance;
@@ -279,7 +287,7 @@ namespace MacDock
             vsync.Sleep();
             running = false;
             ShowReal();
-            for (int i = 0; i < Slices; i++)
+            for (int i = 0; i < MaxSlices; i++)
                 if (thumbs[i] != IntPtr.Zero) { try { DwmUnregisterThumbnail(thumbs[i]); } catch { } thumbs[i] = IntPtr.Zero; }
             if (Visible && !IsDisposed) Hide();
         }
@@ -288,9 +296,18 @@ namespace MacDock
         {
             if (!running || IsDisposed) return;
             double total = minimizing ? MinimizeMs : RestoreMs;
-            double t = Math.Min(1.0, clock.Elapsed.TotalMilliseconds / total);
+            // Even pacing: each frame advances by about one refresh interval. A tick the message loop delivered late (or early)
+            // would otherwise jump the animation by that error, which reads as stutter. Within 0.75..1.35 refreshes of the
+            // real elapsed gap it is smoothed; beyond that the clock wins (a real stall must not slow the whole effect).
+            double now = clock.Elapsed.TotalMilliseconds;
+            double dtMs = Math.Max(4, Math.Min(34, vsync.Dt * 1000));
+            double adv = now - frameT;
+            if (adv > dtMs * 2.5) frameT = now;
+            else frameT += Math.Max(dtMs * 0.75, Math.Min(dtMs * 1.35, adv));
+            frameT = Math.Min(frameT, now + dtMs);
+            double t = Math.Min(1.0, frameT / total);
             Layout(t);
-            if (t >= 1.0) Cancel();
+            if (frameT >= total) Cancel();
         }
 
         // While a window is restored, the window itself is made fully transparent so only the effect is seen. It is put back
@@ -330,22 +347,33 @@ namespace MacDock
             return x * x * (3 - 2 * x); // smoothstep
         }
 
+        // Time curve of the whole effect. macOS sucks the window in with an accelerating pull: a gentle start, fast into the
+        // icon. A symmetric smoothstep would crawl at the end, so blend it with an ease-in; f(0) = 0, f(1) = 1, f'(1) > 0.
+        static double Pull(double x)
+        {
+            x = Math.Max(0, Math.Min(1, x));
+            return 0.35 * x * x * (3 - 2 * x) + 0.65 * Math.Pow(x, 2.2);
+        }
+
         // t runs 0 -> 1 in time. Minimizing: the window goes from its place to the icon. Restoring: the reverse.
         void Layout(double t)
         {
-            double progress = minimizing ? t : 1 - t; // 0 = window in place, 1 = collapsed into the icon
+            // 0 = window in place, 1 = collapsed into the icon. Restoring is the exact reverse (leaves the icon fast, settles gently).
+            double progress = Pull(minimizing ? t : 1 - t);
             double iconW = 54, neckY = target.Y;
+            int n = slices;
+            byte alpha = progress <= FadeFrom ? (byte)255 : (byte)Math.Round(255 * Math.Max(0, 1 - (progress - FadeFrom) / (1 - FadeFrom)));
 
-            // Slice boundaries 0..Slices: each has its own progress, the bottom starting first and the top following
+            // Slice boundaries 0..n: each has its own progress, the bottom starting first and the top following
             // later, which is what bends the window into a funnel.
-            var x0 = new double[Slices + 1];
-            var x1 = new double[Slices + 1];
-            var y = new double[Slices + 1];
-            for (int k = 0; k <= Slices; k++)
+            var x0 = new double[n + 1];
+            var x1 = new double[n + 1];
+            var y = new double[n + 1];
+            for (int k = 0; k <= n; k++)
             {
-                double row = k / (double)Slices;                      // 0 = top, 1 = bottom
-                double delay = (1 - row) * 0.38;
-                double u = Ease((progress - delay) / (1 - 0.38));
+                double row = k / (double)n;                      // 0 = top, 1 = bottom
+                double delay = (1 - row) * Delay;
+                double u = Ease((progress - delay) / (1 - Delay));
                 double yRest = rest.Top + row * rest.Height;
                 double cx = rest.Left + rest.Width / 2.0;
                 double halfRest = rest.Width / 2.0;
@@ -356,11 +384,13 @@ namespace MacDock
                 y[k] = yRest + (neckY - yRest) * u;
             }
 
-            for (int i = 0; i < Slices; i++)
+            for (int i = 0; i < n; i++)
             {
                 if (thumbs[i] == IntPtr.Zero) continue;
                 int top = (int)Math.Round(y[i]) - screen.Top;
                 int bottom = (int)Math.Round(y[i + 1]) - screen.Top;
+                // Rows that have fully reached the icon sit on one line: leave them out instead of stacking them there.
+                bool folded = y[i + 1] - y[i] < 0.5;
                 if (bottom <= top) bottom = top + 1;
                 var props = new ThumbProps
                 {
@@ -372,11 +402,16 @@ namespace MacDock
                         Right = (int)Math.Round((x1[i] + x1[i + 1]) / 2) - screen.Left,
                         Bottom = bottom
                     },
-                    source = new RECT { Left = 0, Top = srcH * i / Slices, Right = srcW, Bottom = srcH * (i + 1) / Slices },
-                    opacity = 255,
-                    visible = 1
+                    source = new RECT { Left = 0, Top = srcH * i / n, Right = srcW, Bottom = srcH * (i + 1) / n },
+                    opacity = alpha,
+                    visible = folded ? 0 : 1
                 };
                 if (props.dest.Right <= props.dest.Left) props.dest.Right = props.dest.Left + 1;
+                long a = ((long)props.dest.Left << 32) | (uint)props.dest.Right;
+                long b = ((long)props.dest.Top << 32) | (uint)props.dest.Bottom;
+                long c = ((long)props.opacity << 8) | (uint)props.visible | 0x10000;
+                if (last[i * 3] == a && last[i * 3 + 1] == b && last[i * 3 + 2] == c) continue;
+                last[i * 3] = a; last[i * 3 + 1] = b; last[i * 3 + 2] = c;
                 DwmUpdateThumbnailProperties(thumbs[i], ref props);
             }
         }

@@ -58,10 +58,19 @@ namespace MacDock
             if (backdrop != null) { backdrop.Dispose(); backdrop = null; }
             try
             {
-                using (var shot = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
+                // Capture a margin around the menu so the blur has real neighbours at the edges (like Launchpad's
+                // full-screen capture), then crop back to the menu.
+                Rectangle vs = SystemInformation.VirtualScreen;
+                Rectangle cap = Rectangle.Intersect(Rectangle.Inflate(Bounds, 64, 64), vs);
+                using (var shot = new Bitmap(cap.Width, cap.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
                 {
-                    using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size);
-                    backdrop = GlassPanel.BlurBitmap(shot, blurDivisor);
+                    using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(cap.Location, Point.Empty, cap.Size);
+                    using (Bitmap big = GlassPanel.BlurBitmap(shot, blurDivisor))
+                    {
+                        var crop = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                        using (Graphics cg = Graphics.FromImage(crop)) cg.DrawImage(big, new Rectangle(0, 0, Width, Height), new Rectangle(Left - cap.Left, Top - cap.Top, Width, Height), GraphicsUnit.Pixel);
+                        backdrop = crop;
+                    }
                 }
             }
             catch { backdrop = null; }
@@ -178,6 +187,7 @@ namespace MacDock
             timer.Stop();
             vsync.Dispose();
             base.OnFormClosed(e);
+            MemTrim.Soon(400);
             if (closed != null) closed();
         }
 
@@ -357,6 +367,16 @@ namespace MacDock
             timer.Interval = 100;
             timer.Tick += (s, e) => Tick();
             timer.Start();
+        }
+
+        // Always (re)opens the panel, e.g. when files arrive from Explorer's right-click menu.
+        public void OpenPanel(string id)
+        {
+            if (panel == null || panelId != id) { TogglePanel(id); return; }
+            ClosePanel();
+            var t = new Timer { Interval = 450 };
+            t.Tick += (s, e) => { t.Stop(); t.Dispose(); if (panel == null || panelId != id) TogglePanel(id); };
+            t.Start();
         }
 
         // Opens the panel under its status icon, or closes it if it is already open.
@@ -768,7 +788,8 @@ namespace MacDock
             SmoothingMode old = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var red = new SolidBrush(Color.FromArgb(227, 30, 36))) g.FillEllipse(red, r);
-            using (var font = new Font("Segoe UI", 8.5f, FontStyle.Bold, GraphicsUnit.Point))
+            var font = Typography.Text(8.5f, Weight.Semibold); // cached by Typography: not disposed here
+            
             using (var white = new SolidBrush(Color.White))
             using (var fmt = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                 g.DrawString("L", font, white, new RectangleF(r.X, r.Y + 0.5f, r.Width, r.Height), fmt);

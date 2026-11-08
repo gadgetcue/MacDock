@@ -24,6 +24,7 @@ namespace MacDock
 {
     static class Program
     {
+        static readonly System.Collections.Generic.List<Timer> startupTrims = new System.Collections.Generic.List<Timer>();
         internal static bool QuitRequested; // set only by the deliberate "Quit MacDock" menu item
 
         [DllImport("kernel32.dll")]
@@ -34,6 +35,33 @@ namespace MacDock
             // Parent the new process to explorer.exe so it is outside the caller's process tree / job object.
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + Application.ExecutablePath + "\"") { UseShellExecute = false }); }
             catch (Exception ex) { Log(ex); }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct PROCENTRY32W { public uint dwSize, cntUsage, th32ProcessID; public IntPtr th32DefaultHeapID; public uint th32ModuleID, cntThreads, th32ParentProcessID; public int pcPriClassBase; public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile; }
+        [DllImport("kernel32.dll")] static extern IntPtr CreateToolhelp32Snapshot(uint f, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr h, ref PROCENTRY32W e);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr h, ref PROCENTRY32W e);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+        // Lower-cased parent process name ("" if unknown). The dock must never stay a child of Claude / a terminal / its job object.
+        static string ParentName()
+        {
+            IntPtr snap = CreateToolhelp32Snapshot(2, 0);
+            if (snap == IntPtr.Zero || snap == (IntPtr)(-1)) return "";
+            try
+            {
+                var e = new PROCENTRY32W { dwSize = (uint)Marshal.SizeOf(typeof(PROCENTRY32W)) };
+                uint me = (uint)Process.GetCurrentProcess().Id, ppid = 0;
+                var names = new Dictionary<uint, string>();
+                for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e))
+                {
+                    names[e.th32ProcessID] = e.szExeFile;
+                    if (e.th32ProcessID == me) ppid = e.th32ParentProcessID;
+                }
+                string n; return names.TryGetValue(ppid, out n) ? n.ToLowerInvariant() : "";
+            }
+            finally { CloseHandle(snap); }
         }
 
         [STAThread]
@@ -49,6 +77,9 @@ namespace MacDock
             int test = Array.FindIndex(args, a => a.Equals("/wt-selftest", StringComparison.OrdinalIgnoreCase));
             if (test >= 0 && test + 1 < args.Length) { Environment.ExitCode = WindowThemeTest.Run(args[test + 1]); return; }
 
+            // "MacDock.exe --send <file>" (Explorer right-click verb): queue the file for the LocalSend panel in the running dock.
+            if (args.Length >= 2 && args[0].Equals("--send", StringComparison.OrdinalIgnoreCase)) { LocalSend.QueueSend(args.Skip(1).ToArray()); return; }
+
             // "MacDock.exe --quit" asks the running instance to exit for good (used for rebuilds).
             if (args.Any(a => a.Equals("--quit", StringComparison.OrdinalIgnoreCase) || a.Equals("/quit", StringComparison.OrdinalIgnoreCase)))
             {
@@ -61,16 +92,32 @@ namespace MacDock
             // "--wait" (used by Restart): give the previous instance a moment to exit before taking the single-instance lock.
             if (args.Any(a => a.Equals("--wait", StringComparison.OrdinalIgnoreCase))) System.Threading.Thread.Sleep(2500);
 
+            // Self-detach: if launched by anything but explorer/services/Task Scheduler (e.g. a Claude session, whose job object is
+            // killed when Claude closes), re-launch through explorer.exe and exit, so the dock is never in Claude's process tree.
+            if (!args.Any(a => a.Equals("--detached", StringComparison.OrdinalIgnoreCase)))
+            {
+                string par = ParentName();
+                if (par != "" && par != "explorer.exe" && par != "svchost.exe" && par != "taskeng.exe" && par != "taskhostw.exe" && par != "services.exe" && par != "macdock.exe" && par != "winlogon.exe" && par != "userinit.exe")
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo("explorer.exe", "\"" + Application.ExecutablePath + "\"") { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
+                        return;
+                    }
+                    catch { }
+                }
+            }
+
             bool created;
             using (new System.Threading.Mutex(true, "MacDockSingleInstance", out created))
             {
                 if (!created) return;
-                NativeMethods.SetProcessDPIAware();
                 Application.EnableVisualStyles();
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
                 Application.ThreadException += (s, e) => Log(e.Exception);
                 AppDomain.CurrentDomain.ProcessExit += (s, e) => TaskbarControl.Restore();
                 Theme.Refresh();
+                Motion.Refresh();
                 SetUi.EnsureAutostart(); // rewritten every launch unless the user turned it off in Settings
                 Typography.Configure(AppPaths.Config);
 
@@ -85,6 +132,7 @@ namespace MacDock
                 var bar = new TopBar();
                 var island = new IslandForm();
                 var spotlight = new Spotlight();
+                try { Icon logo = DockForm.LogoIcon(); dock.Icon = logo; bar.Icon = logo; island.Icon = logo; } catch { }
 
                 bar.BellClicked += island.TogglePanel;
                 bar.SearchClicked += spotlight.Toggle;
@@ -130,6 +178,9 @@ namespace MacDock
                 try
                 {
                     LocalSend.EnsureStarted();
+                    LocalSend.EnsureVerb();
+                    LocalSend.EnsureSendTo();
+                    LocalSend.WatchSends(id => bar.OpenPanel(id), bar);
                     bar.Show();
                     island.Show();
                     Feed.Start();
@@ -162,6 +213,8 @@ namespace MacDock
                         catch { }
                     };
                     trim.Start();
+                    MissionControl.PrewarmSoon(4000);
+                    foreach (int ms in new[] { 1500, 3000, 4500, 6000, 8000, 10000, 13000, 16000, 20000, 25000, 30000 }) { var st = new Timer { Interval = ms }; st.Tick += (s2, e2) => { ((Timer)s2).Stop(); MemTrim.Now(true); }; st.Start(); startupTrims.Add(st); }
                     AppDomain.CurrentDomain.UnhandledException += (s, e) => { if (!QuitRequested) Relaunch(); };
                     Application.Run(dock);
                 }
@@ -399,6 +452,7 @@ namespace MacDock
         public Spring ScaleSpring = new Spring(1);
         public double Goal = 1;
         public double BounceHeight, BounceVelocity;      // launch bounce: a ball bouncing on the dock
+        public DateTime FocusUntil = DateTime.MinValue, RefocusAt = DateTime.MinValue; // pending focus after a launch
         public DateTime LaunchStart = DateTime.MinValue; // set while an app is launching
         public DateTime RestUntil = DateTime.MinValue;   // short pause between rounds of bounces
         public Spring Shift = new Spring(0);             // horizontal glide when icons trade places
@@ -414,11 +468,16 @@ namespace MacDock
     {
         static int BaseSize = 48;       // icon size at rest (px); see docksize.txt
         static double MaxScale = 1.75;  // magnification under the cursor; 1 = off
-        const int Gap = 8;              // space between icons
-        const int GroupGap = 14;        // extra space between sections
-        const int PadX = 12, PadY = 8;  // inner padding of the dock pill
-        const int BottomMargin = 8;     // space between dock and the bottom of the screen
-        static int FormHeight { get { return (int)Math.Ceiling(BaseSize * Math.Max(1.0, MaxScale)) + 66; } }
+        // Layout constants in 96-dpi units; Sc is the dock monitor scale (Dpi.Of), so these properties are device pixels.
+        internal static float Sc = 1f;
+        static int Px(int v) { return (int)Math.Round(v * Sc); }
+        static int Gap { get { return Px(Tokens.Space2); } }              // space between icons
+        static int BasePx { get { return Px(BaseSize); } }    // icon size at rest in device pixels
+        static int GroupGap { get { return Px(Tokens.Space4); } }        // extra space between sections
+        static int PadX { get { return Px(Tokens.Space3); } }            // inner padding of the dock pill
+        static int PadY { get { return Px(Tokens.Space2); } }
+        static int BottomMargin { get { return Px(Tokens.Space2); } }     // space between dock and the bottom of the screen
+        static int FormHeight { get { return (int)Math.Ceiling(BasePx * Math.Max(1.0, MaxScale)) + Px(66); } }
         const int IconSource = 96;      // stored icon resolution, enough for max zoom
 
         // Motion. Magnification is a nearly critically damped spring: quick, no wobble. The launch bounce is
@@ -426,9 +485,10 @@ namespace MacDock
         const double MagnifyOmega = 26, MagnifyZeta = 0.9;
         const double Gravity = 2600, Restitution = 0.55, MinBounceSpeed = 50;
         const double BounceLaunchSpeed = 322;   // = sqrt(2 * Gravity * 20 px)
+        static double LaunchSpeed { get { return Motion.Reduced ? 0 : BounceLaunchSpeed; } } // Reduce Motion: no bounce
         const double LaunchTimeout = 8;         // seconds to keep bouncing if the app never shows a window
-        const int PillRadius = 22;      // rounded-rectangle corners, like the macOS dock
-        const int CanvasSlack = 260;    // extra width so magnified icons never clip
+        static int PillRadius { get { return Px(Tokens.RadiusLg); } }      // rounded-rectangle corners, like the macOS dock
+        static int CanvasSlack { get { return Px(260); } }    // extra width so magnified icons never clip
 
         const int GWL_EXSTYLE = -20;
         const int WS_EX_TOOLWINDOW = 0x80;
@@ -478,10 +538,10 @@ namespace MacDock
         Item dropHot;                            // item highlighted as a valid drop target
         Form preview; // window thumbnails shown while hovering an app with several windows
         DateTime hoverSince = DateTime.UtcNow;
-        readonly Font labelFont = Typography.Text(9.5f, Weight.Medium);
+        Font labelFont = Typography.Text(9.5f, Weight.Medium);
         readonly Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
         readonly string configPath = AppPaths.Config;
-        static int pillHeight { get { return BaseSize + 2 * PadY; } }
+        static int pillHeight { get { return BasePx + 2 * PadY; } }
 
         List<Entry> entries = new List<Entry>();
         bool hideTaskbar = true;
@@ -495,7 +555,7 @@ namespace MacDock
         bool wasBusy;
 
         // Long press to rearrange: hold still on a pinned icon to pick it up, drag it sideways, release to drop it.
-        const int HoldMs = 380, HoldTolerance = 6;
+        const int HoldMs = 380, HoldTolerance = 4;
         const double DragScale = 1.15, ShiftOmega = 30, ShiftZeta = 0.85;
         Item pressItem, dragItem;
         Point pressPoint;
@@ -506,8 +566,8 @@ namespace MacDock
         Spring hideSpring = new Spring(0);
         int fullscreenTick;
         const double HideOmega = 22, HideZeta = 1.0;
-        static float HideDistance { get { return PillHeightConst + BottomMargin + 14; } }
-        static int PillHeightConst { get { return BaseSize + 2 * PadY; } }
+        static float HideDistance { get { return PillHeightConst + BottomMargin + Px(14); } }
+        static int PillHeightConst { get { return BasePx + 2 * PadY; } }
 
         public static DockForm Instance { get; private set; }
 
@@ -563,7 +623,7 @@ namespace MacDock
         {
             try
             {
-                Rectangle screen = Screen.PrimaryScreen.Bounds;
+                Rectangle screen = DockScreen.Bounds;
                 int h = PillHeightConst + BottomMargin + 2;
                 var data = new Win32.APPBARDATA();
                 data.cbSize = Marshal.SizeOf(typeof(Win32.APPBARDATA));
@@ -603,6 +663,7 @@ namespace MacDock
                 foreach (string line in File.ReadAllLines(SizeFile))
                 {
                     string[] kv = line.Split('=');
+                    if (kv.Length == 2 && kv[0].Trim() == "monitor") { DockMonitor = kv[1].Trim(); continue; }
                     double v;
                     if (kv.Length != 2 || !double.TryParse(kv[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v)) continue;
                     if (kv[0].Trim() == "size") BaseSize = (int)Math.Max(28, Math.Min(88, v));
@@ -610,6 +671,23 @@ namespace MacDock
                 }
             }
             catch { }
+        }
+
+        // The display the dock lives on: docksize.txt "monitor=<Screen.DeviceName>" (e.g. \.\DISPLAY2), else the primary one.
+        // Dock, its bottom reservation, Mission Control and genie targets all use it.
+        internal static string DockMonitor;
+        internal static Screen DockScreen
+        {
+            get
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(DockMonitor))
+                        foreach (Screen s in Screen.AllScreens) if (string.Equals(s.DeviceName, DockMonitor, StringComparison.OrdinalIgnoreCase)) return s;
+                }
+                catch { }
+                return Screen.PrimaryScreen;
+            }
         }
 
         public static int CurrentSize { get { return BaseSize; } }
@@ -656,6 +734,127 @@ namespace MacDock
             refreshTimer.Start();
         }
 
+        // ---------- keyboard, accessibility, live settings ----------
+
+        [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+        [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        const int HK_TOGGLE = 0xDC01, HK_LEFT = 0xDC02, HK_RIGHT = 0xDC03, HK_ENTER = 0xDC04, HK_ESC = 0xDC05, HK_HOME = 0xDC06, HK_END = 0xDC07, HK_MENU = 0xDC08;
+        int kbIndex = -1;
+        Point kbCursor;
+
+        // Ctrl+Alt+Shift+D puts the keyboard on the dock: Left/Right/Home/End move, Enter opens, Menu key opens the context menu, Esc leaves.
+        void RegisterToggleKey() { try { RegisterHotKey(Handle, HK_TOGGLE, 0x2 | 0x1 | 0x4 | 0x4000, 0x44); } catch { } } // MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, D
+
+        void KbEnter()
+        {
+            if (items.Count == 0 || !Visible) return;
+            NativeMethods.POINT p; NativeMethods.GetCursorPos(out p);
+            kbCursor = new Point(p.X, p.Y);
+            kbIndex = Math.Max(0, items.FindIndex(i => i.Handles.Count > 0 && false));
+            uint[] keys = { 0x25, 0x27, 0x0D, 0x1B, 0x24, 0x23, 0x5D };
+            int[] ids = { HK_LEFT, HK_RIGHT, HK_ENTER, HK_ESC, HK_HOME, HK_END, HK_MENU };
+            for (int i = 0; i < keys.Length; i++) try { RegisterHotKey(Handle, ids[i], 0x4000, keys[i]); } catch { }
+            if (!animTimer.Enabled) animTimer.Start();
+            animTimer.Interval = 16;
+        }
+
+        void KbExit()
+        {
+            if (kbIndex < 0) return;
+            kbIndex = -1;
+            foreach (int id in new[] { HK_LEFT, HK_RIGHT, HK_ENTER, HK_ESC, HK_HOME, HK_END, HK_MENU }) try { UnregisterHotKey(Handle, id); } catch { }
+        }
+
+        void KbKey(int id)
+        {
+            int n = items.Count;
+            if (kbIndex < 0 || n == 0) return;
+            NativeMethods.POINT p; NativeMethods.GetCursorPos(out p); kbCursor = new Point(p.X, p.Y);
+            if (id == HK_LEFT) kbIndex = (kbIndex + n - 1) % n;
+            else if (id == HK_RIGHT) kbIndex = (kbIndex + 1) % n;
+            else if (id == HK_HOME) kbIndex = 0;
+            else if (id == HK_END) kbIndex = n - 1;
+            else if (id == HK_ESC) KbExit();
+            else if (id == HK_ENTER) { Item it = items[Math.Min(kbIndex, n - 1)]; KbExit(); Activate(it); }
+            else if (id == HK_MENU)
+            {
+                Item it = items[Math.Min(kbIndex, n - 1)];
+                KbExit();
+                ShowMenu(it, new Point((int)(it.Rect.Left + it.Rect.Width / 2), (int)it.Rect.Top));
+            }
+            if (!animTimer.Enabled) animTimer.Start();
+            animTimer.Interval = 16;
+        }
+
+        // Windows colour mode or the animation-effects switch changed: re-read both and repaint everything that is open.
+        void OnSystemSettingChanged()
+        {
+            bool wasLight = Theme.Light;
+            Theme.Refresh();
+            Motion.Refresh();
+            if (wasLight != Theme.Light)
+                foreach (Form f in Application.OpenForms) try { f.Invalidate(true); } catch { }
+            Redraw();
+        }
+
+        protected override AccessibleObject CreateAccessibilityInstance() { return new DockAccessible(this); }
+
+        sealed class DockAccessible : Control.ControlAccessibleObject
+        {
+            readonly DockForm dock;
+            public DockAccessible(DockForm d) : base(d) { dock = d; }
+            public override string Name { get { return "Dock"; } set { } }
+            public override AccessibleRole Role { get { return AccessibleRole.ToolBar; } }
+            public override int GetChildCount() { return dock.items.Count; }
+            public override AccessibleObject GetChild(int i) { return i >= 0 && i < dock.items.Count ? new ItemAccessible(this, dock, i) : null; }
+        }
+
+        sealed class ItemAccessible : AccessibleObject
+        {
+            readonly DockAccessible parent; readonly DockForm dock; readonly int index;
+            public ItemAccessible(DockAccessible p, DockForm d, int i) { parent = p; dock = d; index = i; }
+            Item It { get { return index < dock.items.Count ? dock.items[index] : null; } }
+            public override string Name { get { Item it = It; return it == null ? "" : ItemNames.Display(it.Target, it.Label) + (it.Handles.Count > 0 ? ", running" : ""); } set { } }
+            public override AccessibleRole Role { get { return AccessibleRole.PushButton; } }
+            public override AccessibleObject Parent { get { return parent; } }
+            public override string DefaultAction { get { return "Open"; } }
+            public override void DoDefaultAction() { Item it = It; if (it != null) dock.BeginInvoke(new Action(() => dock.Activate(it))); }
+            public override Rectangle Bounds
+            {
+                get
+                {
+                    Item it = It; if (it == null) return Rectangle.Empty;
+                    RectangleF r = it.Rect;
+                    Point tl = dock.PointToScreen(new Point((int)r.Left, (int)r.Top));
+                    return new Rectangle(tl.X, tl.Y, (int)r.Width, (int)r.Height);
+                }
+            }
+        }
+
+        // Follows the dock monitor's DPI: layout constants and the label font are rebuilt when it changes.
+        void UpdateScale(Rectangle area)
+        {
+            float s = Dpi.Of(area);
+            if (Math.Abs(s - Sc) < 0.001f) return;
+            Sc = s;
+            Font old = labelFont;
+            labelFont = Typography.Text(9.5f * Sc, Weight.Medium);
+            if (old != null) old.Dispose();
+            if (dockReserved) UpdateReservation();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x02E0) // WM_DPICHANGED: the window is laid out by FitCanvas, not by the suggested rectangle
+            {
+                try { FitCanvas(); Redraw(); } catch { }
+                return;
+            }
+            if (m.Msg == 0x0312) { int id = m.WParam.ToInt32(); if (id == HK_TOGGLE) { if (kbIndex >= 0) KbExit(); else KbEnter(); } else KbKey(id); return; }
+            if (m.Msg == 0x001A) { BeginInvoke(new Action(OnSystemSettingChanged)); }
+            base.WndProc(ref m);
+        }
+
         protected override CreateParams CreateParams
         {
             get
@@ -672,6 +871,7 @@ namespace MacDock
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            RegisterToggleKey();
             UpdateReservation();
             Redraw();
             BeginInvoke(new Action(Genie.Warm)); // build the genie overlay now, so the first minimize isn't slow
@@ -735,28 +935,28 @@ namespace MacDock
                     if (it.SepBefore && i > 0)
                     {
                         float x = it.Rect.Left - (Gap + GroupGap) / 2f;
-                        g.DrawLine(sepPen, x, pillRect.Top + 14, x, pillRect.Bottom - 14);
+                        g.DrawLine(sepPen, x, pillRect.Top + Px(14), x, pillRect.Bottom - Px(14));
                     }
 
                     if (it == dragItem) continue; // drawn last, lifted above the others
                     if (it == dropHot) // file drag resting here: it will take the drop
                     {
-                        RectangleF hr = RectangleF.Inflate(it.Rect, 5, 5);
-                        using (GraphicsPath hp = RoundedRect(hr, 14))
+                        RectangleF hr = RectangleF.Inflate(it.Rect, Px(5), Px(5));
+                        using (GraphicsPath hp = RoundedRect(hr, Px(Tokens.RadiusMd)))
                         using (var hf = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
                         using (var hb = new Pen(Color.FromArgb(190, 255, 255, 255), 2f))
                         { g.FillPath(hf, hp); g.DrawPath(hb, hp); }
                     }
                     DrawIcon(g, it, it.Rect);
                     if (it.Handles.Count > 0) // running indicator, like the macOS dot
-                        g.FillEllipse(dot, it.Rect.Left + it.Rect.Width / 2 - 2, pillRect.Bottom - 6, 4, 4);
+                        g.FillEllipse(dot, it.Rect.Left + it.Rect.Width / 2 - Px(2), pillRect.Bottom - Px(6), Px(4), Px(4));
                 }
 
                 if (dragItem != null)
                 {
                     RectangleF r = dragItem.Rect;
                     using (var shadow = new SolidBrush(Color.FromArgb(60, 0, 0, 0)))
-                        g.FillEllipse(shadow, r.Left + 6, pillRect.Bottom - PadY - 2, r.Width - 12, 8);
+                        g.FillEllipse(shadow, r.Left + Px(6), pillRect.Bottom - PadY - Px(2), r.Width - Px(12), Px(8));
                     DrawIcon(g, dragItem, r);
                 }
             }
@@ -767,15 +967,15 @@ namespace MacDock
                 string shown = ItemNames.Display(it.Target, it.Label);
                 SizeF size = g.MeasureString(shown, labelFont, 400, StringFormat.GenericTypographic);
                 float cx = it.Rect.Left + it.Rect.Width / 2f;
-                float w = size.Width + 20, h = 24;
+                float w = size.Width + Px(20), h = Px(24);
                 float x = Math.Max(4, Math.Min(Width - w - 4, cx - w / 2));
-                float y = it.Rect.Top - h - 12;
-                using (GraphicsPath lp = RoundedRect(new RectangleF(x, y, w, h), 8))
+                float y = it.Rect.Top - h - Px(12);
+                using (GraphicsPath lp = RoundedRect(new RectangleF(x, y, w, h), Px(Tokens.RadiusSm)))
                 using (var b = new SolidBrush(LabelFill))
                 {
                     g.FillPath(b, lp);
                     // Small arrow pointing at the icon, like the macOS dock tooltip.
-                    g.FillPolygon(b, new[] { new PointF(cx - 6, y + h - 0.5f), new PointF(cx + 6, y + h - 0.5f), new PointF(cx, y + h + 6) });
+                    g.FillPolygon(b, new[] { new PointF(cx - Px(6), y + h - 0.5f), new PointF(cx + Px(6), y + h - 0.5f), new PointF(cx, y + h + Px(6)) });
                 }
                 using (var tb = new SolidBrush(Color.White))
                     g.DrawString(shown, labelFont, tb, new RectangleF(x, y, w, h), Typography.Format(StringAlignment.Center));
@@ -890,7 +1090,7 @@ namespace MacDock
                 else if (dragItem == null)
                 {
                     bool still = Math.Abs(local.X - pressPoint.X) + Math.Abs(local.Y - pressPoint.Y) <= HoldTolerance;
-                    if (!still) pressItem = null;
+                    if (!still) BeginDrag(pressItem); // drag immediately, like macOS; no long press needed
                     else if ((DateTime.Now - pressTime).TotalMilliseconds >= HoldMs) BeginDrag(pressItem);
                 }
             }
@@ -906,17 +1106,22 @@ namespace MacDock
             float baseTotal;
             float[] baseX = Row(ones, out baseTotal);
             float baseLeft = (Width - (baseTotal + 2 * PadX)) / 2f + PadX;
+            if (kbIndex >= 0)
+            {
+                if (kbIndex >= n || p.X != kbCursor.X || p.Y != kbCursor.Y) KbExit(); // moving the mouse hands control back
+                else local = new Point((int)(baseLeft + baseX[kbIndex] + BasePx / 2.0), (int)pillRect.Top + 1);
+            }
 
-            bool nearDock = !away && hideSpring.Value < 0.05 && ClientRectangle.Contains(local) && local.Y >= pillRect.Top - (MaxScale - 1) * BaseSize - 4;
+            bool nearDock = !away && hideSpring.Value < 0.05 && ClientRectangle.Contains(local) && local.Y >= pillRect.Top - (MaxScale - 1) * BasePx - 4;
             int hover = -1;
             for (int i = 0; i < n; i++)
             {
-                double center = baseLeft + baseX[i] + BaseSize / 2.0;
+                double center = baseLeft + baseX[i] + BasePx / 2.0;
                 double dist = Math.Abs(local.X - center);
-                double t = dist / (BaseSize * 2.2);
+                double t = dist / (BasePx * 2.2);
                 if (dragItem != null) items[i].Goal = items[i] == dragItem ? DragScale : 1; // no magnifying while rearranging
                 else items[i].Goal = nearDock && t < 1 ? 1 + (MaxScale - 1) * Math.Pow(Math.Cos(t * Math.PI / 2), 2) : 1;
-                if (dragItem == null && nearDock && dist < BaseSize / 2.0) hover = i;
+                if (dragItem == null && nearDock && dist < BasePx / 2.0) hover = i;
             }
 
             double dt;
@@ -926,7 +1131,7 @@ namespace MacDock
             bool busy = false;
             foreach (Item it in items)
             {
-                if (!it.ScaleSpring.IsSettled(it.Goal))
+                if (!Motion.Reduced && !it.ScaleSpring.IsSettled(it.Goal))
                 {
                     it.ScaleSpring.Step(it.Goal, MagnifyOmega, MagnifyZeta, dt);
                     busy = true;
@@ -1000,15 +1205,53 @@ namespace MacDock
             if (it.LaunchStart != DateTime.MinValue)
             {
                 bool finished = it.Handles.Count > 0 || (DateTime.Now - it.LaunchStart).TotalSeconds > LaunchTimeout;
-                if (finished) it.LaunchStart = DateTime.MinValue;
-                else if (!it.Bouncing && DateTime.Now >= it.RestUntil) it.BounceVelocity = BounceLaunchSpeed;
+                if (finished)
+                {
+                    it.LaunchStart = DateTime.MinValue;
+                }
+                else if (!it.Bouncing && DateTime.Now >= it.RestUntil) it.BounceVelocity = LaunchSpeed;
+            }
+
+            // Launched app: once its window shows up (possibly long after the bounce gives up) force it to the front, then
+            // re-assert shortly after in case focus was stolen back.
+            bool focusPending = false;
+            if (it.FocusUntil != DateTime.MinValue)
+            {
+                if (DateTime.Now > it.FocusUntil) it.FocusUntil = DateTime.MinValue;
+                else
+                {
+                    IntPtr lh = IntPtr.Zero;
+                    foreach (IntPtr h in it.Handles) if (NativeMethods.IsWindow(h)) { lh = h; break; }
+                    if (lh != IntPtr.Zero)
+                    {
+                        it.FocusUntil = DateTime.MinValue;
+                        FocusWindow(lh);
+                        it.RefocusAt = DateTime.Now.AddMilliseconds(300);
+                    }
+                    else focusPending = true;
+                }
+            }
+            if (it.RefocusAt != DateTime.MinValue)
+            {
+                if (DateTime.Now >= it.RefocusAt)
+                {
+                    it.RefocusAt = DateTime.MinValue;
+                    foreach (IntPtr h in it.Handles)
+                        if (NativeMethods.IsWindow(h))
+                        {
+                            IntPtr fg = Win32.GetForegroundWindow();
+                            if (fg != h && GetAncestor(fg, 3) != h) FocusWindow(h);
+                            break;
+                        }
+                }
+                else focusPending = true;
             }
 
             if (!it.Bouncing)
             {
                 it.BounceHeight = 0;
                 it.BounceVelocity = 0;
-                return it.LaunchStart != DateTime.MinValue; // keep ticking while waiting for the next round
+                return it.LaunchStart != DateTime.MinValue || focusPending; // keep ticking while waiting for the next round
             }
 
             it.BounceVelocity -= Gravity * dt;
@@ -1034,7 +1277,7 @@ namespace MacDock
             for (int i = 0; i < scales.Length; i++)
             {
                 xs[i] = x;
-                x += (float)(BaseSize * scales[i]);
+                x += (float)(BasePx * scales[i]);
                 if (i < scales.Length - 1)
                     x += Gap + (items[i + 1].SepBefore ? GroupGap : 0);
             }
@@ -1050,7 +1293,7 @@ namespace MacDock
 
             float total;
             float[] xs = Row(scales, out total);
-            float pillWidth = Math.Max(BaseSize, total) + 2 * PadX;
+            float pillWidth = Math.Max(BasePx, total) + 2 * PadX;
             float left = (Width - pillWidth) / 2f;
             pillRect = new RectangleF(left, Height - BottomMargin - pillHeight, pillWidth, pillHeight);
 
@@ -1058,14 +1301,14 @@ namespace MacDock
             for (int i = 0; i < n; i++)
             {
                 Item it = items[i];
-                float size = (float)(BaseSize * it.Scale);
+                float size = (float)(BasePx * it.Scale);
                 it.Rect = new RectangleF(left + PadX + xs[i] + (float)it.Shift.Value, baseline - size - (float)it.BounceHeight, size, size);
             }
 
             // The picked-up icon follows the cursor, lifted a little, and stays inside the pill.
             if (dragItem != null && items.Contains(dragItem))
             {
-                float size = (float)(BaseSize * dragItem.Scale);
+                float size = (float)(BasePx * dragItem.Scale);
                 float cx = Math.Max(pillRect.Left + size / 2, Math.Min(pillRect.Right - size / 2, (float)dragX));
                 dragItem.Rect = new RectangleF(cx - size / 2, baseline - size - 12, size, size);
             }
@@ -1214,15 +1457,15 @@ namespace MacDock
         // Sizes the window to the current icon count (plus slack for magnification) and centers it at the screen bottom.
         void FitCanvas()
         {
+            Rectangle area = DockScreen.Bounds;
+            UpdateScale(area);
             var ones = new double[items.Count];
             for (int i = 0; i < ones.Length; i++) ones[i] = 1;
             float total;
             Row(ones, out total);
-
-            Rectangle area = Screen.PrimaryScreen.Bounds;
             if (!hideTaskbar)
             {
-                area = Screen.PrimaryScreen.WorkingArea;
+                area = DockScreen.WorkingArea;
                 if (dockReserved) area.Height += dockReservedHeight; // the dock's own reservation must not push it up
             }
             int width = Math.Min(area.Width, (int)Math.Ceiling(total + 2 * PadX + CanvasSlack));
@@ -1283,6 +1526,8 @@ namespace MacDock
                     it.BounceHeight = old.BounceHeight;
                     it.BounceVelocity = old.BounceVelocity;
                     it.LaunchStart = old.LaunchStart;
+                    it.FocusUntil = old.FocusUntil;
+                    it.RefocusAt = old.RefocusAt;
                     it.RestUntil = old.RestUntil;
                     it.Shift = old.Shift;
                 }
@@ -1291,7 +1536,7 @@ namespace MacDock
             items = list;
             foreach (Item fi in list) if (fi.Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(fi.Target)); // warm the fan caches
             if (hoverIndex >= items.Count) hoverIndex = -1;
-            refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue) ? 500 : 2000;
+            refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue || i.FocusUntil != DateTime.MinValue) ? 500 : 2000;
             FitCanvas();
             LayoutItems();
             Redraw();
@@ -1484,7 +1729,7 @@ namespace MacDock
             {
                 Item dt = it;
                 DownloadsFan fan = null;
-                fan = new DownloadsFan(Environment.ExpandEnvironmentVariables(it.Target), PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), (int)it.Rect.Top - 44)), sp =>
+                fan = new DownloadsFan(Environment.ExpandEnvironmentVariables(it.Target), PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), CardAnchorY(it))), sp =>
                 {
                     // The whole column from the icon down to the screen edge counts, so resting on the icon never closes the fan.
                     Item cur = items.FirstOrDefault(x => x.Key == dt.Key) ?? dt; Rectangle r = RectangleToScreen(Rectangle.Round(cur.Rect));
@@ -1499,7 +1744,7 @@ namespace MacDock
             }
             var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
             if (live.Count < 1) return;
-            Point c = PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), (int)it.Rect.Top - 44));
+            Point c = PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), CardAnchorY(it)));
             Item target = it;
             WindowPreview pv = null;
             pv = new WindowPreview(live, it.Icon, c, FocusWindow, sp =>
@@ -1513,15 +1758,7 @@ namespace MacDock
             pv.Show();
         }
 
-        static void FocusWindow(IntPtr target)
-        {
-            if (!NativeMethods.IsWindow(target)) return;
-            if (NativeMethods.IsIconic(target)) NativeMethods.ShowWindow(target, SW_RESTORE);
-            // A synthetic Alt tap lets a background process take the foreground.
-            NativeMethods.keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-            NativeMethods.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            NativeMethods.SetForegroundWindow(target);
-        }
+        static void FocusWindow(IntPtr target) { WinUtil.Focus(target); }
 
         void Activate(Item it)
         {
@@ -1536,7 +1773,7 @@ namespace MacDock
                 return;
             }
             if (it.Kind == Kind.Launchpad) { MissionControl.Toggle(true); return; }
-            if (it.Kind == Kind.Trash) { RecycleBin.Open(); it.BounceVelocity = BounceLaunchSpeed * 0.7; return; }
+            if (it.Kind == Kind.Trash) { RecycleBin.Open(); it.BounceVelocity = LaunchSpeed * 0.7; return; }
 
             // Clicking the icon of the app that is in front minimizes its front window (the genie effect plays); otherwise the
             // app's window is restored if needed and brought forward. The dock never takes focus, so the first click while
@@ -1558,11 +1795,7 @@ namespace MacDock
 
             if (target != IntPtr.Zero)
             {
-                if (NativeMethods.IsIconic(target)) NativeMethods.ShowWindow(target, SW_RESTORE);
-                // A synthetic Alt tap lets a background process take the foreground.
-                NativeMethods.keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-                NativeMethods.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                NativeMethods.SetForegroundWindow(target);
+                WinUtil.Focus(target);
             }
             else
             {
@@ -1572,12 +1805,13 @@ namespace MacDock
                 if (it.Kind == Kind.App)
                 {
                     it.LaunchStart = DateTime.Now;
-                    it.BounceVelocity = BounceLaunchSpeed;
+                    it.FocusUntil = DateTime.Now.AddSeconds(20);
+                    it.BounceVelocity = LaunchSpeed;
                     refreshTimer.Interval = 500; // notice the new window quickly so the bounce stops on time
                 }
                 else
                 {
-                    it.BounceVelocity = BounceLaunchSpeed * 0.7; // one short acknowledgement bounce
+                    it.BounceVelocity = LaunchSpeed * 0.7; // one short acknowledgement bounce
                 }
             }
         }
@@ -1871,6 +2105,9 @@ namespace MacDock
             menu.Show();
         }
 
+        // Screen-space-relative Y above the hover title label (top = Rect.Top - 36px) plus an 8px gap; shared by the folder fan and preview card.
+        int CardAnchorY(Item it) { return (int)Math.Round(it.Rect.Top - 36 * Sc) - 8; }
+
         static void CloseItem(Item it)
         {
             if (it == null || it.Handles == null) return;
@@ -2018,7 +2255,8 @@ namespace MacDock
                     if (DockDrop.OpenWith(target.Target, files) && target.Handles.Count == 0)
                     {
                         target.LaunchStart = DateTime.Now;
-                        target.BounceVelocity = BounceLaunchSpeed;
+                        target.FocusUntil = DateTime.Now.AddSeconds(20);
+                        target.BounceVelocity = LaunchSpeed;
                         refreshTimer.Interval = 500;
                     }
                     return;
@@ -2094,7 +2332,7 @@ namespace MacDock
                     return TrashIcon(RecycleBin.IsFull());
                 case Kind.Folder:
                     // Folders keep their own artwork, like the folder stacks in the macOS dock.
-                    return FolderColor.Apply(it.Target, LoadShellIcon(it.Target, 0, 0) ?? ScaleIcon(SystemIcons.Application.ToBitmap()));
+                    return FolderColor.Apply(it.Target, LoadShellIcon(it.Target, 0, 0) ?? Logo());
                 case Kind.Url:
                     // Drawn here instead of asking Windows for the ".url" icon: that lookup runs the browser's icon
                     // handler, which tries to write to the Favorites folder and trips Controlled Folder Access.
@@ -2105,7 +2343,7 @@ namespace MacDock
                     if (ShellIcons.IsAppsFolderItem(it.Target))
                     {
                         Bitmap webIcon = Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target)) ? Pwa.IconFor(it.Label) : null; // web apps keep their own icon
-                        return Tile(webIcon ?? ShellIcons.Load(it.Target, IconSource) ?? ScaleIcon(SystemIcons.Application.ToBitmap()));
+                        return Tile(webIcon ?? ShellIcons.Load(it.Target, IconSource) ?? Logo());
                     }
 
                     Bitmap icon = null;
@@ -2127,8 +2365,8 @@ namespace MacDock
                     if (icon != null && IsBlank(icon)) { icon.Dispose(); icon = null; }
                     if (icon == null)
                     {
-                        try { using (Icon i = Icon.ExtractAssociatedIcon(it.Target)) icon = ScaleIcon(i.ToBitmap()); }
-                        catch { icon = ScaleIcon(SystemIcons.Application.ToBitmap()); }
+                        try { using (Icon i = Icon.ExtractAssociatedIcon(it.Target)) icon = ScaleIcon(i.ToBitmap()); if (IsBlank(icon)) { icon.Dispose(); icon = Logo(); } }
+                        catch { icon = Logo(); }
                     }
                     return Tile(icon);
             }
@@ -2184,7 +2422,7 @@ namespace MacDock
                 }
             }
             catch { }
-            return ScaleIcon(SystemIcons.Application.ToBitmap());
+            return Logo();
         }
 
         static Bitmap ScaleIcon(Bitmap src)
@@ -2284,6 +2522,14 @@ namespace MacDock
             }
             catch { return false; }
         }
+
+        // The MacDock logo (embedded exe icon): used for every window and as the fallback so no icon is ever empty.
+        internal static Icon LogoIcon()
+        {
+            try { var i = Icon.ExtractAssociatedIcon(Application.ExecutablePath); if (i != null) return i; } catch { }
+            return SystemIcons.Application;
+        }
+        internal static Bitmap Logo() { using (Icon i = LogoIcon()) return ScaleIcon(i.ToBitmap()); }
 
         // True when (nearly) every pixel is transparent: the shell returns that for some Store exes.
         static bool IsBlank(Bitmap icon)
@@ -2519,7 +2765,13 @@ namespace MacDock
 
                 uint pid;
                 NativeMethods.GetWindowThreadProcessId(hWnd, out pid);
-                if (pid == self) return true;
+                if (pid == self)
+                {
+                    // MacDock's own windows are hidden from the dock, except the Settings window: minimizing it keeps it here.
+                    var title = new StringBuilder(64);
+                    Win32.GetWindowText(hWnd, title, title.Capacity);
+                    if (title.ToString() != "MacDock Settings") return true;
+                }
 
                 string exe;
                 if (!pathByPid.TryGetValue(pid, out exe))

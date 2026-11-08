@@ -46,6 +46,14 @@ namespace MacDock
         public const uint WM_CLOSE = 0x10;
 
         // Brings a window to the foreground, restoring it first if minimized.
+        [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        // Restores the window if minimized, forces it above other windows (even a topmost one) without leaving it
+        // topmost, and works around the foreground lock.
         public static void Focus(IntPtr h)
         {
             if (!NativeMethods.IsWindow(h)) return;
@@ -53,7 +61,28 @@ namespace MacDock
             // A synthetic Alt tap lets a background process take the foreground.
             NativeMethods.keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
             NativeMethods.keybd_event(VK_MENU, 0, 2, UIntPtr.Zero);
-            NativeMethods.SetForegroundWindow(h);
+
+            uint pid;
+            uint me = GetCurrentThreadId();
+            uint tgtThread = GetWindowThreadProcessId(h, out pid), fgThread = 0;
+            IntPtr fg = Win32.GetForegroundWindow();
+            if (fg != IntPtr.Zero) fgThread = GetWindowThreadProcessId(fg, out pid);
+            bool a1 = false, a2 = false;
+            try
+            {
+                if (fgThread != 0 && fgThread != me) a1 = AttachThreadInput(me, fgThread, true);
+                if (tgtThread != 0 && tgtThread != me && tgtThread != fgThread) a2 = AttachThreadInput(me, tgtThread, true);
+                BringWindowToTop(h);
+                const uint NOSIZE = 1, NOMOVE = 2, SHOW = 0x40;
+                SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, NOMOVE | NOSIZE | SHOW); // above any topmost window...
+                SetWindowPos(h, new IntPtr(-2), 0, 0, 0, 0, NOMOVE | NOSIZE | SHOW); // ...then back to a normal window
+                NativeMethods.SetForegroundWindow(h);
+            }
+            finally
+            {
+                if (a2) AttachThreadInput(me, tgtThread, false);
+                if (a1) AttachThreadInput(me, fgThread, false);
+            }
         }
 
         public static string TitleOf(IntPtr h)

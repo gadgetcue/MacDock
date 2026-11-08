@@ -177,6 +177,7 @@ namespace MacDock
         {
             timer.Stop();
             base.OnFormClosed(e);
+            MemTrim.Soon(400);
             if (closed != null) closed();
         }
 
@@ -230,46 +231,48 @@ namespace MacDock
             catch { backdrop = null; }
         }
 
-        internal static Bitmap BlurBitmap(Bitmap src, int divisor = 20)
+        internal static Bitmap BlurBitmap(Bitmap src, int divisor = 20, Rectangle? region = null)
         {
-            Bitmap cur = new Bitmap(src);
-            for (int pass = 0; pass < 2; pass++)
+            // One pass: downscale in two steps (smooth), then a single bicubic upscale to full size.
+            int sw = Math.Max(1, src.Width / divisor), sh = Math.Max(1, src.Height / divisor);
+            int mw = Math.Max(sw, src.Width / 8), mh = Math.Max(sh, src.Height / 8);
+            Bitmap cur = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppPArgb);
+            using (var mid = new Bitmap(mw, mh, PixelFormat.Format32bppPArgb))
+            using (var small = new Bitmap(sw, sh, PixelFormat.Format32bppPArgb))
             {
-                int sw = Math.Max(1, src.Width / divisor), sh = Math.Max(1, src.Height / divisor); // 20 = twice the blur radius of the original 10
-                using (var small = new Bitmap(sw, sh, PixelFormat.Format32bppPArgb))
+                using (Graphics g = Graphics.FromImage(mid)) { g.InterpolationMode = InterpolationMode.HighQualityBilinear; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.DrawImage(src, new Rectangle(0, 0, mw, mh)); }
+                using (Graphics g = Graphics.FromImage(small)) { g.InterpolationMode = InterpolationMode.HighQualityBilinear; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.DrawImage(mid, new Rectangle(0, 0, sw, sh)); }
+                using (Graphics g = Graphics.FromImage(cur))
                 {
-                    using (Graphics g = Graphics.FromImage(small))
-                    {
-                        g.InterpolationMode = InterpolationMode.HighQualityBilinear;
-                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                        g.DrawImage(cur, new Rectangle(0, 0, sw, sh));
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    if (region == null) g.DrawImage(small, new Rectangle(0, 0, src.Width, src.Height));
+                    else
+                    {   // only the part that will be seen: the glass panel
+                        Rectangle rg = Rectangle.Intersect(region.Value, new Rectangle(0, 0, src.Width, src.Height));
+                        float fx = (float)sw / src.Width, fy = (float)sh / src.Height;
+                        g.SetClip(rg);
+                        g.DrawImage(small, new Rectangle(0, 0, src.Width, src.Height), 0, 0, sw, sh, GraphicsUnit.Pixel);
                     }
-                    var big = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppPArgb);
-                    using (Graphics g = Graphics.FromImage(big))
-                    {
-                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                        g.DrawImage(small, new Rectangle(0, 0, src.Width, src.Height));
-                    }
-                    cur.Dispose();
-                    cur = big;
                 }
             }
-            AcrylicFinish(cur);
+            AcrylicFinish(cur, region);
             return cur;
         }
 
         // Windows acrylic's last steps after the blur: a saturation boost (~1.25) and a faint noise layer.
-        static unsafe void AcrylicFinish(Bitmap bmp)
+        static unsafe void AcrylicFinish(Bitmap bmp, Rectangle? region = null)
         {
             BitmapData d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadWrite, PixelFormat.Format32bppPArgb);
             try
             {
-                uint seed = 2463534242;
-                for (int y = 0; y < d.Height; y++)
+                IntPtr scan0 = d.Scan0; int stride = d.Stride, w = d.Width, h = d.Height;
+                Rectangle rr = region.HasValue ? Rectangle.Intersect(region.Value, new Rectangle(0, 0, w, h)) : new Rectangle(0, 0, w, h);
+                int fx0 = rr.Left, fx1 = rr.Right;
+                System.Threading.Tasks.Parallel.For(rr.Top, rr.Bottom, y =>
                 {
-                    byte* p = (byte*)d.Scan0 + (long)y * d.Stride;
-                    for (int x = 0; x < d.Width; x++, p += 4)
+                    byte* p = (byte*)scan0 + (long)y * stride + fx0 * 4L;
+                    uint seed = 2463534242u ^ ((uint)(y + 1) * 2654435761u); if (seed == 0) seed = 1;
+                    for (int x = fx0; x < fx1; x++, p += 4)
                     {
                         if (p[3] != 255) continue;
                         seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
@@ -281,7 +284,7 @@ namespace MacDock
                         p[1] = (byte)(ng < 0 ? 0 : ng > 255 ? 255 : ng);
                         p[0] = (byte)(nb < 0 ? 0 : nb > 255 ? 255 : nb);
                     }
-                }
+                });
             }
             finally { bmp.UnlockBits(d); }
         }
@@ -1191,14 +1194,26 @@ namespace MacDock
             rows.Add(PanelRow.Info("This device", n.Alias));
             string leaf = System.IO.Path.GetFileName(n.SaveDir.TrimEnd('\\', '/'));
             rows.Add(PanelRow.Item("Save to  (change...)", string.IsNullOrEmpty(leaf) ? n.SaveDir : leaf, false, LocalSend.ChooseFolder));
+            PanelRow auto = PanelRow.Item("Autosave incoming files", "no prompt", LocalSend.AutoAccept, null);
+            auto.KeepOpen = true;
+            auto.Click = () => { LocalSend.AutoAccept = !LocalSend.AutoAccept; Background(panel, () => LocalSendRows(panel, true)); };
+            rows.Add(auto);
             if (!n.ReceiveEnabled) rows.Add(PanelRow.Info("Receiving", "Off (switch above)"));
             rows.Add(PanelRow.Separator());
-            rows.Add(PanelRow.Header("↑ SEND TO"));
+            int pend; lock (LocalSend.Pending) pend = LocalSend.Pending.Count;
+            rows.Add(PanelRow.Header(pend > 0 ? "↑ SEND " + pend + (pend == 1 ? " FILE TO" : " FILES TO") : "↑ SEND TO"));
+            if (pend > 0)
+            {
+                PanelRow clr = PanelRow.Item("Clear selected files", "", false, null);
+                clr.KeepOpen = true;
+                clr.Click = () => { lock (LocalSend.Pending) LocalSend.Pending.Clear(); Background(panel, () => LocalSendRows(panel, true)); };
+                rows.Add(clr);
+            }
             if (peers.Count == 0) rows.Add(PanelRow.Info("None found", "Open LocalSend on another device"));
             foreach (LsPeer p in peers.Take(8))
             {
                 LsPeer peer = p;
-                rows.Add(PanelRow.Item(peer.Alias, peer.Ip + (string.IsNullOrEmpty(peer.Model) ? "" : "  " + peer.Model), false, () => LocalSend.PickAndSend(peer)));
+                rows.Add(PanelRow.Item(peer.Alias, peer.Ip + (string.IsNullOrEmpty(peer.Model) ? "" : "  " + peer.Model), false, () => { if (pend > 0) LocalSend.SendPending(peer); else LocalSend.PickAndSend(peer); }));
             }
             rows.Add(PanelRow.Separator());
             PanelRow rescan = PanelRow.Button("Rescan", null);

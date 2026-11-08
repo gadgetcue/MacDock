@@ -29,6 +29,7 @@ namespace MacDock
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
         [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
 
+        const int XSize = 18, XInset = 6;
         const int TileW = 260, ThumbH = 160, TitleH = 26, Pad = 12, Gap = 10, Radius = 14;
 
         sealed class Tile { public IntPtr Window, Thumb; public Rectangle Cell, Box; public string Title; public bool Minimized; }
@@ -41,10 +42,12 @@ namespace MacDock
         readonly Font font = Typography.Text(9f);
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         readonly ThumbHost host;
+        ThumbHost xo; Surface xs;
         Surface surface;
         Bitmap backdrop;
         int hover = -1;
-        bool wasDown = true;
+        bool wasDown = true, xHot;
+        Point anchor; Rectangle full;   // anchor + bounds the backdrop covers
         bool dragMode;                  // opened while a file drag was in progress (button held)
         int dwellIdx = -1; DateTime dwellSince;
 
@@ -60,8 +63,19 @@ namespace MacDock
                 sb.Clear(); Win32.GetWindowText(h, sb, sb.Capacity);
                 tiles.Add(new Tile { Window = h, Title = sb.ToString(), Minimized = NativeMethods.IsIconic(h) });
             }
+            anchor = anchorTopCenter;
+            Layout(false);
+            full = Bounds;
+
+            host = new ThumbHost();
+            timer.Interval = 30;
+            timer.Tick += (s, e) => Poll();
+        }
+
+        void Layout(bool shrink)
+        {
             int n = Math.Max(1, tiles.Count);
-            Rectangle area = Screen.FromPoint(anchorTopCenter).Bounds;
+            Rectangle area = Screen.FromPoint(anchor).Bounds;
             int perRow = Math.Max(1, Math.Min(n, (area.Width - 40 - Pad * 2 + Gap) / (TileW + Gap)));
             int rowsN = (n + perRow - 1) / perRow;
             int cellH = ThumbH + TitleH;
@@ -74,13 +88,45 @@ namespace MacDock
                 int x0 = Pad + (perRow - rowCount) * (TileW + Gap) / 2;
                 tiles[i].Cell = new Rectangle(x0 + c * (TileW + Gap), Pad + r * (cellH + Gap), TileW, cellH);
             }
-            int left = Math.Max(area.Left + 4, Math.Min(anchorTopCenter.X - width / 2, area.Right - width - 4));
-            int top = Math.Max(area.Top + 4, anchorTopCenter.Y - height);
+            int left = Math.Max(area.Left + 4, Math.Min(anchor.X - width / 2, area.Right - width - 4));
+            int top = Math.Max(area.Top + 4, anchor.Y - height);
+            if (shrink) { left = Math.Max(full.Left, Math.Min(left, full.Right - width)); top = full.Bottom - height; }
             Bounds = new Rectangle(left, top, width, height);
+        }
 
-            host = new ThumbHost();
-            timer.Interval = 30;
-            timer.Tick += (s, e) => Poll();
+        Rectangle XRect(Tile t)
+        {
+            Rectangle r = t.Thumb != IntPtr.Zero ? t.Box : t.Cell;
+            int inset = t.Thumb != IntPtr.Zero ? XInset : 8;
+            return new Rectangle(r.Left + inset, r.Top + inset, XSize, XSize);
+        }
+
+        // Closes the window politely (WM_CLOSE, like its own X button) and drops its tile; the card hides when none remain.
+        void CloseTile(int i)
+        {
+            Tile t = tiles[i];
+            try { Win32.PostMessage(t.Window, WinUtil.WM_CLOSE, IntPtr.Zero, IntPtr.Zero); } catch { }
+            if (t.Thumb != IntPtr.Zero) { DwmUnregisterThumbnail(t.Thumb); t.Thumb = IntPtr.Zero; }
+            tiles.RemoveAt(i);
+            hover = -1; xHot = false;
+            if (tiles.Count == 0) { Close(); return; }
+            Layout(true);
+            if (backdrop != null)
+            {
+                try
+                {
+                    var nb = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                    using (Graphics bg = Graphics.FromImage(nb)) bg.DrawImage(backdrop, new Rectangle(0, 0, Width, Height),
+                        new Rectangle(Left - full.Left, Top - full.Top, Width, Height), GraphicsUnit.Pixel);
+                    backdrop.Dispose(); backdrop = nb;
+                }
+                catch { }
+            }
+            full = Bounds;
+            if (surface != null) { surface.Dispose(); surface = null; }
+            host.Bounds = Bounds;
+            SetupThumbs();
+            Redraw();
         }
 
         protected override CreateParams CreateParams
@@ -106,6 +152,8 @@ namespace MacDock
             base.Show();
             host.Bounds = Bounds;
             host.Show();
+            xo = new ThumbHost(true); xo.Bounds = new Rectangle(Left, Top, XSize + 2, XSize + 2);
+            xo.Show();
             SetupThumbs();
             Redraw();
             timer.Start();
@@ -118,6 +166,12 @@ namespace MacDock
             {
                 SIZE src;
                 IntPtr th;
+                if (t.Thumb != IntPtr.Zero && t.Box.Width > 0) // already registered: only the region changes
+                {
+                    IntPtr r0 = CreateRoundRectRgn(t.Box.Left, t.Box.Top, t.Box.Right + 1, t.Box.Bottom + 1, 10, 10);
+                    CombineRgn(region, region, r0, 2); DeleteObject(r0);
+                    continue;
+                }
                 if (DwmRegisterThumbnail(host.Handle, t.Window, out th) != 0) { t.Minimized = true; continue; }
                 if (DwmQueryThumbnailSourceSize(th, out src) != 0 || src.cx <= 0 || src.cy <= 0) { DwmUnregisterThumbnail(th); t.Minimized = true; continue; }
                 t.Thumb = th;
@@ -160,7 +214,9 @@ namespace MacDock
                 Point c = PointToClient(sp);
                 for (int i = 0; i < tiles.Count; i++) if (tiles[i].Cell.Contains(c)) { idx = i; break; }
             }
-            if (idx != hover) { hover = idx; Redraw(); }
+            bool onX = idx >= 0 && !dragMode && XRect(tiles[idx]).Contains(PointToClient(sp));
+            if (idx != hover) { hover = idx; xHot = onX; SetupThumbs(); Redraw(); }
+            else if (onX != xHot) { xHot = onX; Redraw(); }
 
             bool down = (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0;
             if (dragMode)
@@ -176,6 +232,7 @@ namespace MacDock
                 }
                 return;
             }
+            if (down && !wasDown && onX) { wasDown = true; CloseTile(idx); return; }
             if (down && !wasDown && idx >= 0)
             {
                 IntPtr w = tiles[idx].Window;
@@ -215,14 +272,40 @@ namespace MacDock
                 }
             }
             surface.Present(Handle, Left, Top, 255);
+            DrawX();
+        }
+
+        // The close button lives on its own topmost layered window above the thumbnail layer (DWM thumbnails can't be clipped).
+        void DrawX()
+        {
+            if (xo == null || !xo.IsHandleCreated) return;
+            if (xs == null) xs = new Surface(XSize + 2, XSize + 2);
+            bool show = hover >= 0 && hover < tiles.Count && !dragMode;
+            if (!show) { xs.Present(xo.Handle, xo.Left, xo.Top, 0); return; }
+            Rectangle x = XRect(tiles[hover]);
+            using (Graphics g = xs.Begin())
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                var r = new Rectangle(1, 1, XSize, XSize);
+                using (var xb = new SolidBrush(xHot ? Color.FromArgb(255, 255, 69, 58) : Color.FromArgb(225, 52, 52, 56)))
+                    g.FillEllipse(xb, r);
+                using (var xp = new Pen(Color.White, 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                {
+                    float m = XSize * 0.32f;
+                    g.DrawLine(xp, r.Left + m, r.Top + m, r.Right - m, r.Bottom - m);
+                    g.DrawLine(xp, r.Right - m, r.Top + m, r.Left + m, r.Bottom - m);
+                }
+            }
+            xs.Present(xo.Handle, Left + x.Left - 1, Top + x.Top - 1, 255);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             timer.Stop();
             foreach (Tile t in tiles) if (t.Thumb != IntPtr.Zero) { DwmUnregisterThumbnail(t.Thumb); t.Thumb = IntPtr.Zero; }
-            host.Close();
+            host.Close(); if (xo != null) xo.Close();
             base.OnFormClosed(e);
+            MemTrim.Soon(400);
             if (closed != null) closed();
         }
 
@@ -234,14 +317,17 @@ namespace MacDock
 
         sealed class ThumbHost : Form
         {
-            public ThumbHost()
+            readonly bool layered;
+            public ThumbHost() : this(false) { }
+            public ThumbHost(bool layered)
             {
+                this.layered = layered;
                 FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true; StartPosition = FormStartPosition.Manual;
                 BackColor = Color.Black;
             }
             protected override CreateParams CreateParams
             {
-                get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x08000000 | 0x20; return cp; } // tool, no-activate, transparent to mouse
+                get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x08000000 | 0x20 | (layered ? 0x80000 : 0); return cp; } // tool, no-activate, transparent to mouse
             }
             protected override bool ShowWithoutActivation { get { return true; } }
         }
