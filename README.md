@@ -2,7 +2,7 @@
 
 A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds with the compiler that ships with Windows, so no SDK is needed.
 
-![Desktop with dock and menu bar](screenshots/v1.4/desktop.png)
+![Desktop with dock and menu bar](screenshots/v1.4/desktop.jpg)
 
 See the [changelog](CHANGELOG.md) for what's new in v1.4.
 
@@ -56,19 +56,27 @@ You do not have to take our word for it:
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
 ## Screenshots (v1.4)
-![Desktop with dock and menu bar](screenshots/v1.4/desktop.png)
+![Desktop with dock and menu bar](screenshots/v1.4/desktop.jpg)
 
-![Dock magnification](screenshots/v1.4/dock-magnify.png)
+![Dock magnification](screenshots/v1.4/dock-magnify.jpg)
 
-![Launchpad](screenshots/v1.4/launchpad.png)
+![Dock right-click menu](screenshots/v1.4/dock-menu.jpg)
 
-![Control Center](screenshots/v1.4/control-center.png)
+![Launchpad](screenshots/v1.4/launchpad.jpg)
 
-![Dock right-click menu](screenshots/v1.4/dock-menu.png)
+![Control Center](screenshots/v1.4/control-center.jpg)
 
-![Downloads fan](screenshots/v1.4/downloads-fan.png)
+![Dynamic Island](screenshots/v1.4/island.jpg)
 
-![Apple menu](screenshots/v1.4/apple-menu.png)
+![LocalSend panel](screenshots/v1.4/localsend-panel.jpg)
+
+![Share with MacDock LocalSend in Explorer](screenshots/v1.4/localsend-sendto.jpg)
+
+![Window previews](screenshots/v1.4/window-preview.jpg)
+
+![Downloads fan](screenshots/v1.4/downloads-fan.jpg)
+
+![Apple menu](screenshots/v1.4/apple-menu.jpg)
 ## Videos
 - [Demo 1](docs/demo-1.mp4)
 - [Demo 2](docs/demo-2.mp4)
@@ -89,6 +97,7 @@ An optional macosicons.com API key goes in `dock.txt` as `@macosicons-key = YOUR
 
 ## Credits
 Fonts: Inter (SIL Open Font License). Icons in `icons/` and `dark-icons/` belong to their respective authors.
+
 
 
 
