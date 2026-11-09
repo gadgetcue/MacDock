@@ -178,6 +178,8 @@ namespace MacDock
                 var spotlight = new Spotlight();
                 try { Icon logo = DockForm.LogoIcon(); dock.Icon = logo; bar.Icon = logo; island.Icon = logo; } catch { }
 
+                IslandForm.Enabled = SetCfg.GetBool("island", true);
+                IslandForm.EnabledChanged += () => { try { island.BeginInvoke((Action)(() => island.ApplyEnabled())); } catch { } };
                 bar.BellClicked += island.TogglePanel;
                 bar.SearchClicked += spotlight.Toggle;
                 HotkeyHook.Install(spotlight.Toggle, null);
@@ -204,7 +206,7 @@ namespace MacDock
                         if (!dock.IsHandleCreated || dock.IsDisposed) return;
                         dock.BeginInvoke((Action)(() =>
                         {
-                            try { dock.Reassert(); bar.Reposition(); island.Reposition(); if (!Fullscreen.Active) { DockForm.KeepOnTop(bar); DockForm.KeepOnTop(island); } } catch (Exception ex) { Log(ex); }
+                            try { dock.Reassert(); bar.Reposition(); island.Reposition(); if (!Fullscreen.Active) { DockForm.KeepOnTop(bar); if (IslandForm.Enabled) DockForm.KeepOnTop(island); } } catch (Exception ex) { Log(ex); }
                         }));
                     }
                     catch (Exception ex) { Log(ex); }
@@ -226,7 +228,7 @@ namespace MacDock
                     LocalSend.EnsureSendTo();
                     LocalSend.WatchSends(id => bar.OpenPanel(id), bar);
                     bar.Show();
-                    island.Show();
+                    if (IslandForm.Enabled) island.Show(); else { island.Show(); island.Hide(); } // handle must exist so it can be re-shown live
                     Feed.Start();
                     var watchdog = new Timer { Interval = 2000 };
                     watchdog.Tick += (s, e) =>
@@ -239,8 +241,8 @@ namespace MacDock
                             if (!dock.Visible) { dock.Show(); dock.Reassert(); }
                             else DockForm.KeepOnTop(dock);
                             if (!bar.Visible) bar.Show();
-                            if (!island.Visible) island.Show();
-                            DockForm.KeepOnTop(bar); DockForm.KeepOnTop(island);
+                            if (IslandForm.Enabled) { if (!island.Visible) island.Show(); DockForm.KeepOnTop(island); }
+                            DockForm.KeepOnTop(bar);
                         }
                         catch (Exception ex) { Log(ex); }
                     };
@@ -473,6 +475,9 @@ namespace MacDock
         [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+        [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool QueryFullProcessImageName(IntPtr h, uint flags, StringBuilder name, ref int size);
+        [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SHGetFileInfo(string path, uint attrs, ref SHFILEINFO info, uint size, uint flags);
         [DllImport("shell32.dll")] public static extern int SHGetImageList(int listType, ref Guid iid, out IImageList list);
     }
@@ -600,6 +605,7 @@ namespace MacDock
         Item dropHot;                            // item highlighted as a valid drop target
         Form preview; // window thumbnails shown while hovering an app with several windows
         DateTime hoverSince = DateTime.UtcNow;
+        Point speedPt; DateTime speedAt = DateTime.UtcNow; bool cursorSlow = true;
         Font labelFont = Typography.Text(9.5f, Weight.Medium);
         readonly Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
         readonly string configPath = AppPaths.Config;
@@ -704,6 +710,7 @@ namespace MacDock
                 Win32.SHAppBarMessage(3, ref data); // ABM_SETPOS
                 dockReserved = true;
                 dockReservedHeight = h;
+                DockClamp.Top = screen.Bottom - h; DockClamp.Monitor = screen; DockClamp.Start(); // backstop for apps that ignore the work area
             }
             catch { }
         }
@@ -712,6 +719,7 @@ namespace MacDock
         {
             if (!dockReserved) return;
             dockReserved = false;
+            DockClamp.Top = 0;
             var data = new Win32.APPBARDATA();
             data.cbSize = Marshal.SizeOf(typeof(Win32.APPBARDATA));
             data.hWnd = Handle;
@@ -918,6 +926,7 @@ namespace MacDock
                 return;
             }
             if (m.Msg == 0x0312) { int id = m.WParam.ToInt32(); if (id == HK_TOGGLE) { if (kbIndex >= 0) KbExit(); else KbEnter(); } else KbKey(id); return; }
+            if (dockReserved && m.Msg == (int)Win32.RegisterWindowMessage("MacDockDockBar") && IsHandleCreated) { BeginInvoke(new Action(UpdateReservation)); }
             if (m.Msg == 0x001A) { BeginInvoke(new Action(OnSystemSettingChanged)); }
             base.WndProc(ref m);
         }
@@ -1100,7 +1109,8 @@ namespace MacDock
             Rectangle dockScreen = Screen.FromHandle(Handle).Bounds;
             bool onDockScreen = screen == dockScreen;
 
-            bool atEdge = onDockScreen && p.Y >= dockScreen.Bottom - 3;
+            bool held = (Control.MouseButtons & (MouseButtons.Left | MouseButtons.Right)) != 0 && pressItem == null && dragItem == null && popup == null; // resizing a window must not reveal the dock
+            bool atEdge = onDockScreen && !held && p.Y >= dockScreen.Bottom - 3;
             if (atEdge)
             {
                 if (edgeSince == DateTime.MaxValue) edgeSince = DateTime.Now;
@@ -1180,7 +1190,10 @@ namespace MacDock
                 else local = new Point((int)(baseLeft + baseX[kbIndex] + BasePx / 2.0), (int)pillRect.Top + 1);
             }
 
-            bool nearDock = !away && hideSpring.Value < 0.05 && ClientRectangle.Contains(local) && local.Y >= pillRect.Top - (MaxScale - 1) * BasePx - 4;
+            // A button held that the dock didn't start (resizing/moving a window, dragging a selection) must not wake the dock:
+            // no magnify, no window-preview popup while the cursor passes over it.
+            bool foreignPress = (Control.MouseButtons & (MouseButtons.Left | MouseButtons.Right)) != 0 && pressItem == null && dragItem == null && dropIndex < 0 && popup == null;
+            bool nearDock = !away && !foreignPress && hideSpring.Value < 0.05 && ClientRectangle.Contains(local) && local.Y >= pillRect.Top - (MaxScale - 1) * BasePx - 4;
             int hover = -1;
             for (int i = 0; i < n; i++)
             {
@@ -1226,6 +1239,13 @@ namespace MacDock
             else hideSpring.Snap(hideTarget);
             wasBusy = busy;
 
+            // Cursor speed gate: under 4 px over the last ~80 ms counts as resting; fast sweeps restart the hover delay.
+            if ((DateTime.UtcNow - speedAt).TotalMilliseconds >= 80)
+            {
+                cursorSlow = Math.Abs(local.X - speedPt.X) + Math.Abs(local.Y - speedPt.Y) < 4;
+                speedPt = local; speedAt = DateTime.UtcNow;
+                if (!cursorSlow) hoverSince = DateTime.UtcNow;
+            }
             bool hoverChanged = hover != hoverIndex;
             hoverIndex = hover;
             if (hoverChanged) { hoverSince = DateTime.UtcNow; if (hover >= 0 && hover < items.Count && items[hover].Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(items[hover].Target)); }
@@ -1246,7 +1266,7 @@ namespace MacDock
                 ShowPreview(items[hover]);
             }
             else if (hover >= 0 && preview == null && popup == null && dragItem == null &&
-                     ((DateTime.UtcNow - hoverSince).TotalMilliseconds > (items[hover].Kind == Kind.Folder ? 120 : 350) || (DateTime.UtcNow - lastPreviewClose).TotalMilliseconds < 400))
+                     ((DateTime.UtcNow - hoverSince).TotalMilliseconds > (items[hover].Kind == Kind.Folder ? 120 : 350) || (DateTime.UtcNow - lastPreviewClose).TotalMilliseconds < 120) && cursorSlow)
                 ShowPreview(items[hover]);
             LayoutItems();
 
@@ -1570,7 +1590,10 @@ namespace MacDock
             foreach (Entry e in entries.Where(x => x.Section != 0))
                 AddEntryItem(rightItems, e, running, pinnedApps);
 
-            foreach (string path in running.Keys.OrderBy(k => k))
+            // Running-only apps keep their place; newcomers join at the end (sorting by path made icons jump around).
+            var oldOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int oi = 0; oi < items.Count; oi++) if (items[oi].Section == 1) oldOrder[items[oi].Key] = oi;
+            foreach (string path in running.Keys.OrderBy(k => oldOrder.ContainsKey(k) ? oldOrder[k] : int.MaxValue).ThenBy(k => k))
             {
                 if (!pinnedApps.Add(path)) continue;
                 list.Add(NewItem(Kind.App, path, null, null, 1, running));
@@ -1601,12 +1624,27 @@ namespace MacDock
                 }
             }
 
+            var oldX = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (Item old in items) oldX[old.Key] = Left + old.Rect.Left; // on-screen position before the change
+
             items = list;
             foreach (Item fi in list) if (fi.Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(fi.Target)); // warm the fan caches
             if (hoverIndex >= items.Count) hoverIndex = -1;
             refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue || i.FocusUntil != DateTime.MinValue) ? 500 : 2000;
             FitCanvas();
             LayoutItems();
+
+            // Icons that stay glide from where they were to their new slot when an app opens or closes.
+            bool slid = false;
+            if (!Motion.Reduced)
+                foreach (Item it in items)
+                {
+                    float px;
+                    if (!oldX.TryGetValue(it.Key, out px)) continue;
+                    float d = px - (Left + it.Rect.Left);
+                    if (Math.Abs(d) > 0.5f) { it.Shift.Value += d; slid = true; }
+                }
+            if (slid) { LayoutItems(); animTimer.Interval = 16; if (!animTimer.Enabled) animTimer.Start(); }
             Redraw();
         }
 
@@ -2175,7 +2213,14 @@ namespace MacDock
         }
 
         // Screen-space-relative Y above the hover title label (top = Rect.Top - 36px) plus an 8px gap; shared by the folder fan and preview card.
-        int CardAnchorY(Item it) { return (int)Math.Round(it.Rect.Top - 36 * Sc) - 8; }
+        int CardAnchorY(Item it)
+        {
+            // Use the icon's fully magnified (and bounced) top, not its current one, so the card stays above the label
+            // even if the icon is still growing when the card opens. Label top = icon top - 36px.
+            double full = it.Rect.Bottom + it.BounceHeight - BasePx * Math.Max(1.0, MaxScale);
+            double top = Math.Min(it.Rect.Top, full);
+            return (int)Math.Round(top - Px(36)) - Px(8);
+        }
 
         static void CloseItem(Item it)
         {
@@ -2875,6 +2920,19 @@ namespace MacDock
 
         internal static string ProcessPath(uint pid)
         {
+            // PROCESS_QUERY_LIMITED_INFORMATION works on elevated (admin) processes; Process.MainModule does not.
+            IntPtr h = NativeMethods.OpenProcess(0x1000, false, pid);
+            if (h != IntPtr.Zero)
+            {
+                try
+                {
+                    var sb = new StringBuilder(1024);
+                    int n = sb.Capacity;
+                    if (NativeMethods.QueryFullProcessImageName(h, 0, sb, ref n)) return sb.ToString();
+                }
+                catch { }
+                finally { NativeMethods.CloseHandle(h); }
+            }
             try
             {
                 using (Process p = Process.GetProcessById((int)pid))

@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.6
+### Added
+- **Show Dynamic Island** toggle in Settings (Menu Bar & Island): hide or show the Island pill live.
+- **Admin apps in the dock**: elevated (run as administrator) apps now appear and show as running.
+- **Dock clamp**: maximized windows no longer reach below the dock's top edge, even for apps that ignore the work area.
+- **Settings fade**: the Settings window fades out when closed.
+
+### Changed
+- Smoother icon glide when apps open or close; running-only apps keep a stable order.
+- Hover previews wait for the cursor to rest, so fast sweeps across the dock stay smooth.
+- Preview card sits above the icon label, with a larger red close button in its corner.
+- No icon magnify, preview pop-up or auto-hide reveal while dragging or resizing a window past the dock.
+- The hovered icon in a folder fan now draws on top of its neighbours.
 ## v1.5
 ### Added
 - **Close all windows** option in the dock icon context menu: closes every window of an app in one go.

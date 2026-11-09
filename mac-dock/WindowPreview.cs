@@ -29,7 +29,7 @@ namespace MacDock
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
         [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
 
-        const int XSize = 18, XInset = 6;
+        const int XSize = 28, XInset = 8;
         const int TileW = 260, ThumbH = 160, TitleH = 26, Pad = 12, Gap = 10, Radius = 14;
 
         sealed class Tile { public IntPtr Window, Thumb; public Rectangle Cell, Box; public string Title; public bool Minimized; }
@@ -287,11 +287,11 @@ namespace MacDock
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 var r = new Rectangle(1, 1, XSize, XSize);
-                using (var xb = new SolidBrush(xHot ? Color.FromArgb(255, 255, 69, 58) : Color.FromArgb(225, 52, 52, 56)))
-                    g.FillEllipse(xb, r);
-                using (var xp = new Pen(Color.White, 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                using (var xb = new SolidBrush(xHot ? Color.FromArgb(255, 215, 30, 30) : Color.FromArgb(255, 255, 59, 48)))
+                    { g.FillEllipse(xb, r); using (var op = new Pen(Color.FromArgb(200, 255, 255, 255), 1.5f)) g.DrawEllipse(op, r.Left + 0.5f, r.Top + 0.5f, r.Width - 1, r.Height - 1); }
+                using (var xp = new Pen(Color.White, 2.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 {
-                    float m = XSize * 0.32f;
+                    float m = XSize * 0.30f;
                     g.DrawLine(xp, r.Left + m, r.Top + m, r.Right - m, r.Bottom - m);
                     g.DrawLine(xp, r.Right - m, r.Top + m, r.Left + m, r.Bottom - m);
                 }

@@ -377,8 +377,14 @@ namespace MacDock
                         using (var pen = new Pen(Color.FromArgb(pa / 3, 255, 255, 255))) g.DrawPath(pen, gp);
                     }
                 }
-                for (int i = items.Count - 1; i >= 0; i--) // far ones first so near ones overlap them
+                for (int n = items.Count - 1; n >= 0; n--) // far ones first so near ones overlap them; hovered one is drawn last (on top)
                 {
+                    int i = n;
+                    if (hover >= 0 && hover < items.Count)
+                    {
+                        if (n == 0) i = hover;
+                        else if (n <= hover) i = n - 1;
+                    }
                     FanItem it = items[i];
                     double pr = Math.Max(0, Math.Min(1, Progress(i)));
                     Rectangle r = CurrentRect(i);

@@ -1,15 +1,15 @@
-# MacDock
+﻿# MacDock
 
 A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds with the compiler that ships with Windows, so no SDK is needed.
 
 ![Desktop with dock and menu bar](screenshots/v1.5/desktop.jpg)
 
-See the [changelog](CHANGELOG.md) for what's new in v1.5.
+See the [changelog](CHANGELOG.md) for what's new in v1.6.
 
 ## Installation guide
 **Requirements:** Windows 11 (Windows 10 mostly works), x64, .NET Framework 4.x (already part of Windows). No admin rights and no SDK needed.
 
-1. Download `MacDock-v1.5.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v1.5.zip SHA256`.
+1. Download `MacDock-v1.6.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v1.6.zip SHA256`.
 2. Extract the zip to any folder (right-click > Extract All).
 3. Double-click `Install.bat`. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
 4. MacDock is copied to `%LOCALAPPDATA%\MacDock`, a Start Menu shortcut is created, and the dock starts. It also starts at login (toggle in MacDock Settings).

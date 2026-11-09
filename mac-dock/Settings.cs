@@ -1286,6 +1286,32 @@ namespace MacDock
             t.Start();
         }
 
+        bool fadingOut, fadedOut;
+
+        // Fade out (~160ms) before really closing; timer is disposed afterwards.
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (!fadedOut && Visible && WindowState == FormWindowState.Normal && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                if (fadingOut) return;
+                fadingOut = true;
+                double start = Opacity;
+                var sw = Stopwatch.StartNew();
+                var t = new System.Windows.Forms.Timer { Interval = 15 };
+                t.Tick += (s, ev) =>
+                {
+                    double k = Math.Min(1.0, sw.ElapsedMilliseconds / 160.0);
+                    if (IsDisposed) { t.Dispose(); return; }
+                    Opacity = start * (1 - k);
+                    if (k >= 1.0) { t.Dispose(); fadedOut = true; Close(); }
+                };
+                t.Start();
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
         readonly SetSide side = new SetSide();
         readonly Panel viewport = new Panel();
         readonly Panel body = new Panel();
@@ -2273,6 +2299,7 @@ namespace MacDock
                     Note("Click a shortcut, then press the new combination. It needs a modifier (Win, Ctrl, Alt or Shift). Changes apply at once and are saved as @hotkey-spotlight and @hotkey-launchpad. Two shortcuts can't share a combination.");
                     Head("Menu bar & island");
                     c = NewCard();
+                    Toggle(c, "Show Dynamic Island", SetCfg.GetBool("island", true), v => { SetCfg.SetBool("island", v); IslandForm.SetEnabled(v); });
                     Link(c, "Open Windows notification settings", null, () => SetUi.OpenTarget("ms-settings:notifications"));
                     Link(c, "Open Focus settings", null, () => SetUi.OpenTarget("ms-settings:quiethours"));
                     Note("The notification island and menu bar items follow your Windows notification and Focus settings.");

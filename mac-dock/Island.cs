@@ -112,6 +112,27 @@ namespace MacDock
         double curH { get { return springH.Value; } }
         int frame;
 
+        // User toggle (Settings > Menu Bar & Island, "@island on|off"). Off hides the pill and stops its timer; the vsync thread just idles.
+        public static volatile bool Enabled = true;
+        public static event Action EnabledChanged;
+        public static void SetEnabled(bool on) { Enabled = on; var h = EnabledChanged; if (h != null) h(); }
+
+        public void ApplyEnabled()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            if (Enabled)
+            {
+                if (!Visible) Show();
+                Reposition(); Raise();
+                if (!animating) { timer.Start(); }
+            }
+            else
+            {
+                mode = Mode.Idle; animating = false; timer.Stop();
+                if (Visible) Hide();
+            }
+        }
+
         public IslandForm()
         {
             FormBorderStyle = FormBorderStyle.None;
@@ -215,7 +236,7 @@ namespace MacDock
 
         void OnNotification(NotificationInfo n)
         {
-            if (mode == Mode.Panel) return;
+            if (!Enabled || mode == Mode.Panel) return;
             current = n;
             mode = Mode.Notif;
             until = DateTime.Now.AddSeconds(5.5);
@@ -224,6 +245,7 @@ namespace MacDock
 
         public void TogglePanel()
         {
+            if (!Enabled) return;
             if (mode == Mode.Panel)
             {
                 mode = Mode.Idle;
