@@ -1264,6 +1264,9 @@ namespace MacDock
             if (instance.Visible) { instance.WindowState = FormWindowState.Normal; instance.Activate(); return; }
             // Build everything off-screen at opacity 0, let it paint fully, then fade in.
             instance.Opacity = 0;
+            instance.StartPosition = FormStartPosition.Manual;
+            Rectangle av = instance.Avail(Screen.FromPoint(Cursor.Position));
+            instance.Bounds = new Rectangle(av.Left + (av.Width - instance.Width) / 2, av.Top, instance.Width, av.Height);
             instance.CreateControl();
             instance.PerformLayout();
             instance.Show();
@@ -1582,9 +1585,10 @@ namespace MacDock
         [StructLayout(LayoutKind.Sequential)] struct MINMAX { public Point ptReserved; public Size ptMaxSize; public Point ptMaxPosition; public Size ptMinTrackSize; public Size ptMaxTrackSize; }
 
         // The screen's work area, minus the dock when it sits at the bottom: Settings never covers the dock.
-        Rectangle Avail()
+        Rectangle Avail() { return Avail(Screen.FromControl(this)); }
+        Rectangle Avail(Screen scr)
         {
-            Rectangle wa = Screen.FromControl(this).WorkingArea;
+            Rectangle wa = scr.WorkingArea;
             DockForm dock = DockForm.Instance;
             if (dock != null && !dock.IsDisposed && dock.Visible)
             {
@@ -2274,6 +2278,7 @@ namespace MacDock
                     Toggle(c, "Show Dock", SetCfg.GetBool("show-dock", true), v => { SetCfg.SetBool("show-dock", v); DockForm.Instance.ApplyDockMode(); });
                     Toggle(c, "Auto-hide Dock", SetCfg.GetBool("auto-hide-dock", false), v => { SetCfg.SetBool("auto-hide-dock", v); DockForm.Instance.ApplyDockMode(); });
                     Toggle(c, "Genie effect", SetCfg.GetBool("genie", true), v => SetCfg.SetBool("genie", v));
+                    Toggle(c, "Open folder fans on click instead of hover", SetCfg.GetBool("fan-click", false), v => SetCfg.SetBool("fan-click", v));
                     Note("With auto-hide off, the dock stays and maximized windows stop above it. With it on, the dock slides away while an app is in front and returns when the pointer reaches the bottom edge. Full-screen apps always hide it.");
                     Head("Windows taskbar");
                     c = NewCard();

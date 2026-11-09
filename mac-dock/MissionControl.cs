@@ -414,7 +414,7 @@ namespace MacDock
                     Bitmap packed = webApp ? null : IconPack.ForName(t.Name); // macOS icon, if the pack has one for this app
                     if (packed != null) { lock (tileIconCache) tileIconCache[t.Target] = packed; t.Icon = packed; dirty = true; continue; }
 
-                    Bitmap raw = (webApp ? Pwa.IconFor(t.Name) : null) ?? ShellIcons.Load(t.Target, 96);
+                    Bitmap raw = (webApp ? Pwa.IconFor(t.Name) : null) ?? ShellIcons.Load(t.Target, 96); if (raw == null) raw = ShellIcons.Generic(t.Name, 96);
                     if (raw == null) { lock (tileIconCache) iconsFailed.Add(t.Target); continue; }
                     Bitmap tiled = DockForm.Tile(raw);
                     lock (tileIconCache) tileIconCache[t.Target] = tiled;
@@ -448,7 +448,7 @@ namespace MacDock
                     Bitmap bmp = webApp ? null : IconPack.ForName(app.Key);
                     if (bmp == null)
                     {
-                        Bitmap raw = (webApp ? Pwa.IconFor(app.Key) : null) ?? ShellIcons.Load(target, 96);
+                        Bitmap raw = (webApp ? Pwa.IconFor(app.Key) : null) ?? ShellIcons.Load(target, 96); if (raw == null) raw = ShellIcons.Generic(app.Key, 96);
                         if (raw != null) bmp = DockForm.Tile(raw);
                     }
                     lock (tileIconCache) { if (bmp != null) tileIconCache[target] = bmp; else iconsFailed.Add(target); }
@@ -2330,7 +2330,26 @@ namespace MacDock
                 }
                 catch { }
             }
-            return byPath ?? loose;
+            return byPath ?? loose ?? FolderUninstaller(targets);
+        }
+
+        // Apps like Sideloadly ship an Uninstall.exe / unins000.exe next to the app but register nothing: look in the shortcut target's folder.
+        static string FolderUninstaller(List<string> targets)
+        {
+            string bad = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            foreach (string tg in targets)
+            {
+                try
+                {
+                    string dir = System.IO.Path.GetDirectoryName(tg);
+                    if (string.IsNullOrEmpty(dir) || dir.Length < 8 || dir.StartsWith(bad, StringComparison.OrdinalIgnoreCase) || !System.IO.Directory.Exists(dir)) continue;
+                    foreach (string pat in new[] { "unins???.exe", "Uninstall*.exe", "uninst*.exe" })
+                        foreach (string f in System.IO.Directory.GetFiles(dir, pat))
+                            return "\"" + f + "\"";
+                }
+                catch { }
+            }
+            return null;
         }
 
         // False when the command starts with a full path to an executable that is not there.

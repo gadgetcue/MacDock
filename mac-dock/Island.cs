@@ -664,6 +664,39 @@ namespace MacDock
         }
 
         // Draws one notification: colored initial badge, app name, title, body.
+
+        // GDI+ DrawString does no font fallback, so emoji came out as blanks/boxes. Draw emoji runs with Segoe UI Emoji.
+        readonly System.Collections.Generic.Dictionary<float, Font> emojiFonts = new System.Collections.Generic.Dictionary<float, Font>();
+        static bool IsEmojiAt(string s, int i)
+        {
+            char c = s[i];
+            if (char.IsSurrogate(c)) return true;
+            return c == '\u200D' || c == '\uFE0F' || (c >= '\u2190' && c <= '\u2BFF') || c == '\u00A9' || c == '\u00AE' || c == '\u3030' || c == '\u303D' || c == '\u3297' || c == '\u3299' || c == '\u203C' || c == '\u2049' || c == '\u2122' || c == '\u2139';
+        }
+        void DrawRich(Graphics g, string text, Font font, Brush brush, RectangleF r, StringFormat fmt)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            bool any = false;
+            for (int i = 0; i < text.Length; i++) if (IsEmojiAt(text, i)) { any = true; break; }
+            if (!any) { g.DrawString(text, font, brush, r, fmt); return; }
+            Font ef;
+            if (!emojiFonts.TryGetValue(font.Size, out ef)) { ef = new Font("Segoe UI Emoji", font.Size, FontStyle.Regular, font.Unit); emojiFonts[font.Size] = ef; }
+            float x = r.Left;
+            int pos = 0;
+            while (pos < text.Length && x < r.Right)
+            {
+                bool em = IsEmojiAt(text, pos);
+                int end = pos;
+                while (end < text.Length && IsEmojiAt(text, end) == em) end++;
+                string run = text.Substring(pos, end - pos);
+                Font f = em ? ef : font;
+                float w = g.MeasureString(run, f, PointF.Empty, StringFormat.GenericTypographic).Width + (em ? 2 : 0);
+                g.DrawString(run, f, brush, new RectangleF(x, r.Top, r.Right - x, r.Height), fmt);
+                x += w;
+                pos = end;
+            }
+        }
+
         void DrawNotification(Graphics g, RectangleF pill, NotificationInfo n, Brush white, Brush gray, StringFormat left, float yOffset, int alpha, bool large)
         {
             float d = large ? 44 : 34;
@@ -688,13 +721,13 @@ namespace MacDock
             if (large)
             {
                 g.DrawString((n.App ?? "").ToUpperInvariant(), nameFont, gray, new RectangleF(tx, pill.Top + 8, tw, 16), left);
-                g.DrawString(n.Title, boldFont, white, new RectangleF(tx, pill.Top + 24, tw, 22), left);
-                g.DrawString(n.Body, bodyFont, gray, new RectangleF(tx, pill.Top + 48, tw, 22), left);
+                DrawRich(g, n.Title, boldFont, white, new RectangleF(tx, pill.Top + 24, tw, 22), left);
+                DrawRich(g, n.Body, bodyFont, gray, new RectangleF(tx, pill.Top + 48, tw, 22), left);
             }
             else
             {
-                g.DrawString(n.Title, boldFont, white, new RectangleF(tx, pill.Top + yOffset + 3, tw - 60, 22), left);
-                g.DrawString(n.Body.Length > 0 ? n.Body : n.App, nameFont, gray, new RectangleF(tx, pill.Top + yOffset + 25, tw - 60, 18), left);
+                DrawRich(g, n.Title, boldFont, white, new RectangleF(tx, pill.Top + yOffset + 3, tw - 60, 22), left);
+                DrawRich(g, n.Body.Length > 0 ? n.Body : n.App, nameFont, gray, new RectangleF(tx, pill.Top + yOffset + 25, tw - 60, 18), left);
             }
         }
 

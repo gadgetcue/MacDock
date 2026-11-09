@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.7
+### Added
+- **Folder fan redesign**: labels lean along the arc and thumbnails tilt like the macOS Dock; an "Open in Explorer" arrow sits at the top of the fan.
+- **Click-to-pin folder fans**: clicking a folder stack opens its fan and keeps it open; click the folder or the chevron tile to fold it back.
+- **Dock tile chevron**: while a fan is open its dock slot becomes a dark tile with a chevron, fading and scaling smoothly in and out.
+- **Emoji in Dynamic Island** notifications (rendered with Segoe UI Emoji).
+- **Uninstall from Launchpad** now finds uninstallers shipped next to apps that don't register one.
+
+### Changed
+- LocalSend uses TLS 1.2 and 1.3 and disables Expect: 100-continue for better compatibility with newer peers.
+- Icons are never blank: fully transparent icons fall back to a rounded tile with the app's initial (also in Mission Control).
+
 ## v1.6
 ### Added
 - **Show Dynamic Island** toggle in Settings (Menu Bar & Island): hide or show the Island pill live.

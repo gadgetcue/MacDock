@@ -1023,7 +1023,8 @@ namespace MacDock
                         using (var hb = new Pen(Color.FromArgb(190, 255, 255, 255), 2f))
                         { g.FillPath(hf, hp); g.DrawPath(hb, hp); }
                     }
-                    DrawIcon(g, it, it.Rect);
+                    if (it.Kind == Kind.Folder && preview is DownloadsFan && previewItem != null && previewItem.Key == it.Key) DrawFanTile(g, it, ((DownloadsFan)preview).Presence);
+                    else DrawIcon(g, it, it.Rect);
                     if (it.Handles.Count > 0) // running indicator, like the macOS dot
                         g.FillEllipse(dot, it.Rect.Left + it.Rect.Width / 2 - Px(2), pillRect.Bottom - Px(6), Px(4), Px(4));
                 }
@@ -1056,6 +1057,25 @@ namespace MacDock
                 using (var tb = new SolidBrush(Color.White))
                     g.DrawString(shown, labelFont, tb, new RectangleF(x, y, w, h), Typography.Format(StringAlignment.Center));
             }
+        }
+
+        // While a folder's fan is open its dock slot turns into a dark tile with a chevron (click it to fold the fan back);
+        // the chevron nudges down and up as a hint.
+        void DrawFanTile(Graphics g, Item it, double k)
+        {
+            if (k < 0.98) DrawIcon(g, it, it.Rect); // the folder shows through while the tile fades and scales in or out
+            RectangleF r = it.Rect;
+            if (k <= 0.01) return;
+            float sc = (float)(0.55 + 0.45 * k); r = new RectangleF(r.Left + r.Width * (1 - sc) / 2, r.Top + r.Height * (1 - sc) / 2, r.Width * sc, r.Height * sc);
+            int a = (int)(255 * k);
+            float bob = (float)Math.Sin(Environment.TickCount / 260.0) * 1.6f * (r.Width / 64f);
+            using (GraphicsPath tp = RoundedRect(RectangleF.Inflate(r, -Px(3), -Px(3)), Px(Tokens.RadiusMd)))
+            using (var fill = new SolidBrush(Color.FromArgb(235 * a / 255, 40, 40, 44)))
+            using (var edge = new Pen(Color.FromArgb(60 * a / 255, 255, 255, 255), 1f))
+            { g.FillPath(fill, tp); g.DrawPath(edge, tp); }
+            float cx = r.Left + r.Width / 2, cy = r.Top + r.Height / 2 + bob, w = r.Width * 0.14f;
+            using (var pen = new Pen(Color.FromArgb(245 * a / 255, 255, 255, 255), Math.Max(2f, r.Width * 0.055f)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                g.DrawLines(pen, new[] { new PointF(cx - w, cy - w * 0.5f), new PointF(cx, cy + w * 0.5f), new PointF(cx + w, cy - w * 0.5f) });
         }
 
         void DrawIcon(Graphics g, Item it, RectangleF r)
@@ -1229,6 +1249,7 @@ namespace MacDock
                 if (StepBounce(it, dt)) busy = true;
             }
             if (dragItem != null) busy = true; // follow the cursor every frame
+            if (preview is DownloadsFan) busy = true; // the folder tile fades and bobs with the fan
 
             double hideTarget = away ? 1 : 0;
             if (!hideSpring.IsSettled(hideTarget, 0.003))
@@ -1260,14 +1281,14 @@ namespace MacDock
                     ShowPreview(di);
             }
             else if (dropIndex >= 0) { }
-            else if (hover >= 0 && preview != null && (previewItem == null || previewItem.Key != items[hover].Key) && popup == null && dragItem == null)
+            else if (hover >= 0 && preview != null && (previewItem == null || previewItem.Key != items[hover].Key) && !(preview is DownloadsFan && ((DownloadsFan)preview).Pinned) && popup == null && dragItem == null)
             {
                 preview.Close();
-                ShowPreview(items[hover]);
+                if (!FanClickMode(items[hover])) ShowPreview(items[hover]);
             }
             else if (hover >= 0 && preview == null && popup == null && dragItem == null &&
                      ((DateTime.UtcNow - hoverSince).TotalMilliseconds > (items[hover].Kind == Kind.Folder ? 120 : 350) || (DateTime.UtcNow - lastPreviewClose).TotalMilliseconds < 120) && cursorSlow)
-                ShowPreview(items[hover]);
+                { if (!FanClickMode(items[hover])) ShowPreview(items[hover]); else hoverSince = DateTime.MaxValue; }
             LayoutItems();
 
             if (busy || hoverChanged) Redraw();
@@ -1828,6 +1849,8 @@ namespace MacDock
             return false;
         }
 
+        static bool FanClickMode(Item it) { return it.Kind == Kind.Folder && SetCfg.GetBool("fan-click", false); }
+
         void ShowPreview(Item it)
         {
             hoverSince = DateTime.MaxValue; // once per hover
@@ -1868,6 +1891,14 @@ namespace MacDock
 
         void Activate(Item it)
         {
+            if (it.Kind == Kind.Folder)
+            {
+                // Clicking a folder stack opens its fan (or folds it back when it is already open); "Open in Explorer" sits at the fan's top.
+                bool wasOpen = preview is DownloadsFan && previewItem != null && previewItem.Key == it.Key;
+                if (preview != null) preview.Close();
+                if (!wasOpen) { ShowPreview(it); if (preview is DownloadsFan) ((DownloadsFan)preview).Pinned = true; }
+                return;
+            }
             if (preview != null) preview.Close();
             // Clicking a dock item while Launchpad or Mission Control is open closes it, then the item opens as usual.
             if (it.Kind != Kind.Mission && it.Kind != Kind.Launchpad) MissionControl.DismissForLaunch();
@@ -2180,6 +2211,7 @@ namespace MacDock
                 list.Add(MenuEntry.Item((cur == "fan" ? "✓ " : "    ") + "View as Fan", null, () => DownloadsFan.SetStyle("fan")));
                 list.Add(MenuEntry.Item((cur == "grid" ? "✓ " : "    ") + "View as Grid", null, () => DownloadsFan.SetStyle("grid")));
                 list.Add(MenuEntry.Item((cur == "list" ? "✓ " : "    ") + "View as List", null, () => DownloadsFan.SetStyle("list")));
+                list.Add(MenuEntry.Item((SetCfg.GetBool("fan-click", false) ? "✓ " : "    ") + "Open on Click (not Hover)", null, () => SetCfg.SetBool("fan-click", !SetCfg.GetBool("fan-click", false))));
                 list.Add(MenuEntry.Sep());
                 string folderPath = it.Target;
                 string curColor = FolderColor.Get(folderPath);

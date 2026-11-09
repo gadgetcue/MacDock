@@ -223,7 +223,11 @@ namespace MacDock
         // ---------- HTTP client ----------
         static HttpWebRequest NewRequest(string url, string method, int timeoutMs)
         {
-            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            // TLS 1.2 + 1.3 (12288 = Tls13 on .NET 4.8; newer LocalSend builds can be 1.3-only). Expect: 100-continue off: some peers stall or reject it.
+            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)12288; }
+            catch { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
+            ServicePointManager.Expect100Continue = false;
+            ServicePointManager.DefaultConnectionLimit = 64;
             ServicePointManager.ServerCertificateValidationCallback = (s, c, ch, e) => true; // peers use self-signed certs
             var req = (HttpWebRequest)WebRequest.Create(url);
             req.Method = method; req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.KeepAlive = false; req.Proxy = null;
@@ -263,9 +267,11 @@ namespace MacDock
                 }
                 var body = new Dictionary<string, object> { { "info", Info(false, false) }, { "files", files } };
                 string reply;
+                Log("send: prepare-upload -> " + baseUrl + " files=" + byId.Count);
                 try { reply = Post(baseUrl + "prepare-upload", json.Serialize(body), 120000); }
                 catch (WebException ex)
                 {
+                    Log("send: prepare-upload failed: " + ex.Status + " " + ex.Message + (ex.InnerException != null ? " / " + ex.InnerException.Message : ""));
                     var r = ex.Response as HttpWebResponse;
                     if (r != null && r.StatusCode == HttpStatusCode.Forbidden) return peer.Alias + " declined the transfer.";
                     if (r != null && r.StatusCode == (HttpStatusCode)409) return peer.Alias + " is busy with another transfer.";
@@ -287,8 +293,9 @@ namespace MacDock
                     req.ContentLength = fi.Length;
                     req.AllowWriteStreamBuffering = false;
                     using (Stream s = req.GetRequestStream())
-                    using (FileStream f = File.OpenRead(kv.Value)) f.CopyTo(s, 81920);
+                    using (FileStream f = new FileStream(kv.Value, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) f.CopyTo(s, 81920);
                     using (req.GetResponse()) { }
+                    Log("send: uploaded " + fi.Name);
                     sent++;
                 }
                 return "Sent " + sent + (sent == 1 ? " file" : " files") + " to " + peer.Alias + ".";
@@ -296,6 +303,8 @@ namespace MacDock
             catch (Exception ex)
             {
                 string detail = ex.Message;
+                if (ex.InnerException != null) detail += " (" + ex.InnerException.Message + ")";
+                Log("send: FAILED " + ex);
                 var we = ex as WebException;
                 if (we != null && we.Response != null)
                     try { using (var r = new StreamReader(we.Response.GetResponseStream())) detail += " " + r.ReadToEnd(); } catch { }
