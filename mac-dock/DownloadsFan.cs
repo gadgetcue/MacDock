@@ -124,8 +124,6 @@ namespace MacDock
             else { loading = true; Prefetch(folder); }
 
             Log("ctor done " + ((clk.ElapsedTicks - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0.0") + "ms cached=" + (hit != null));
-            timer.Interval = 15;
-            timer.Tick += (s, e) => Poll();
         }
 
         // Places the icons: the Dock's curved fan, a straight list, or a grid panel.
@@ -221,7 +219,7 @@ namespace MacDock
             born = DateTime.UtcNow; // restart the clock: building a big folder (Downloads) can take longer than the animation itself
             base.Show();
             Draw();
-            timer.Start();
+            if (vsync == null) { vsync = new VsyncDriver(this, Poll); vsync.Wake(); } // one step per display refresh, steady frame pacing
         }
 
         // 0..1 progress of item i's fan-out (staggered), with a little overshoot.
@@ -231,7 +229,7 @@ namespace MacDock
             get
             {
                 if (closeStart != DateTime.MinValue) return Math.Max(0, Math.Min(1, Progress(0)));
-                double t = Math.Max(0, Math.Min(1, (DateTime.UtcNow - born).TotalMilliseconds / 260.0));
+                double t = Math.Max(0, Math.Min(1, (DateTime.UtcNow - born).TotalMilliseconds / 240.0));
                 return t * t * (3 - 2 * t);
             }
         }
@@ -240,35 +238,38 @@ namespace MacDock
         {
             if (closeStart != DateTime.MinValue)
             {
-                double cu = Math.Max(0, Math.Min(1, (DateTime.UtcNow - closeStart).TotalMilliseconds / 190.0));
+                double cu = Math.Max(0, Math.Min(1, (DateTime.UtcNow - closeStart).TotalMilliseconds / 110.0));
                 return 1 - cu * cu * (3 - 2 * cu); // folds back into the dock icon
             }
-            double t = ((DateTime.UtcNow - born).TotalMilliseconds - i * 22) / 260.0;
+            double t = ((DateTime.UtcNow - born).TotalMilliseconds - i * 6) / 240.0;
             t = Math.Max(0, Math.Min(1, t));
-            double c1 = 1.2, c3 = c1 + 1;
-            double u = t - 1;
-            return 1 + c3 * u * u * u + c1 * u * u; // easeOutBack
+            double cu3 = 1 - t;
+            return 1 - cu3 * cu3 * cu3; // easeOutCubic: fast launch from the folder, soft landing, no bounce (as in the recording)
         }
 
-        bool Animating { get { if (closeStart != DateTime.MinValue) return true; return (DateTime.UtcNow - born).TotalMilliseconds < items.Count * 22 + 320; } }
+        bool Animating { get { if (closeStart != DateTime.MinValue) return true; return (DateTime.UtcNow - born).TotalMilliseconds < items.Count * 6 + 260; } }
 
-        Rectangle CurrentRect(int i)
+        RectangleF CurrentRect(int i)
         {
             double p = Progress(i);
             Rectangle r = items[i].Rect;
             double ox = origin.X - IconSize / 2.0, oy = origin.Y - IconSize / 2.0;
             // Like the Dock: icons grow out of the dock icon while sliding up the arc.
-            double sc = 0.15 + 0.85 * Math.Max(0, Math.Min(1, p));
-            int sz = (int)(IconSize * sc);
+            double sc = 0.35 + 0.65 * Math.Max(0, Math.Min(1, p));
+            float sz = (float)(IconSize * sc);
             double cx = ox + (r.Left - ox) * p + IconSize / 2.0, cy = oy + (r.Top - oy) * p + IconSize / 2.0;
-            return new Rectangle((int)(cx - sz / 2.0), (int)(cy - sz / 2.0), sz, sz);
+            return new RectangleF((float)(cx - sz / 2.0), (float)(cy - sz / 2.0), sz, sz);
         }
+
+        VsyncDriver vsync;
+        Font arrowFont;
 
         void Poll()
         {
+            if (IsDisposed) return;
             if (closeStart != DateTime.MinValue)
             {
-                if ((DateTime.UtcNow - closeStart).TotalMilliseconds >= 200) { closeDone = true; timer.Stop(); Close(); return; }
+                if ((DateTime.UtcNow - closeStart).TotalMilliseconds >= 120) { closeDone = true; Close(); return; }
                 Draw(); return;
             }
             if (menuOpen || dragging) return;
@@ -342,6 +343,9 @@ namespace MacDock
             return labelsLeft ? Rectangle.Union(r, new Rectangle(r.Left - lw - 12, r.Top + (r.Height - LabelH) / 2, lw + 12, LabelH))
                               : Rectangle.Union(r, new Rectangle(r.Right, r.Top + (r.Height - LabelH) / 2, lw + 12, LabelH));
         }
+
+        // In the reference each label sits a little above its item's centre, more so up the arc (about 2 px at the bottom to 18 px at the top for a 58 px item).
+        int LabelLift(int i) { return style != "fan" ? 0 : (int)Math.Round(IconSize * (i <= 5 ? 0.0073 * i * i : 0.18 + 0.045 * (i - 5))); }
 
         string FitName(string name, double maxW)
         {
@@ -442,16 +446,17 @@ namespace MacDock
                     }
                     FanItem it = items[i];
                     double pr = Math.Max(0, Math.Min(1, Progress(i)));
-                    Rectangle r = CurrentRect(i);
+                    RectangleF rf = CurrentRect(i);
                     bool hot = i == hover;
-                    { int gI = (int)(IconSize * 0.34 * it.Hot); r.Inflate(gI, gI); }
+                    { float gI = (float)(IconSize * 0.34 * it.Hot); rf.Inflate(gI, gI); }
+                    Rectangle r = Rectangle.Round(rf);
                     int alpha = (int)(255 * Math.Min(1, pr * 1.6));
 
                     Bitmap img = it.Thumb ?? it.Icon;
                     if (img != null)
                     {
-                        Rectangle dst = r;
-                        if (it.Thumb != null) dst = new Rectangle(r.Left + (r.Width - it.Thumb.Width) / 2, r.Top + (r.Height - it.Thumb.Height) / 2, it.Thumb.Width, it.Thumb.Height);
+                        RectangleF dst = rf;
+                        if (it.Thumb != null) dst = new RectangleF(rf.Left + (rf.Width - it.Thumb.Width) / 2f, rf.Top + (rf.Height - it.Thumb.Height) / 2f, it.Thumb.Width, it.Thumb.Height);
                         var rotSaved = g.Save();
                         double rot = style == "fan" ? it.Angle * 0.6 : 0; // thumbnails lean a few degrees like the Dock's, following the arc
                         if (rot != 0) { g.TranslateTransform(dst.Left + dst.Width / 2f, dst.Top + dst.Height / 2f); g.RotateTransform((float)rot); g.TranslateTransform(-(dst.Left + dst.Width / 2f), -(dst.Top + dst.Height / 2f)); }
@@ -473,7 +478,7 @@ namespace MacDock
                                     g.FillPath(sh, sp2); g.FillPath(tbr, tp); g.DrawPath(pen, tp);
                                 }
                             }
-                            else g.DrawImage(img, dst, 0, 0, img.Width, img.Height, GraphicsUnit.Pixel, ia);
+                            else g.DrawImage(img, new[] { new PointF(dst.Left, dst.Top), new PointF(dst.Right, dst.Top), new PointF(dst.Left, dst.Bottom) }, new Rectangle(0, 0, img.Width, img.Height), GraphicsUnit.Pixel, ia);
                         }
                         g.Restore(rotSaved);
                     }
@@ -496,8 +501,8 @@ namespace MacDock
                     {
                         int lw = LabelWidth(it);
                         int la = (int)(255 * Math.Min(1, (pr - 0.55) / 0.45));
-                        Rectangle lr = labelsLeft ? new Rectangle(r.Left - lw - 14, r.Top + (r.Height - LabelH) / 2, lw, LabelH)
-                                                  : new Rectangle(r.Right + 10, r.Top + (r.Height - LabelH) / 2, lw, LabelH);
+                        Rectangle lr = labelsLeft ? new Rectangle(r.Left - lw - 14, r.Top + (r.Height - LabelH) / 2 - LabelLift(i), lw, LabelH)
+                                                  : new Rectangle(r.Right + 10, r.Top + (r.Height - LabelH) / 2 - LabelLift(i), lw, LabelH);
                         // Rotate about the label's end next to the icon, so each label leans along the arc.
                         var saved = g.Save();
                         if (it.Angle != 0)
@@ -515,14 +520,26 @@ namespace MacDock
                         g.Restore(saved);
                     }
                 }
-                if (!moreRect.IsEmpty && items.Count > 0 && !Animating)
+                if (!moreRect.IsEmpty && items.Count > 0)
                 {
-                    using (var b = new SolidBrush(Color.FromArgb(moreHot ? 225 : 190, 70, 70, 78)))
-                    using (var pen = new Pen(Color.FromArgb(70, 255, 255, 255)))
-                    { g.FillEllipse(b, moreRect); g.DrawEllipse(pen, moreRect); }
-                    using (var af = new Font("Segoe UI Symbol", 17f, FontStyle.Bold))
-                    using (var tb = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
-                        g.DrawString("➦", af, tb, new RectangleF(moreRect.Left, moreRect.Top, moreRect.Width, moreRect.Height), fmt);
+                    // The arrow button grows out of the folder icon with the file icons, and shrinks back on close.
+                    double mp = Math.Max(0, Math.Min(1, Progress(items.Count)));
+                    if (mp > 0.01)
+                    {
+                        float ms = (float)(0.35 + 0.65 * mp);
+                        float mcx = (float)(origin.X + (moreRect.Left + moreRect.Width / 2f - origin.X) * mp), mcy = (float)(origin.Y + (moreRect.Top + moreRect.Height / 2f - origin.Y) * mp);
+                        int mal = (int)(255 * Math.Min(1, mp * 1.6));
+                        var mst = g.Save();
+                        g.TranslateTransform(mcx, mcy); g.ScaleTransform(ms, ms);
+                        var mr = new Rectangle(-moreRect.Width / 2, -moreRect.Height / 2, moreRect.Width, moreRect.Height);
+                        using (var b = new SolidBrush(Color.FromArgb((moreHot ? 225 : 190) * mal / 255, 70, 70, 78)))
+                        using (var pen = new Pen(Color.FromArgb(70 * mal / 255, 255, 255, 255)))
+                        { g.FillEllipse(b, mr); g.DrawEllipse(pen, mr); }
+                        if (arrowFont == null) arrowFont = new Font("Segoe UI Symbol", 17f, FontStyle.Bold);
+                        using (var tb = new SolidBrush(Color.FromArgb(235 * mal / 255, 255, 255, 255)))
+                            g.DrawString("➦", arrowFont, tb, new RectangleF(mr.Left, mr.Top, mr.Width, mr.Height), fmt);
+                        g.Restore(mst);
+                    }
                     if (moreHot)
                     {
                         int mw = TextRenderer.MeasureText("Open in Explorer", font, new Size(int.MaxValue, 100), TextFormatFlags.NoPadding).Width + 28;
@@ -566,6 +583,7 @@ namespace MacDock
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            if (vsync != null) { vsync.Dispose(); vsync = null; }
             timer.Stop();
             base.OnFormClosed(e);
             if (closed != null) closed();
@@ -575,7 +593,7 @@ namespace MacDock
         {
             if (disposing)
             {
-                timer.Dispose(); if (surface != null) surface.Dispose();
+                timer.Dispose(); if (arrowFont != null) arrowFont.Dispose(); if (surface != null) surface.Dispose();
             }
             base.Dispose(disposing);
         }

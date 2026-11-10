@@ -83,7 +83,7 @@ namespace MacDock
         double animStart;
         bool closing, faded;
 
-        public MenuPopup(List<MenuEntry> entries, Point anchor, int barHeight, Action closed, int blurDivisor = 20)
+        public MenuPopup(List<MenuEntry> entries, Point anchor, int barHeight, Action closed, int blurDivisor = 20, int bottomLimit = int.MaxValue)
         {
             this.entries = entries;
             this.closed = closed;
@@ -118,7 +118,15 @@ namespace MacDock
 
             Rectangle area = Screen.FromPoint(anchor).Bounds;
             int left = Math.Max(area.Left + 4, Math.Min(anchor.X, area.Right - width - 4));
-            Bounds = new Rectangle(left, anchor.Y, width, height);
+            // Keep the whole menu above the screen edge (and above the dock when given): flip upward, else shift.
+            int top = anchor.Y;
+            int limit = Math.Min(area.Bottom - 4, bottomLimit);
+            if (top + height > limit)
+            {
+                int up = anchor.Y - height - 4;
+                top = (up >= area.Top + 4 && up + height <= limit) ? up : Math.Max(area.Top + 4, limit - height);
+            }
+            Bounds = new Rectangle(left, top, width, height);
 
             this.blurDivisor = blurDivisor;
 
@@ -668,6 +676,33 @@ namespace MacDock
             }
             AddHit("bell", right - 6, 27, () => { ClosePanel(); if (BellClicked != null) BellClicked(); });
             right -= 12;
+
+            // Screenshot and screen record (Settings > Menu bar & island).
+            bool recOn = ScreenCapture.Recording;
+            if (ScreenCapture.BarShot)
+            {
+                right -= 16;
+                using (var pen = new Pen(Color.FromArgb(240, 255, 255, 255), 1.5f))
+                {
+                    g.DrawRectangle(pen, right, 11, 16, 11);
+                    g.DrawRectangle(pen, right + 5, 8, 6, 3);
+                    g.DrawEllipse(pen, right + 5, 13, 6, 6);
+                }
+                AddHit("screenshot", right - 6, 28, () => { ClosePanel(); ScreenCapture.Screenshot(); });
+                right -= 12;
+            }
+            if (ScreenCapture.BarRec)
+            {
+                right -= 16;
+                using (var pen = new Pen(Color.FromArgb(240, 255, 255, 255), 1.5f))
+                using (var red = new SolidBrush(Color.FromArgb(255, 69, 58)))
+                {
+                    g.DrawEllipse(pen, right, 7, 14, 14);
+                    if (recOn) g.FillRectangle(red, right + 4, 11, 6, 6); else g.FillEllipse(red, right + 3.5f, 10.5f, 7, 7);
+                }
+                AddHit("screenrecord", right - 6, 26, () => { ClosePanel(); ScreenCapture.ToggleRecord(); });
+                right -= 12;
+            }
 
             // Control Center.
             right -= 16;

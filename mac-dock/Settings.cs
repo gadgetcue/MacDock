@@ -1653,9 +1653,31 @@ namespace MacDock
             if (m.Msg != 0x020A || !Visible || !Bounds.Contains(Cursor.Position)) return false;
             int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
             if (side.RectangleToScreen(side.ClientRectangle).Contains(Cursor.Position)) { side.Scroll(-delta / 120 * 60); return true; }
-            scroll -= delta / 120 * 56;
-            ApplyScroll();
+            // Accumulate fractional (touchpad) deltas and glide to the target instead of jumping a notch per tick.
+            scrollTarget -= delta * 56f / 120f;
+            ClampTarget();
+            if (vsync == null)
+                vsync = new VsyncDriver(this, () =>
+                {
+                    double dt = vsyncClock.Next();
+                    double d = scrollTarget - scrollF;
+                    if (Math.Abs(d) < 0.5) { scrollF = scrollTarget; vsync.Sleep(); }
+                    else scrollF += (float)(d * (1 - Math.Pow(0.7, dt * 1000.0 / 8.0))); // frame-rate independent ease
+                    scroll = (int)Math.Round(scrollF);
+                    ApplyScroll();
+                });
+            if (!vsync.Active) { scrollF = scroll; vsyncClock.Reset(); vsync.Wake(); }
             return true;
+        }
+
+        float scrollF, scrollTarget;
+        VsyncDriver vsync; readonly FrameClock vsyncClock = new FrameClock();
+
+        void ClampTarget()
+        {
+            float max = Math.Max(0, body.Height - viewport.Height);
+            if (scrollTarget < 0) scrollTarget = 0;
+            if (scrollTarget > max) scrollTarget = max;
         }
 
         // ----- page body -----
@@ -1666,7 +1688,8 @@ namespace MacDock
             foreach (Control c in flow) c.Dispose();
             flow.Clear();
             body.Controls.Clear();
-            scroll = 0;
+            scroll = 0; scrollF = 0; scrollTarget = 0;
+            if (vsync != null) vsync.Sleep();
         }
 
         void Relayout()
@@ -1695,7 +1718,8 @@ namespace MacDock
             int max = Math.Max(0, body.Height - viewport.Height);
             if (scroll < 0) scroll = 0;
             if (scroll > max) scroll = max;
-            body.Top = -scroll;
+            ClampTarget();
+            if (body.Top != -scroll) body.Top = -scroll;
         }
 
         void Head(string text)
@@ -2277,6 +2301,7 @@ namespace MacDock
                     c = NewCard();
                     Toggle(c, "Show Dock", SetCfg.GetBool("show-dock", true), v => { SetCfg.SetBool("show-dock", v); DockForm.Instance.ApplyDockMode(); });
                     Toggle(c, "Auto-hide Dock", SetCfg.GetBool("auto-hide-dock", false), v => { SetCfg.SetBool("auto-hide-dock", v); DockForm.Instance.ApplyDockMode(); });
+                    Toggle(c, "Show Start icon in Dock", SetCfg.GetBool("show-start-icon", true), v => DockForm.Instance.SetStartIcon(v));
                     Toggle(c, "Genie effect", SetCfg.GetBool("genie", true), v => SetCfg.SetBool("genie", v));
                     Toggle(c, "Open folder fans on click instead of hover", SetCfg.GetBool("fan-click", false), v => SetCfg.SetBool("fan-click", v));
                     Note("With auto-hide off, the dock stays and maximized windows stop above it. With it on, the dock slides away while an app is in front and returns when the pointer reaches the bottom edge. Full-screen apps always hide it.");
@@ -2305,6 +2330,10 @@ namespace MacDock
                     Head("Menu bar & island");
                     c = NewCard();
                     Toggle(c, "Show Dynamic Island", SetCfg.GetBool("island", true), v => { SetCfg.SetBool("island", v); IslandForm.SetEnabled(v); });
+                    Toggle(c, "Screenshot in status bar", ScreenCapture.BarShot, v => ScreenCapture.BarShot = v);
+                    Toggle(c, "Screen record in status bar", ScreenCapture.BarRec, v => ScreenCapture.BarRec = v);
+                    Toggle(c, "Screenshot tile in Control Center", ScreenCapture.TileShot, v => Panels.CcSetMember("shot", v));
+                    Toggle(c, "Screen record tile in Control Center", ScreenCapture.TileRec, v => Panels.CcSetMember("rec", v));
                     Link(c, "Open Windows notification settings", null, () => SetUi.OpenTarget("ms-settings:notifications"));
                     Link(c, "Open Focus settings", null, () => SetUi.OpenTarget("ms-settings:quiethours"));
                     Note("The notification island and menu bar items follow your Windows notification and Focus settings.");

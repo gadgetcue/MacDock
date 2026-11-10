@@ -554,7 +554,7 @@ namespace MacDock
         const double BounceLaunchSpeed = 322;   // = sqrt(2 * Gravity * 20 px)
         static double LaunchSpeed { get { return Motion.Reduced ? 0 : BounceLaunchSpeed; } } // Reduce Motion: no bounce
         const double LaunchTimeout = 8;         // seconds to keep bouncing if the app never shows a window
-        static int PillRadius { get { return Px(Tokens.RadiusLg); } }      // rounded-rectangle corners, like the macOS dock
+        static int PillRadius { get { return Math.Max(Px(10), PillHeightConst / 4); } }  // ~1/4 of bar height (reference)      // rounded-rectangle corners, like the macOS dock
         static int CanvasSlack { get { return Px(260); } }    // extra width so magnified icons never clip
 
         const int GWL_EXSTYLE = -20;
@@ -1603,12 +1603,13 @@ namespace MacDock
             var list = new List<Item>();
             var pinnedApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (Entry e in entries.Where(x => x.Section == 0))
+            bool showStart = SetCfg.GetBool("show-start-icon", true);
+            foreach (Entry e in entries.Where(x => x.Section == 0 && (showStart || x.Target != "[start]")))
                 AddEntryItem(list, e, running, pinnedApps);
 
             // Entries in the right-hand section may also be apps; they count as pinned too.
             var rightItems = new List<Item>();
-            foreach (Entry e in entries.Where(x => x.Section != 0))
+            foreach (Entry e in entries.Where(x => x.Section != 0 && (showStart || x.Target != "[start]")))
                 AddEntryItem(rightItems, e, running, pinnedApps);
 
             // Running-only apps keep their place; newcomers join at the end (sorting by path made icons jump around).
@@ -2151,6 +2152,13 @@ namespace MacDock
             else if (e.Button == MouseButtons.Left && index >= 0) Activate(items[index]);
         }
 
+        // Shows or hides the Windows Start icon. Stored as show-start-icon in the settings; the "[start]" pin stays in dock.txt.
+        internal void SetStartIcon(bool on)
+        {
+            SetCfg.SetBool("show-start-icon", on);
+            RebuildItems();
+        }
+
         void ShowMenu(Item it, Point at)
         {
             if (popup != null) popup.Close();
@@ -2161,6 +2169,11 @@ namespace MacDock
             {
                 list.Add(MenuEntry.Item("Open", null, () => RecycleBin.Open()));
                 list.Add(MenuEntry.Item("Empty Recycle Bin", null, RecycleBin.IsFull() ? (Action)(() => RecycleBin.Empty()) : null));
+                list.Add(MenuEntry.Sep());
+            }
+            else if (it == null && !SetCfg.GetBool("show-start-icon", true))
+            {
+                list.Add(MenuEntry.Item("Show Start Icon", null, () => SetStartIcon(true)));
                 list.Add(MenuEntry.Sep());
             }
             else if (it != null)
@@ -2176,6 +2189,8 @@ namespace MacDock
                     list.Add(MenuEntry.Sep());
                 }
 
+                if (it.Kind == Kind.Start)
+                    list.Add(MenuEntry.Item("Hide Start Icon", null, () => SetStartIcon(false)));
                 if (it.Entry != null && it.Kind != Kind.Start)
                 {
                     Entry entry = it.Entry;
@@ -2548,8 +2563,57 @@ namespace MacDock
             return null;
         }
 
+        // macOS-style trash: a tapered wire-mesh can with a rim; crumpled paper peeks out when it is full.
         static Bitmap TrashIcon(bool full)
         {
+            try
+            {
+                int S = IconSource;
+                var bmp = new Bitmap(S, S);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    float cx = S / 2f, top = S * 0.20f, bot = S * 0.90f, tw = S * 0.31f, bw = S * 0.235f;
+                    float rimH = S * 0.075f;
+                    if (full)
+                    {
+                        using (var paper = new SolidBrush(Color.FromArgb(235, 244, 246, 250)))
+                        using (var pen = new Pen(Color.FromArgb(120, 150, 156, 170), 1.5f))
+                        {
+                            g.FillPolygon(paper, new[] { new PointF(cx - tw * 0.8f, top + rimH), new PointF(cx - tw * 0.45f, top - S * 0.07f), new PointF(cx - tw * 0.05f, top - S * 0.02f), new PointF(cx + tw * 0.35f, top - S * 0.09f), new PointF(cx + tw * 0.8f, top + rimH) });
+                            g.DrawLines(pen, new[] { new PointF(cx - tw * 0.45f, top - S * 0.07f), new PointF(cx - tw * 0.05f, top - S * 0.02f), new PointF(cx + tw * 0.35f, top - S * 0.09f) });
+                        }
+                    }
+                    var body = new[] { new PointF(cx - tw, top), new PointF(cx + tw, top), new PointF(cx + bw, bot), new PointF(cx - bw, bot) };
+                    using (var bodyBrush = new LinearGradientBrush(new RectangleF(cx - tw, top, tw * 2, bot - top), Color.FromArgb(215, 214, 220, 230), Color.FromArgb(215, 150, 158, 172), 90f))
+                    using (var edge = new Pen(Color.FromArgb(235, 255, 255, 255), 2.2f))
+                    using (var mesh = new Pen(Color.FromArgb(130, 110, 118, 134), 1.6f))
+                    {
+                        g.FillPolygon(bodyBrush, body);
+                        for (int i = -2; i <= 2; i++)
+                        {
+                            float k = i / 3f;
+                            g.DrawLine(mesh, cx + tw * k * 0.95f, top + rimH, cx + bw * k * 0.95f, bot - S * 0.03f);
+                        }
+                        for (int j = 1; j <= 3; j++)
+                        {
+                            float y = top + rimH + (bot - top - rimH) * j / 4.2f;
+                            float w = tw + (bw - tw) * (y - top) / (bot - top);
+                            g.DrawLine(mesh, cx - w * 0.97f, y, cx + w * 0.97f, y);
+                        }
+                        g.DrawPolygon(edge, body);
+                    }
+                    using (var rimBrush = new SolidBrush(Color.FromArgb(240, 232, 236, 244)))
+                    using (var rimPen = new Pen(Color.FromArgb(200, 120, 128, 144), 1.2f))
+                    using (GraphicsPath rim = RoundedRect(new RectangleF(cx - tw - S * 0.03f, top - rimH * 0.5f, (tw + S * 0.03f) * 2, rimH), rimH / 2f))
+                    {
+                        g.FillPath(rimBrush, rim);
+                        g.DrawPath(rimPen, rim);
+                    }
+                }
+                return bmp;
+            }
+            catch { }
             try
             {
                 int idx = RecycleBin.IconIndex(full);

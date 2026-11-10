@@ -1,5 +1,18 @@
-# Changelog
+﻿# Changelog
 
+## v1.8
+### Added
+- **Screenshot and screen record** buttons, in the menu bar and as Control Center tiles. The status bar buttons and the Control Center tiles are independent toggles in Settings.
+- **Launchpad sort by install date** (newest first).
+- **Control Center dark mode tile.**
+- **Customizable Control Center**: tiles can be edited, removed and added, reordered by drag and drop, and resized.
+- **Hide Start icon** option in Settings.
+- **Dock corner radius** setting.
+- New **Recycle Bin icon**.
+
+### Fixed
+- Scrolling in folder fans and in Settings.
+- Launchpad context menu now flips to stay on screen.
 ## v1.7
 ### Added
 - **Folder fan redesign**: labels lean along the arc and thumbnails tilt like the macOS Dock; an "Open in Explorer" arrow sits at the top of the fan.

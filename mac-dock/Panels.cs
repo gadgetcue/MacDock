@@ -33,6 +33,13 @@ namespace MacDock
         public bool Active, Half, WhiteWhenOn, Sun, Card;
         public double Anim;              // 0..1 eased toward Active, drives the tile colours
 
+        public string Key;               // glass layout: identity across rebuilds, so a row glides from its old place
+        public string DragId;            // glass layout, edit mode: dragging this row onto another with a DragId reorders them
+        public Action<int, int, bool> Resize; // edit mode resize grip: (dx, dy since press, released); (0,0,false) marks the start
+        public Action<string> Drop;      // called with the DragId of the row it was dropped on
+        public RectangleF Shown;         // animated position (eases toward Fixed)
+        public bool HasShown;
+
         public Rectangle Rect;
         public Rectangle ToggleRect;
         public Rectangle Fixed;          // glass layout: position inside the panel (Rect = Fixed + gutter)
@@ -125,6 +132,11 @@ namespace MacDock
         int panelHeight;
         int hover = -1;
         PanelRow dragging;
+        PanelRow dragRow;                 // edit mode: tile being dragged to a new place
+        Point dragFrom, dragNow;
+        bool dragActive;
+        PanelRow resizeRow;               // edit mode: grip being dragged to resize its tile
+        Point resizeFrom;
 
         // Spring state for open/close: runs 0 -> 1.
         Spring open = new Spring(0);
@@ -198,6 +210,17 @@ namespace MacDock
         public void SetRows(List<PanelRow> newRows)
         {
             if (IsDisposed || closing) return;
+            if (glass)
+            {
+                var old = new Dictionary<string, RectangleF>();
+                foreach (PanelRow o in rows) if (o.Key != null && o.HasShown) old[o.Key] = o.Shown;
+                foreach (PanelRow n in newRows)
+                {
+                    RectangleF s;
+                    n.Shown = n.Key != null && old.TryGetValue(n.Key, out s) ? s : (RectangleF)n.Fixed;
+                    n.HasShown = true;
+                }
+            }
             rows = newRows;
             hover = -1;
             Relayout(false);
@@ -320,7 +343,8 @@ namespace MacDock
                 foreach (PanelRow r in rows)
                 {
                     if (r.Fixed.IsEmpty) continue;
-                    r.Rect = new Rectangle(Gutter + r.Fixed.X, Gutter + r.Fixed.Y, r.Fixed.Width, r.Fixed.Height);
+                    if (r.HasShown) r.Rect = new Rectangle(Gutter + (int)Math.Round(r.Shown.X), Gutter + (int)Math.Round(r.Shown.Y), (int)Math.Round(r.Shown.Width), (int)Math.Round(r.Shown.Height));
+                    else r.Rect = new Rectangle(Gutter + r.Fixed.X, Gutter + r.Fixed.Y, r.Fixed.Width, r.Fixed.Height);
                     bottom = Math.Max(bottom, r.Fixed.Bottom);
                 }
                 panelHeight = bottom;
@@ -853,6 +877,26 @@ namespace MacDock
                 // Settled and fully opaque: a plain copy is much cheaper than a color-matrix blit.
                 if (alpha >= 0.999f && Math.Abs(scale - 1f) < 0.0005f) g.DrawImageUnscaled(content, 0, 0);
                 else g.DrawImage(content, new Rectangle(0, 0, Width, Height), 0, 0, Width, Height, GraphicsUnit.Pixel, fade);
+
+                if (dragRow != null && dragActive)
+                {
+                    g.ResetTransform();
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    PanelRow t = DragTarget(dragNow);
+                    if (t != null)
+                        using (var path = Layered.RoundedRect(Rectangle.Inflate(t.Rect, 2, 2), 22))
+                        using (var pen = new Pen(Color.FromArgb(230, 255, 255, 255), 2.5f))
+                            g.DrawPath(pen, path);
+                    // Lifted preview of the tile under the cursor, slightly translucent.
+                    Rectangle src = dragRow.Rect;
+                    Rectangle dst = new Rectangle(dragNow.X - dragFrom.X + src.X, dragNow.Y - dragFrom.Y + src.Y, src.Width, src.Height);
+                    var gm = new ColorMatrix { Matrix00 = 1, Matrix11 = 1, Matrix22 = 1, Matrix33 = 0.82f, Matrix44 = 1 };
+                    using (var ia = new ImageAttributes())
+                    {
+                        ia.SetColorMatrix(gm);
+                        g.DrawImage(content, dst, src.X, src.Y, src.Width, src.Height, GraphicsUnit.Pixel, ia);
+                    }
+                }
             }
             surface.Present(Handle, Left, Top);
         }
@@ -876,11 +920,34 @@ namespace MacDock
             }
 
             bool tilesMoved = StepTiles(dt);
+            tilesMoved |= StepLayout(dt);
             if (tilesMoved) RenderContent();
             if (!settled || dragging != null || tilesMoved) Compose(); // nothing to redraw while the panel just sits there
             timer.Interval = settled && dragging == null && !tilesMoved ? 40 : 16;
 
             if (ticks % 2 == 0) PollInput();
+        }
+
+        // Glass layout: rows glide to their new place and size (soft ease-out) after a reorder, resize or add/remove.
+        bool StepLayout(double dt)
+        {
+            if (!glass) return false;
+            bool moved = false;
+            double k = 1 - Math.Exp(-Math.Min(dt, 0.05) * 11); // gentle ease-out so resizes and moves settle softly
+            foreach (PanelRow r in rows)
+            {
+                if (!r.HasShown || r.Fixed.IsEmpty) continue;
+                RectangleF t = r.Fixed, s = r.Shown;
+                if (Math.Abs(t.X - s.X) + Math.Abs(t.Y - s.Y) + Math.Abs(t.Width - s.Width) + Math.Abs(t.Height - s.Height) < 0.6f) s = t;
+                else
+                {
+                    s = new RectangleF(s.X + (t.X - s.X) * (float)k, s.Y + (t.Y - s.Y) * (float)k, s.Width + (t.Width - s.Width) * (float)k, s.Height + (t.Height - s.Height) * (float)k);
+                    moved = true;
+                }
+                r.Shown = s;
+                r.Rect = new Rectangle(Gutter + (int)Math.Round(s.X), Gutter + (int)Math.Round(s.Y), (int)Math.Round(s.Width), (int)Math.Round(s.Height));
+            }
+            return moved;
         }
 
         // Eases each tile's colour toward its on/off state. Returns true while any tile is still moving.
@@ -997,10 +1064,30 @@ namespace MacDock
                         }
                         break;
                     }
+                    case "shot":
+                        g.DrawRectangle(pen, cx - 9, cy - 5, 18, 12);
+                        g.DrawEllipse(pen, cx - 3.5f, cy - 2.5f, 7, 7);
+                        g.FillRectangle(b, cx - 3, cy - 8, 6, 3);
+                        break;
+                    case "rec":
+                        g.DrawEllipse(pen, cx - 9, cy - 9, 18, 18);
+                        g.FillEllipse(b, cx - 4.5f, cy - 4.5f, 9, 9);
+                        break;
                     case "project":
                         // two overlapping screens
                         g.DrawRectangle(pen, cx - 9, cy - 8, 12, 9);
                         g.FillRectangle(b, cx - 3, cy - 3, 12, 9);
+                        break;
+                    case "mute":
+                        g.FillPolygon(b, new PointF[] { new PointF(cx - 9, cy - 3), new PointF(cx - 4, cy - 3), new PointF(cx + 1, cy - 8), new PointF(cx + 1, cy + 8), new PointF(cx - 4, cy + 3), new PointF(cx - 9, cy + 3) });
+                        g.DrawLine(pen, cx + 4, cy - 4, cx + 10, cy + 4);
+                        g.DrawLine(pen, cx + 10, cy - 4, cx + 4, cy + 4);
+                        break;
+                    case "lock":
+                        g.FillRectangle(b, cx - 7, cy - 1, 14, 10);
+                        g.DrawArc(pen, cx - 5, cy - 9, 10, 12, 180, 180);
+                        g.DrawLine(pen, cx - 5, cy - 3, cx - 5, cy);
+                        g.DrawLine(pen, cx + 5, cy - 3, cx + 5, cy);
                         break;
                     case "saver":
                     {
@@ -1070,17 +1157,74 @@ namespace MacDock
                     return;
                 }
             }
+            // Edit mode: pressing a draggable tile (not one of its small buttons) may start a reorder drag.
+            for (int i = rows.Count - 1; i >= 0; i--)
+            {
+                PanelRow r = rows[i];
+                if (!r.Rect.Contains(e.Location)) continue;
+                if (r.Resize != null)
+                {
+                    resizeRow = r; resizeFrom = e.Location; Capture = true;
+                    r.Resize(0, 0, false);
+                    return;
+                }
+                if (r.DragId != null)
+                {
+                    dragRow = r; dragFrom = e.Location; dragNow = e.Location; dragActive = false;
+                    Capture = true;
+                }
+                return;
+            }
+        }
+
+        PanelRow DragTarget(Point p)
+        {
+            for (int i = rows.Count - 1; i >= 0; i--)
+            {
+                PanelRow r = rows[i];
+                if (r.DragId != null && r.DragId != dragRow.DragId && r.Rect.Contains(p)) return r;
+            }
+            return null;
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
             if (dragging != null) SetSlider(dragging, e.X);
+            if (resizeRow != null) resizeRow.Resize(e.X - resizeFrom.X, e.Y - resizeFrom.Y, false);
+            if (dragRow != null)
+            {
+                dragNow = e.Location;
+                if (!dragActive && (Math.Abs(e.X - dragFrom.X) > 6 || Math.Abs(e.Y - dragFrom.Y) > 6)) dragActive = true;
+                if (dragActive) Compose();
+            }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (resizeRow != null)
+            {
+                PanelRow rr = resizeRow;
+                resizeRow = null; Capture = false;
+                rr.Resize(e.X - resizeFrom.X, e.Y - resizeFrom.Y, true);
+                return;
+            }
+            if (dragRow != null)
+            {
+                PanelRow src = dragRow;
+                bool was = dragActive;
+                dragRow = null; dragActive = false; Capture = false;
+                if (was)
+                {
+                    PanelRow t = null;
+                    for (int i = rows.Count - 1; i >= 0; i--)
+                        if (rows[i].DragId != null && rows[i].DragId != src.DragId && rows[i].Rect.Contains(e.Location)) { t = rows[i]; break; }
+                    if (t != null && src.Drop != null) src.Drop(t.DragId);
+                    else { RenderContent(); Compose(); }
+                    return;
+                }
+            }
             if (dragging != null)
             {
                 dragging = null;
@@ -1089,8 +1233,9 @@ namespace MacDock
             }
             if (e.Button != MouseButtons.Left) return;
 
-            foreach (PanelRow r in rows)
+            for (int ri = rows.Count - 1; ri >= 0; ri--) // topmost first: edit-mode buttons sit over their tile
             {
+                PanelRow r = rows[ri];
                 if (r.Extra != null && r.ExtraRect.Contains(e.Location)) { BeginClose(); r.Extra(); return; }
                 foreach (var h in r.Hits)
                     if (h.Key.Contains(e.Location)) { h.Value(); RenderContent(); Compose(); return; }
@@ -1161,7 +1306,7 @@ namespace MacDock
             if (id == "wifi") Background(panel, WifiRows);
             else if (id == "bluetooth") Background(panel, BluetoothRows);
             else if (id == "sound") Background(panel, () => { string def; List<string> outs = DeviceFeed.AudioOutputs(out def); return SoundRows(outs, def); });
-            else if (id == "control") Background(panel, ControlRows);
+            else if (id == "control") { ccEdit = false; Background(panel, () => ControlRows(panel)); }
             else if (id == "localsend") Background(panel, () => LocalSendRows(panel));
             return panel;
         }
@@ -1349,48 +1494,197 @@ namespace MacDock
             return rows;
         }
 
-        // Control Center: pill tiles plus Display and Sound sliders. Wi-Fi, Bluetooth and Dark Mode are set in code;
-        // Airplane, Do Not Disturb and Night Light have no supported Windows API here, so they open their Settings page.
-        static List<PanelRow> ControlRows()
+        // Control Center: tiles are picked from a catalog (see CcCatalog) and saved as "@cctiles" in dock.txt. "Edit Controls"
+        // switches the panel to edit mode: tap a tile to remove it, tap a "+" chip to add one. Wi-Fi, Bluetooth, Dark Mode,
+        // Mute, Night Light, Battery saver, Airplane and Do Not Disturb are set in code; Stage/Mirroring/Widgets/Project use
+        // the Windows shortcuts and Lock calls LockWorkStation.
+        sealed class CcTile
         {
-            bool? wifi = DeviceFeed.RadioOn("WiFi");
-            bool? bluetooth = DeviceFeed.RadioOn("Bluetooth");
+            public string Id, Name;
+            public bool Tall;                       // spans two rows (Now Playing)
+            public Func<CcState, PanelRow[]> Build; // one tile, or two round buttons sharing a cell
+        }
+
+        sealed class CcState { public bool? Wifi, Bluetooth; public string Ssid; public bool Edit; }
+
+        static readonly string[] CcDefault = { "wifi", "now", "bluetooth", "localsend", "stage", "focus", "widgets", "nightlight", "project", "saver", "airplane", "shot", "rec", "dark" };
+
+        static readonly List<CcTile> CcCatalog = BuildCcCatalog();
+
+        static List<CcTile> BuildCcCatalog()
+        {
+            Func<string, string, Action, PanelRow> round = (glyph, name, click) => new PanelRow { Kind = RowKind.Round, Glyph = glyph, Text = name, Click = click };
+            var l = new List<CcTile>();
+            l.Add(new CcTile { Id = "wifi", Name = "Wi-Fi", Build = s =>
+            {
+                PanelRow w = RadioTile("Wi-Fi", "WiFi", s.Wifi, "wifi", "ms-settings:network-wifi");
+                if (s.Wifi == true && !string.IsNullOrWhiteSpace(s.Ssid)) w.Sub = s.Ssid.Trim();
+                return new[] { w };
+            } });
+            l.Add(new CcTile { Id = "now", Name = "Now Playing", Tall = true, Build = s => new[] { new PanelRow { Kind = RowKind.Media, Text = "Now Playing" } } });
+            l.Add(new CcTile { Id = "bluetooth", Name = "Bluetooth", Build = s => new[] { RadioTile("Bluetooth", "Bluetooth", s.Bluetooth, "bluetooth", "ms-settings:bluetooth") } });
+            l.Add(new CcTile { Id = "localsend", Name = "LocalSend", Build = s => new[] { PanelRow.Tile("LocalSend", "", "localsend", false, false, Go("localsend")) } });
+            l.Add(new CcTile { Id = "stage", Name = "Stage + Mirroring", Build = s => new[] {
+                round("stage", "Stage", () => WinUtil.Combo(WinUtil.VK_LWIN, 0x09)),
+                round("mirror", "Mirroring", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'K')) } });
+            l.Add(new CcTile { Id = "focus", Name = "Do Not Disturb", Build = s => new[] { DndTile() } });
+            l.Add(new CcTile { Id = "widgets", Name = "Widgets + Sidebar", Build = s => new[] {
+                round("grid", "Widgets", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'A')),
+                round("sidebar", "Sidebar", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'W')) } });
+            l.Add(new CcTile { Id = "nightlight", Name = "Night Light", Build = s => new[] { NightLightTile() } });
+            l.Add(new CcTile { Id = "project", Name = "Project", Build = s => new[] { PanelRow.Tile("Project", "", "project", false, false, () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'P')) } });
+            l.Add(new CcTile { Id = "saver", Name = "Battery Saver", Build = s => new[] { BatterySaverTile() } });
+            l.Add(new CcTile { Id = "airplane", Name = "Airplane", Build = s => new[] { AirplaneTile(s.Wifi, s.Bluetooth) } });
+            l.Add(new CcTile { Id = "shot", Name = "Screenshot", Build = s => new[] { CaptureTile(false) } });
+            l.Add(new CcTile { Id = "rec", Name = "Screen Record", Build = s => new[] { CaptureTile(true) } });
+            l.Add(new CcTile { Id = "dark", Name = "Dark Mode", Build = s => new[] { DarkModeTile() } });
+            l.Add(new CcTile { Id = "mute", Name = "Mute", Build = s => new[] { MuteTile() } });
+            l.Add(new CcTile { Id = "lock", Name = "Lock Screen", Build = s => new[] { PanelRow.Tile("Lock Screen", "", "lock", false, false, () => { try { Process.Start("rundll32.exe", "user32.dll,LockWorkStation"); } catch { } }) } });
+            return l;
+        }
+
+        static List<string> CcLoad()
+        {
+            string v = SetCfg.Get("cctiles");
+            if (v == null) return new List<string>(CcDefault);
+            var ids = new List<string>();
+            foreach (string p in v.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+                if (CcCatalog.Any(c => c.Id == p) && !ids.Contains(p)) ids.Add(p);
+            return ids;
+        }
+
+        static void CcSave(List<string> ids)
+        {
+            SetCfg.Set("cctiles", string.Join(",", ids.ToArray()), true);
+        }
+
+        // Adds/removes a tile and keeps the Screenshot / Screen Record Settings toggles in step with it.
+        public static void CcSetMember(string id, bool member)
+        {
+            var cur = CcLoad();
+            if (member) { if (!cur.Contains(id)) cur.Add(id); } else cur.Remove(id);
+            CcSave(cur);
+            if (id == "shot") ScreenCapture.TileShot = member;
+            else if (id == "rec") ScreenCapture.TileRec = member;
+        }
+
+        // Per-tile size flags: bit0 = wide, bit1 = tall. Persisted as "id:n,id:n" in the "ccsizes" setting.
+        static Dictionary<string, int> ccSize = CcLoadSizes();
+
+        static Dictionary<string, int> CcLoadSizes()
+        {
+            var d = new Dictionary<string, int>();
+            string v = SetCfg.Get("ccsizes");
+            if (v == null) return d;
+            foreach (string p in v.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string[] kv = p.Split(':');
+                int n;
+                if (kv.Length == 2 && int.TryParse(kv[1], out n) && n > 0 && n < 4) d[kv[0]] = n;
+            }
+            return d;
+        }
+
+        static void CcCycleSize(string id)
+        {
+            CcTile t = CcCatalog.First(c => c.Id == id);
+            int cur = ccSize.ContainsKey(id) ? ccSize[id] : 0;
+            int next = t.Tall ? (cur & 1) ^ 1 : (cur + 1) & 3;
+            if (next == 0) ccSize.Remove(id); else ccSize[id] = next;
+            SetCfg.Set("ccsizes", string.Join(",", ccSize.Select(k => k.Key + ":" + k.Value).ToArray()), true);
+        }
+
+        static int ccResizeBase;
+        // Drag-resize: past ~40px right/down the tile grows, past ~40px left/up it shrinks. Returns true when the size changed.
+        static bool CcDragSize(string id, int dx, int dy, bool fin)
+        {
+            int cur = ccSize.ContainsKey(id) ? ccSize[id] : 0;
+            if (dx == 0 && dy == 0 && !fin) { ccResizeBase = cur; return false; }
+            CcTile t = CcCatalog.First(c => c.Id == id);
+            int b = ccResizeBase, n = b;
+            if (dx > 40) n |= 1; else if (dx < -40) n &= ~1;
+            if (!t.Tall) { if (dy > 40) n |= 2; else if (dy < -40) n &= ~2; }
+            else n &= 1;
+            if (n == cur) return false;
+            if (n == 0) ccSize.Remove(id); else ccSize[id] = n;
+            SetCfg.Set("ccsizes", string.Join(",", ccSize.Select(k => k.Key + ":" + k.Value).ToArray()), true);
+            return true;
+        }
+
+        // Moves the dragged tile into the slot of the tile it was dropped on.
+        static void CcReorder(string id, string target)
+        {
+            var cur = CcLoad();
+            int i = cur.IndexOf(id), j = cur.IndexOf(target);
+            if (i < 0 || j < 0 || i == j) return;
+            cur.RemoveAt(i);
+            cur.Insert(j, id);
+            CcSave(cur);
+        }
+
+        static bool ccEdit;
+
+        static List<PanelRow> ControlRows(GlassPanel panel)
+        {
+            bool edit = ccEdit;
+            List<string> ids = CcLoad();
+            var st = new CcState { Edit = edit };
+            if (ids.Contains("wifi") || ids.Contains("airplane")) st.Wifi = DeviceFeed.RadioOn("WiFi");
+            if (ids.Contains("bluetooth") || ids.Contains("airplane")) st.Bluetooth = DeviceFeed.RadioOn("Bluetooth");
+            if (!edit && st.Wifi == true && ids.Contains("wifi"))
+                try { WifiNetwork cur = Wifi.Scan().FirstOrDefault(n => n.Connected); if (cur != null) st.Ssid = cur.Name; } catch { }
             int brightness = Brightness.Get();
             float volume = Audio.Volume;
-            string ssid = null;
-            try { WifiNetwork cur = wifi == true ? Wifi.Scan().FirstOrDefault(n => n.Connected) : null; if (cur != null) ssid = cur.Name; } catch { }
 
             const int W = 330, Col = 160, Gap = 10, Row = 64;
             int xr = W - Col;
             var rows = new List<PanelRow>();
-            Func<string, string, Action, PanelRow> round = (glyph, name, click) =>
-            { PanelRow r = new PanelRow { Kind = RowKind.Round, Glyph = glyph, Text = name, Click = click }; return r; };
+            Action refresh = () => Background(panel, () => ControlRows(panel));
 
-
-
-            PanelRow w = RadioTile("Wi-Fi", "WiFi", wifi, "wifi", "ms-settings:network-wifi");
-            if (wifi == true && !string.IsNullOrWhiteSpace(ssid)) w.Sub = ssid.Trim();
-            rows.Add(PanelRow.At(w, 0, 0, Col, Row));
-            rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Media, Text = "Now Playing" }, xr, 0, Col, Row * 2 + Gap));
-            rows.Add(PanelRow.At(RadioTile("Bluetooth", "Bluetooth", bluetooth, "bluetooth", "ms-settings:bluetooth"), 0, Row + Gap, Col, Row));
-
-            int y3 = (Row + Gap) * 2;
-            rows.Add(PanelRow.At(PanelRow.Tile("LocalSend", "", "localsend", false, false, Go("localsend")), 0, y3, Col, Row));
-            rows.Add(PanelRow.At(round("stage", "Stage", () => WinUtil.Combo(WinUtil.VK_LWIN, 0x09)), xr, y3, Row, Row));
-            rows.Add(PanelRow.At(round("mirror", "Mirroring", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'K')), W - Row, y3, Row, Row));
-
-            int y4 = y3 + Row + Gap;
-            rows.Add(PanelRow.At(PanelRow.Tile("Focus", "", "moon", true, false, Open("ms-settings:quiethours")), 0, y4, Col, Row));
-            rows.Add(PanelRow.At(round("grid", "Widgets", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'A')), xr, y4, Row, Row));
-            rows.Add(PanelRow.At(round("sidebar", "Sidebar", () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'W')), W - Row, y4, Row, Row));
-
-            int y5 = y4 + Row + Gap;
-            rows.Add(PanelRow.At(NightLightTile(), 0, y5, Col, Row));
-            rows.Add(PanelRow.At(PanelRow.Tile("Project", "", "project", false, false, () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'P')), xr, y5, Col, Row));
-            y5 += Row + Gap;
-            rows.Add(PanelRow.At(BatterySaverTile(), 0, y5, Col, Row));
-            rows.Add(PanelRow.At(AirplaneTile(wifi, bluetooth), xr, y5, Col, Row));
-            y5 += Row + Gap;
+            int yl = 0, yr = 0;
+            foreach (string id in ids)
+            {
+                CcTile t = CcCatalog.First(c => c.Id == id);
+                if (id == "shot" && !ScreenCapture.TileShot && !edit) continue;
+                if (id == "rec" && !ScreenCapture.TileRec && !edit) continue;
+                int size = ccSize.ContainsKey(id) ? ccSize[id] : 0;
+                bool wide = (size & 1) != 0, tall = t.Tall || (size & 2) != 0;
+                bool left = yl <= yr;
+                int x0 = wide ? 0 : (left ? 0 : xr), y0 = wide ? Math.Max(yl, yr) : (left ? yl : yr);
+                int h = tall ? Row * 2 + Gap : Row;
+                int cellW = wide ? W : Col;
+                PanelRow[] cells = t.Build(st);
+                string removeId = id;
+                for (int i = 0; i < cells.Length; i++)
+                {
+                    PanelRow c = cells[i];
+                    int cx = x0, cw = cellW;
+                    if (cells.Length == 2) { cw = Row; cx = x0 + (i == 0 ? 0 : cellW - Row); }
+                    c.Key = id + "#" + i;
+                    if (edit)
+                    {
+                        if (c.Kind == RowKind.Tile) { c.Sub = ""; c.Active = false; c.Anim = 0; }
+                        c.Click = null; c.Extra = null; c.Toggle = null;
+                        c.DragId = id;
+                        c.Drop = to => { CcReorder(removeId, to); refresh(); };
+                    }
+                    rows.Add(PanelRow.At(c, cx, y0, cw, h));
+                }
+                if (edit)
+                {
+                    string sizeLabel = t.Tall ? ((size & 1) != 0 ? "W" : "T") : new[] { "S", "W", "T", "L" }[size & 3];
+                    rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Key = id + "!x", Text = "×", KeepOpen = true,
+                        Click = () => { CcSetMember(removeId, false); refresh(); } }, x0 + 6, y0 + 6, 26, 22));
+                    rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Key = id + "!s", Text = sizeLabel, KeepOpen = true,
+                        Click = () => { CcCycleSize(removeId); refresh(); } }, x0 + cellW - 32, y0 + 6, 26, 22));
+                    // Grip in the bottom-right corner: drag right/left for wide/narrow, down/up for tall/short.
+                    rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Key = id + "!g", Text = "◢", KeepOpen = true,
+                        Resize = (dx, dy, fin) => { if (CcDragSize(removeId, dx, dy, fin)) refresh(); } }, x0 + cellW - 30, y0 + h - 28, 24, 22));
+                }
+                if (wide) { yl = yr = y0 + h + Gap; }
+                else if (left) yl += h + Gap; else yr += h + Gap;
+            }
+            int y5 = Math.Max(yl, yr);
             if (brightness >= 0)
             {
                 PanelRow sun = PanelRow.Slider(brightness / 100.0, v => Brightness.SetLatest((int)Math.Round(v * 100)));
@@ -1406,8 +1700,46 @@ namespace MacDock
                 rows.Add(PanelRow.At(sound, 0, y5, W, Row));
                 y5 += Row + Gap;
             }
-            rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Text = "Edit Controls", Click = () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'A') }, 103, y5, 124, 30));
+            if (edit)
+            {
+                var hidden = CcCatalog.Where(c => !ids.Contains(c.Id)).ToList();
+                for (int i = 0; i < hidden.Count; i++)
+                {
+                    string addId = hidden[i].Id;
+                    rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Text = "+ " + hidden[i].Name, KeepOpen = true,
+                        Click = () => { CcSetMember(addId, true); refresh(); } },
+                        (i % 2) * xr, y5 + (i / 2) * 38, Col, 30));
+                }
+                y5 += ((hidden.Count + 1) / 2) * 38;
+            }
+            rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Text = edit ? "Done" : "Edit Controls", KeepOpen = true,
+                Click = () => { ccEdit = !ccEdit; refresh(); } }, 103, y5, 124, 30));
             return rows;
+        }
+
+        static PanelRow MuteTile()
+        {
+            bool on = Audio.Volume >= 0 && Audio.Muted;
+            PanelRow tile = PanelRow.Tile("Mute", on ? "Muted" : "Off", "mute", on, true, null);
+            tile.KeepOpen = true;
+            tile.Click = () => { Audio.Muted = !Audio.Muted; tile.Active = Audio.Muted; tile.Sub = tile.Active ? "Muted" : "Off"; };
+            return tile;
+        }
+
+        // Do Not Disturb: Windows 11 keeps it in NOC_GLOBAL_SETTING_TOASTS_ENABLED (0 = banners off).
+        static PanelRow DndTile()
+        {
+            bool on = DoNotDisturb.IsOn();
+            PanelRow tile = PanelRow.Tile("Focus", on ? "On" : "Off", "moon", on, true, null);
+            tile.KeepOpen = true;
+            tile.Click = () =>
+            {
+                tile.Active = !tile.Active;
+                tile.Sub = tile.Active ? "On" : "Off";
+                bool want = tile.Active;
+                Task.Run(() => DoNotDisturb.Set(want));
+            };
+            return tile;
         }
 
 
@@ -1490,6 +1822,21 @@ namespace MacDock
                     if (wifi.HasValue) DeviceFeed.SetRadio("WiFi", !air);
                     if (bt.HasValue) DeviceFeed.SetRadio("Bluetooth", !air);
                 });
+            };
+            return tile;
+        }
+
+        static PanelRow CaptureTile(bool record)
+        {
+            if (!record) return PanelRow.Tile("Screenshot", "Capture screen", "shot", false, false, () => ScreenCapture.Screenshot());
+            bool on = ScreenCapture.Recording;
+            PanelRow tile = PanelRow.Tile("Record", on ? "Recording" : "Start", "rec", on, true, null);
+            tile.KeepOpen = true;
+            tile.Click = () =>
+            {
+                tile.Active = !tile.Active;
+                tile.Sub = tile.Active ? "Recording" : "Start";
+                ScreenCapture.ToggleRecord();
             };
             return tile;
         }

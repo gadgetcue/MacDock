@@ -469,6 +469,7 @@ namespace MacDock
                 sorted = allTiles.OrderBy(t => { int i; return t.Target != null && index.TryGetValue(t.Target, out i) ? i : int.MaxValue; })
                     .ThenBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
             }
+            else if (LaunchpadOrder.Mode == "date-new" || LaunchpadOrder.Mode == "date-old") sorted = SortTiles(allTiles.ToList());
             else sorted = allTiles.OrderBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
             allTiles.Clear();
             allTiles.AddRange(sorted);
@@ -480,7 +481,16 @@ namespace MacDock
             string mode = LaunchpadOrder.Mode;
             if (mode == "name-asc") return list.OrderBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
             if (mode == "name-desc") return list.OrderByDescending(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
+            if (mode == "date-new") return list.OrderByDescending(t => TileDate(t)).ThenBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
+            if (mode == "date-old") return list.OrderBy(t => TileDate(t) == DateTime.MinValue ? DateTime.MaxValue : TileDate(t)).ThenBy(t => t.Shown, StringComparer.CurrentCultureIgnoreCase).ToList();
             return list;
+        }
+
+        // Install date of an app tile; a folder tile takes its newest member. Unknown dates are MinValue (last in both date sorts).
+        static DateTime TileDate(Tile t)
+        {
+            if (t.Members != null) return t.Members.Count == 0 ? DateTime.MinValue : t.Members.Max(m => TileDate(m));
+            return InstallDates.For(t.Name, t.Target);
         }
 
         static bool InFolder(Tile t, string folder)
@@ -816,7 +826,7 @@ namespace MacDock
                 for (int i = 0; i < n; i++) { double v = animDt[i] * 1000; if (v < min) min = v; if (v > max) max = v; sum += v; }
                 Array.Sort(animDt, 0, n);
                 double p99 = animDt[Math.Min(n - 1, (int)Math.Ceiling(n * 0.99) - 1)] * 1000;
-                System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\MacDock\mac-dock\launchpad_anim.txt",
+                System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\launchpad_anim.txt",
                     string.Format("{0:s} {1} frames {2} dt ms min {3:0.0} avg {4:0.0} p99 {5:0.0} max {6:0.0}\r\n", DateTime.Now, closing ? "close" : "open", n, min, sum / n, p99, max));
             }
             catch { }
@@ -985,7 +995,7 @@ namespace MacDock
             if (!firstLogged && tTrig != 0 && !closing && prog > 0)
             {
                 firstLogged = true; double F = System.Diagnostics.Stopwatch.Frequency / 1000.0; long n = System.Diagnostics.Stopwatch.GetTimestamp();
-                try { System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\MacDock\mac-dock\launchpad_anim.txt", string.Format("{0:s} trigger->first frame {1:0.0} ms (ctor shot+blur {2:0.0}, tiles+layout {3:0.0}, rest {4:0.0}) [tiles {5:0.0}, layout {6:0.0}, blurwait {7:0.0}, show->render {8:0.0}, render {9:0.0}{10} renders {11} firstPres->now {12:0.0} prog {13:0.00}{14}]\r\n", DateTime.Now, (n - tTrig) / F, (tShot - tTrig) / F, (tBuilt - tShot) / F, (n - tBuilt) / F, (tTiles - tShot) / F, (tLay - tTiles) / F, (tBuilt - tLay) / F, (tRend - tBuilt) / F, (n - tRend) / F, rdbg, nRender, (n - tFirstPres) / F, prog, stepLog)); } catch { }
+                try { System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\launchpad_anim.txt", string.Format("{0:s} trigger->first frame {1:0.0} ms (ctor shot+blur {2:0.0}, tiles+layout {3:0.0}, rest {4:0.0}) [tiles {5:0.0}, layout {6:0.0}, blurwait {7:0.0}, show->render {8:0.0}, render {9:0.0}{10} renders {11} firstPres->now {12:0.0} prog {13:0.00}{14}]\r\n", DateTime.Now, (n - tTrig) / F, (tShot - tTrig) / F, (tBuilt - tShot) / F, (n - tBuilt) / F, (tTiles - tShot) / F, (tLay - tTiles) / F, (tBuilt - tLay) / F, (tRend - tBuilt) / F, (n - tRend) / F, rdbg, nRender, (n - tFirstPres) / F, prog, stepLog)); } catch { }
             }
             double e = Eased;
             byte a = (byte)Math.Max(0, Math.Min(255, (int)Math.Round(FadeEased * 255)));
@@ -2212,6 +2222,8 @@ namespace MacDock
 
             // The same frosted popup as the dock's menu; it closes on Esc or a click outside it.
             MenuPopup menu = null;
+            int dockTop = int.MaxValue;
+            try { var df = DockForm.Instance; if (df != null && df.Visible && df.Bounds.Top > Screen.FromPoint(PointToScreen(at)).Bounds.Top) dockTop = df.Bounds.Top - 6; } catch { }
             menu = new MenuPopup(list, PointToScreen(at), 0, () =>
             {
                 if (tileMenu == menu) tileMenu = null;
@@ -2225,7 +2237,7 @@ namespace MacDock
                     }));
                 }
                 catch { }
-            });
+            }, 20, dockTop);
             tileMenu = menu;
             menu.Show();
         }
@@ -2241,6 +2253,8 @@ namespace MacDock
             {
                 new MenuEntry { Text = "Name Aâ€“Z", Action = () => SetSort("name-asc"), Checked = mode == "name-asc" },
                 new MenuEntry { Text = "Name Zâ€“A", Action = () => SetSort("name-desc"), Checked = mode == "name-desc" },
+                new MenuEntry { Text = "Newest installed first", Action = () => SetSort("date-new"), Checked = mode == "date-new" },
+                new MenuEntry { Text = "Oldest installed first", Action = () => SetSort("date-old"), Checked = mode == "date-old" },
                 new MenuEntry { Text = "Custom order", Action = () => SetSort("custom"), Checked = mode == "custom" }
             };
             Rectangle r = SortRect;
@@ -2607,6 +2621,81 @@ namespace MacDock
             Save();
         }
     }
+    // When each app was installed: creation time of its Start Menu shortcut (earliest if several), else of its Store package
+    // folder or program file. Cached for 60 s. Unknown = DateTime.MinValue.
+    static class InstallDates
+    {
+        static Dictionary<string, DateTime> byName = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        static DateTime built = DateTime.MinValue;
+        static readonly Dictionary<string, DateTime> byTarget = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        static void Build()
+        {
+            if ((DateTime.Now - built).TotalSeconds < 60 && byName.Count > 0) return;
+            built = DateTime.Now;
+            var map = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+            string[] dirs = {
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs"),
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"Microsoft\Windows\Start Menu\Programs") };
+            foreach (string d in dirs)
+            {
+                try
+                {
+                    if (!System.IO.Directory.Exists(d)) continue;
+                    foreach (string lnk in System.IO.Directory.GetFiles(d, "*.lnk", System.IO.SearchOption.AllDirectories))
+                    {
+                        try
+                        {
+                            DateTime t = System.IO.File.GetCreationTime(lnk);
+                            string n = System.IO.Path.GetFileNameWithoutExtension(lnk);
+                            DateTime old;
+                            if (!map.TryGetValue(n, out old) || t < old) map[n] = t;
+                        }
+                        catch { }
+                    }
+                }
+                catch (Exception ex) { Program.Log(ex); }
+            }
+            byName = map;
+        }
+
+        public static DateTime For(string name, string target)
+        {
+            lock (byTarget)
+            {
+                Build();
+                DateTime d;
+                if (name != null && byName.TryGetValue(name, out d)) return d;
+                if (target != null && byTarget.TryGetValue(target, out d)) return d;
+                d = Fallback(target);
+                if (target != null) byTarget[target] = d;
+                return d;
+            }
+        }
+
+        // Store app: the AppsFolder id is Family!App, and its package folder under WindowsApps starts with the family's name part.
+        static DateTime Fallback(string target)
+        {
+            try
+            {
+                if (target == null) return DateTime.MinValue;
+                string id = target.Substring(target.IndexOf((char)92) + 1);
+                int bang = id.IndexOf('!');
+                if (bang > 0)
+                {
+                    string fam = id.Substring(0, bang);
+                    string pre = fam.Contains("_") ? fam.Substring(0, fam.LastIndexOf('_')) : fam;
+                    string root = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps");
+                    foreach (string dir in System.IO.Directory.GetDirectories(root, pre + "_*"))
+                        return System.IO.Directory.GetCreationTime(dir);
+                }
+                else if (id.Length > 3 && id[1] == ':' && System.IO.File.Exists(id)) return System.IO.File.GetCreationTime(id);
+            }
+            catch { }
+            return DateTime.MinValue;
+        }
+    }
+
     // How Launchpad orders its apps and folders: the sort mode ("name-asc", "name-desc" or "custom") and, for Custom, the
     // dragged order of every app. Kept next to the exe in launchpad-sort.txt and launchpad-order.txt.
     static class LaunchpadOrder
@@ -2627,7 +2716,7 @@ namespace MacDock
                 if (System.IO.File.Exists(SortPath))
                 {
                     string m = System.IO.File.ReadAllText(SortPath).Trim();
-                    if (m == "name-asc" || m == "name-desc" || m == "custom") mode = m;
+                    if (m == "name-asc" || m == "name-desc" || m == "date-new" || m == "date-old" || m == "custom") mode = m;
                 }
                 if (System.IO.File.Exists(OrderPath)) order = System.IO.File.ReadAllLines(OrderPath).Where(l => l.Length > 0).ToList();
             }

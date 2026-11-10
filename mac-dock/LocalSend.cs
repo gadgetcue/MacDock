@@ -45,6 +45,7 @@ namespace MacDock
         readonly object gate = new object();
         readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         X509Certificate2 cert;
+        static X509Certificate2 ClientCert;
         TcpListener listener;
         UdpClient udp;
         volatile bool stopped;
@@ -56,7 +57,7 @@ namespace MacDock
         public LocalSendNode(int port, string alias, string saveDir, string certPath)
         {
             Port = port; Alias = alias; SaveDir = saveDir;
-            cert = LoadCert(certPath);
+            cert = LoadCert(certPath); ClientCert = cert;
             Fingerprint = Hex(SHA256.Create().ComputeHash(cert.RawData));
         }
 
@@ -221,28 +222,77 @@ namespace MacDock
         }
 
         // ---------- HTTP client ----------
-        static HttpWebRequest NewRequest(string url, string method, int timeoutMs)
+        sealed class LsHttpException : Exception
         {
-            // TLS 1.2 + 1.3 (12288 = Tls13 on .NET 4.8; newer LocalSend builds can be 1.3-only). Expect: 100-continue off: some peers stall or reject it.
-            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)12288; }
-            catch { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
-            ServicePointManager.Expect100Continue = false;
-            ServicePointManager.DefaultConnectionLimit = 64;
-            ServicePointManager.ServerCertificateValidationCallback = (s, c, ch, e) => true; // peers use self-signed certs
-            var req = (HttpWebRequest)WebRequest.Create(url);
-            req.Method = method; req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.KeepAlive = false; req.Proxy = null;
-            return req;
+            public int Status;
+            public LsHttpException(int status, string body) : base("HTTP " + status + (string.IsNullOrEmpty(body) ? "" : " " + body)) { Status = status; }
+        }
+
+        // Minimal HTTP/1.1 client over SslStream. Newer LocalSend peers are TLS 1.3-only and require a client certificate (mutual TLS);
+        // HttpWebRequest never presents it, so we hand SslStream our cert through a LocalCertificateSelectionCallback.
+        // Returns the response body; throws LsHttpException on a non-2xx status.
+        static string HttpCall(string url, string method, string contentType, Stream body, long len, int timeoutMs)
+        {
+            var u = new Uri(url);
+            using (var tc = new TcpClient())
+            {
+                var ar = tc.BeginConnect(u.Host, u.Port, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(Math.Min(timeoutMs, 10000))) throw new TimeoutException("connect timed out");
+                tc.EndConnect(ar);
+                tc.ReceiveTimeout = tc.SendTimeout = timeoutMs;
+                Stream st = tc.GetStream();
+                if (u.Scheme == "https")
+                {
+                    var ssl = new SslStream(st, false, (s, c, ch, e) => true, // peers use self-signed certs
+                        (s, host, local, remote, issuers) => ClientCert);
+                    var certs = ClientCert != null ? new X509CertificateCollection(new X509Certificate[] { ClientCert }) : null;
+                    try { ssl.AuthenticateAsClient(u.Host, certs, (SslProtocols)(3072 | 12288), false); }
+                    catch (ArgumentException) { ssl.AuthenticateAsClient(u.Host, certs, SslProtocols.Tls12, false); }
+                    st = ssl;
+                }
+                string head = method + " " + u.PathAndQuery + " HTTP/1.1\r\nHost: " + u.Host + ":" + u.Port + "\r\nConnection: close\r\n"
+                    + (contentType != null ? "Content-Type: " + contentType + "\r\n" : "") + "Content-Length: " + len + "\r\n\r\n";
+                byte[] hb = Encoding.ASCII.GetBytes(head);
+                st.Write(hb, 0, hb.Length);
+                if (body != null) body.CopyTo(st, 81920);
+                st.Flush();
+                var ms = new MemoryStream();
+                var buf = new byte[16384];
+                try { int n; while ((n = st.Read(buf, 0, buf.Length)) > 0) ms.Write(buf, 0, n); }
+                catch (IOException) { if (ms.Length == 0) throw; } // peer closed without close_notify after replying
+                byte[] all = ms.ToArray();
+                int he = -1;
+                for (int i = 0; i + 3 < all.Length; i++) if (all[i] == 13 && all[i + 1] == 10 && all[i + 2] == 13 && all[i + 3] == 10) { he = i; break; }
+                if (he < 0) throw new IOException("malformed HTTP response");
+                string[] lines = Encoding.ASCII.GetString(all, 0, he).Split(new[] { "\r\n" }, StringSplitOptions.None);
+                string[] sl = lines[0].Split(' ');
+                int status = sl.Length > 1 ? int.Parse(sl[1]) : 0;
+                bool chunked = lines.Any(l => l.StartsWith("Transfer-Encoding:", StringComparison.OrdinalIgnoreCase) && l.IndexOf("chunked", StringComparison.OrdinalIgnoreCase) >= 0);
+                byte[] payload;
+                if (!chunked) { payload = new byte[all.Length - he - 4]; Array.Copy(all, he + 4, payload, 0, payload.Length); }
+                else
+                {
+                    var o = new MemoryStream(); int p = he + 4;
+                    while (p < all.Length)
+                    {
+                        int e = p; while (e + 1 < all.Length && !(all[e] == 13 && all[e + 1] == 10)) e++;
+                        string hex = Encoding.ASCII.GetString(all, p, e - p); int sc = hex.IndexOf(';'); if (sc >= 0) hex = hex.Substring(0, sc);
+                        int size = Convert.ToInt32(hex.Trim(), 16);
+                        if (size == 0) break;
+                        o.Write(all, e + 2, Math.Min(size, all.Length - e - 2)); p = e + 2 + size + 2;
+                    }
+                    payload = o.ToArray();
+                }
+                string text = Encoding.UTF8.GetString(payload);
+                if (status < 200 || status > 299) throw new LsHttpException(status, text);
+                return text;
+            }
         }
 
         static string Post(string url, string body, int timeoutMs)
         {
-            HttpWebRequest req = NewRequest(url, "POST", timeoutMs);
-            req.ContentType = "application/json";
             byte[] b = Encoding.UTF8.GetBytes(body);
-            req.ContentLength = b.Length;
-            using (Stream s = req.GetRequestStream()) s.Write(b, 0, b.Length);
-            using (var resp = (HttpWebResponse)req.GetResponse())
-            using (var r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) return r.ReadToEnd();
+            return HttpCall(url, "POST", "application/json", new MemoryStream(b), b.Length, timeoutMs);
         }
 
         // ---------- sending ----------
@@ -269,12 +319,12 @@ namespace MacDock
                 string reply;
                 Log("send: prepare-upload -> " + baseUrl + " files=" + byId.Count);
                 try { reply = Post(baseUrl + "prepare-upload", json.Serialize(body), 120000); }
-                catch (WebException ex)
+                catch (Exception ex)
                 {
-                    Log("send: prepare-upload failed: " + ex.Status + " " + ex.Message + (ex.InnerException != null ? " / " + ex.InnerException.Message : ""));
-                    var r = ex.Response as HttpWebResponse;
-                    if (r != null && r.StatusCode == HttpStatusCode.Forbidden) return peer.Alias + " declined the transfer.";
-                    if (r != null && r.StatusCode == (HttpStatusCode)409) return peer.Alias + " is busy with another transfer.";
+                    Log("send: prepare-upload failed: " + ex.GetType().Name + " " + ex.Message + (ex.InnerException != null ? " / " + ex.InnerException.Message : ""));
+                    var he = ex as LsHttpException;
+                    if (he != null && he.Status == 403) return peer.Alias + " declined the transfer.";
+                    if (he != null && he.Status == 409) return peer.Alias + " is busy with another transfer.";
                     throw;
                 }
                 if (string.IsNullOrWhiteSpace(reply)) return "Nothing to send (" + peer.Alias + " has no use for these files).";
@@ -288,13 +338,8 @@ namespace MacDock
                     var fi = new FileInfo(kv.Value);
                     if (progress != null) progress("Sending " + fi.Name + " (" + (sent + 1) + "/" + tokens.Count + ")");
                     string url = baseUrl + "upload?sessionId=" + Uri.EscapeDataString(session) + "&fileId=" + Uri.EscapeDataString(kv.Key) + "&token=" + Uri.EscapeDataString(tok.ToString());
-                    HttpWebRequest req = NewRequest(url, "POST", 600000);
-                    req.ContentType = Mime(fi.Extension);
-                    req.ContentLength = fi.Length;
-                    req.AllowWriteStreamBuffering = false;
-                    using (Stream s = req.GetRequestStream())
-                    using (FileStream f = new FileStream(kv.Value, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) f.CopyTo(s, 81920);
-                    using (req.GetResponse()) { }
+                    using (FileStream f = new FileStream(kv.Value, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                        HttpCall(url, "POST", Mime(fi.Extension), f, fi.Length, 600000);
                     Log("send: uploaded " + fi.Name);
                     sent++;
                 }
@@ -305,9 +350,6 @@ namespace MacDock
                 string detail = ex.Message;
                 if (ex.InnerException != null) detail += " (" + ex.InnerException.Message + ")";
                 Log("send: FAILED " + ex);
-                var we = ex as WebException;
-                if (we != null && we.Response != null)
-                    try { using (var r = new StreamReader(we.Response.GetResponseStream())) detail += " " + r.ReadToEnd(); } catch { }
                 return "Could not send to " + peer.Alias + ": " + detail;
             }
         }

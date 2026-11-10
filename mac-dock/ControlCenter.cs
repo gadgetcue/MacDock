@@ -244,6 +244,36 @@ namespace MacDock
         }
     }
 
+    // Do Not Disturb: Windows 11 stores it as NOC_GLOBAL_SETTING_TOASTS_ENABLED (0 = notification banners off).
+    static class DoNotDisturb
+    {
+        const string KeyPath = @"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings";
+        const string Name = "NOC_GLOBAL_SETTING_TOASTS_ENABLED";
+
+        public static bool IsOn()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(KeyPath))
+                {
+                    object v = k == null ? null : k.GetValue(Name);
+                    return v is int && (int)v == 0;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static void Set(bool on)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(KeyPath))
+                    k.SetValue(Name, on ? 0 : 1, RegistryValueKind.DWord);
+            }
+            catch { }
+        }
+    }
+
     static class DarkMode
     {
         const string KeyPath = @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
