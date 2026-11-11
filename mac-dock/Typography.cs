@@ -27,6 +27,9 @@ namespace MacDock
         static extern int AddFontResourceEx(string file, uint flags, IntPtr reserved);
         const uint FR_PRIVATE = 0x10;
 
+        static readonly List<PrivateFontCollection> privateList = new List<PrivateFontCollection>();
+        static readonly Dictionary<string, FontFamily> privateMap = new Dictionary<string, FontFamily>(StringComparer.OrdinalIgnoreCase);
+        static bool privateFonts { get { return privateList.Count > 0; } } // kept alive: fonts made from these families skip the slow system-wide font lookup
         static readonly HashSet<string> bundled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Makes the .ttf files in <exe folder>\fonts available to this process only (GDI and GDI+).
@@ -36,25 +39,23 @@ namespace MacDock
             {
                 string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts");
                 if (!Directory.Exists(dir)) return;
-                using (var pfc = new PrivateFontCollection())
-                    foreach (string file in Directory.GetFiles(dir, "*.ttf"))
-                    {
-                        if (AddFontResourceEx(file, FR_PRIVATE, IntPtr.Zero) == 0) continue;
-                        pfc.AddFontFile(file);
-                    }
-                // Static Inter files register as "Inter", "Inter Medium", "Inter SemiBold"...
-                string[] names = Directory.GetFiles(dir, "*.ttf");
-                foreach (string file in names)
-                    using (var one = new PrivateFontCollection())
-                    {
-                        one.AddFontFile(file);
-                        foreach (var f in one.Families) bundled.Add(f.Name);
-                    }
+                // One collection per file: GDI+ merges several static files of one family wrongly (Regular drew as the Bold face).
+                foreach (string file in Directory.GetFiles(dir, "*.ttf"))
+                {
+                    if (AddFontResourceEx(file, FR_PRIVATE, IntPtr.Zero) == 0) continue;
+                    var pc = new PrivateFontCollection();
+                    pc.AddFontFile(file);
+                    privateList.Add(pc);
+                    FontFamily ff = pc.Families[0];
+                    string st = Path.GetFileNameWithoutExtension(file).EndsWith("Bold", StringComparison.OrdinalIgnoreCase) && string.Equals(ff.Name, "Inter", StringComparison.OrdinalIgnoreCase) ? "Bold" : "Regular";
+                    privateMap[ff.Name + "|" + st] = ff;
+                    bundled.Add(ff.Name);
+                }
             }
             catch { }
         }
 
-        static HashSet<string> installed;
+        static readonly Dictionary<string, bool> probe = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         static string family, displayFamily;
         static readonly Dictionary<string, Font> cache = new Dictionary<string, Font>();
 
@@ -79,14 +80,31 @@ namespace MacDock
             displayFamily = string.IsNullOrEmpty(wanted) ? Pick(null, PreferredDisplay) : family;
         }
 
+        static readonly Dictionary<string, bool> sysProbe = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        static bool SystemHas(string name)
+        {
+            lock (sysProbe)
+            {
+                bool ok;
+                if (sysProbe.TryGetValue(name, out ok)) return ok;
+                try { using (new FontFamily(name)) ok = true; } catch { ok = false; }
+                sysProbe[name] = ok;
+                return ok;
+            }
+        }
+
         static bool Has(string name)
         {
-            if (installed == null)
+            if (bundled.Contains(name)) return true; // Inter ships with the dock: skip enumerating every installed font
+            // Ask GDI+ for the family by name (cheap, cached) instead of enumerating every installed font, which took seconds on a busy machine.
+            lock (probe)
             {
-                using (var fonts = new InstalledFontCollection())
-                    installed = new HashSet<string>(fonts.Families.Select(f => f.Name), StringComparer.OrdinalIgnoreCase);
+                bool ok;
+                if (probe.TryGetValue(name, out ok)) return ok;
+                try { using (new FontFamily(name)) ok = true; } catch { ok = false; }
+                probe[name] = ok;
+                return ok;
             }
-            return bundled.Contains(name) || installed.Contains(name);
         }
 
         static string Pick(string wanted, string[] fallbacks)
@@ -98,6 +116,15 @@ namespace MacDock
 
         // Fonts for small UI text (menus, labels, status items).
         public static Font Text(float points, Weight weight = Weight.Regular) { return Get(family, points, weight); }
+
+        // ----- type scale: one set of named roles (Inter) so hierarchy is the same in every window -----
+        public static Font Title() { return Text(15f, Weight.Semibold); }      // page / window titles
+        public static Font Heading() { return Text(10f, Weight.Semibold); }    // group headings, list titles
+        public static Font Menu() { return Text(11f); }                        // menu and sidebar items
+        public static Font Body() { return Text(10.5f); }                      // rows and labels
+        public static Font Secondary() { return Text(10f); }                   // values, shortcuts, subtitles
+        public static Font Caption() { return Text(9f); }                      // footnotes, small labels
+        public static Font Label() { return Text(9f, Weight.Semibold); }       // SECTION LABELS
 
         // Fonts for large text (clock peek, big numbers).
         public static Font Display(float points, Weight weight = Weight.Regular) { return Get(displayFamily, points, weight); }
@@ -121,7 +148,9 @@ namespace MacDock
                     else if (Has(baseFamily + " Medium")) name = baseFamily + " Medium";
                     else style = FontStyle.Bold;
                 }
-                font = new Font(name, points, style, GraphicsUnit.Point);
+                FontFamily priv = null;
+                if (privateFonts && !SystemHas(name)) privateMap.TryGetValue(name + "|" + (style == FontStyle.Bold ? "Bold" : "Regular"), out priv);
+                font = priv != null ? new Font(priv, points, style, GraphicsUnit.Point) : new Font(name, points, style, GraphicsUnit.Point);
                 cache[key] = font;
                 return font;
             }

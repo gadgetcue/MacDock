@@ -67,7 +67,7 @@ namespace MacDock
         VsyncDriver vsync; // motion runs one step per display refresh; the 50 ms timer covers idle
         readonly Backdrop backdrop = new Backdrop(Blur.Tint(0x78, 8, 10, 18)); // desktop blurred behind the overview
         readonly Font titleFont = Typography.Text(10.5f, Weight.Medium);
-        readonly Font smallFont = Typography.Text(9f);
+        readonly Font smallFont = Typography.Caption();
         readonly Font segmentFont = Typography.Text(10.5f, Weight.Semibold);
         readonly Font searchFont = Typography.Text(12f);
         readonly Font pillFont = Typography.Text(26f);

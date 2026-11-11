@@ -188,7 +188,7 @@ namespace MacDock
                     using (var br = new LinearGradientBrush(new RectangleF(m, m, d, d), Color.FromArgb(150, 160, 180), Color.FromArgb(90, 100, 125), 90f))
                         g.FillPath(br, path);
                 }
-                using (var f = new Font("Segoe UI", size * 0.46f, FontStyle.Bold, GraphicsUnit.Pixel))
+                var f = Typography.Text(size * 0.46f * 0.75f, Weight.Semibold);
                 using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     g.DrawString(ini, f, Brushes.White, new RectangleF(0, 0, size, size), sf);
             }

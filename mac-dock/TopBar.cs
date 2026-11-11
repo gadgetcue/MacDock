@@ -323,6 +323,8 @@ namespace MacDock
         {
             public RectangleF Rect;
             public Action Click;
+            public Action RightClick;
+            public Action DoubleClick;
         }
 
         readonly Timer timer = new Timer();
@@ -539,8 +541,8 @@ namespace MacDock
             if (popup != null && hover >= 0 && hover != openMenu) OpenMenu(hover); // slide between menus like macOS
 
             string key = string.Join("|", DateTime.Now.ToString("ddd d MMM h:mm tt"), appName, hoverTitle, openMenu,
-                SystemInfo.Cpu, SystemInfo.Ram, SystemInfo.BatteryPercent, SystemInfo.Charging, SystemInfo.OnAc,
-                SystemInfo.Net, Feed.Unread, volumePercent);
+                SystemInfo.Cpu, SystemInfo.Ram, SetCfg.GetBool("stats-cpu", true), SetCfg.GetBool("stats-ram", true), SystemInfo.BatteryPercent, SystemInfo.Charging, SystemInfo.OnAc,
+                SystemInfo.Net, Feed.Unread, volumePercent, TrayIcons.BarOn ? TrayIcons.Cached.Count : -1, TrayIcons.Arrow, TrayIcons.Collapsible, TrayIcons.Collapsed);
             if (key != lastKey)
             {
                 lastKey = key;
@@ -650,16 +652,34 @@ namespace MacDock
             float clockW = Typography.MeasureTabular(g, clock, regular);
             right -= clockW;
             Typography.DrawTabular(g, clock, regular, white, right, 0, BarHeight - 1);
-            AddHit("clock", right - 6, clockW + 12, () => WinUtil.Combo(WinUtil.VK_LWIN, (byte)'N'));
+            AddHit("clock", right - 6, clockW + 12, () =>
+            {
+                // Windows may already have closed the flyout on mouse-down; don't reopen it in that case.
+                if (clockWasOpen || (DateTime.UtcNow - clockClosedAt).TotalMilliseconds < 400) { clockWasOpen = false; return; }
+                WinUtil.Combo(WinUtil.VK_LWIN, (byte)'N');
+            });
             right -= 12;
 
             // Profile avatar.
             right -= 18;
             var avatar = new RectangleF(right, 6, 18, 18);
-            using (var ab = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
-                g.FillEllipse(ab, avatar);
             var centered = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-            g.DrawString(Environment.UserName.Substring(0, 1).ToUpperInvariant(), small, white, new RectangleF(avatar.X, avatar.Y, avatar.Width, avatar.Height + 1), centered);
+            AccountPic.Start(() => { try { BeginInvoke((MethodInvoker)Redraw); } catch { } });
+            Bitmap pic = AccountPic.Get(Math.Max(18, (int)Math.Round(18 * g.DpiX / 96f)));
+            if (pic != null)
+            {
+                var prevInterp = g.InterpolationMode;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(pic, avatar);
+                g.InterpolationMode = prevInterp;
+            }
+            else
+            {
+                using (var ab = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
+                    g.FillEllipse(ab, avatar);
+                ;
+                g.DrawString(Environment.UserName.Substring(0, 1).ToUpperInvariant(), small, white, new RectangleF(avatar.X, avatar.Y, avatar.Width, avatar.Height + 1), centered);
+            }
             AddHit("profile", right - 5, 28, () => TogglePanel("profile"));
             right -= 12;
 
@@ -743,14 +763,19 @@ namespace MacDock
             AddHit("bluetooth", right - 6, 24, () => TogglePanel("bluetooth"));
             right -= 18;
 
-            string stats = "CPU " + SystemInfo.Cpu + "%   RAM " + SystemInfo.Ram + "%";
-            float statsW = Typography.MeasureTabular(g, stats, small);
-            right -= statsW;
-            Typography.DrawTabular(g, stats, small, dim, right, 0, BarHeight - 1);
-            AddHit("stats", right - 6, statsW + 12, () => Process.Start("taskmgr.exe"));
+            bool showCpu = SetCfg.GetBool("stats-cpu", true), showRam = SetCfg.GetBool("stats-ram", true);
+            if (showCpu || showRam)
+            {
+                string stats = (showCpu ? "CPU " + SystemInfo.Cpu + "%" : "") + (showCpu && showRam ? "   " : "") + (showRam ? "RAM " + SystemInfo.Ram + "%" : "");
+                float statsW = Typography.MeasureTabular(g, stats, small);
+                right -= statsW;
+                Typography.DrawTabular(g, stats, small, dim, right, 0, BarHeight - 1);
+                AddHit("stats", right - 6, statsW + 12, () => Process.Start("taskmgr.exe"));
+            }
             right -= 12;
 
             // Chevron: opens Windows' own tray overflow (the hidden icons), up while it is open.
+            if (TrayIcons.Arrow) {
             right -= 12;
             using (var pen = new Pen(Color.FromArgb(220, 255, 255, 255), 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
             {
@@ -759,179 +784,110 @@ namespace MacDock
             }
             AddHit("tray", right - 6, 24, ToggleTrayOverflow);
             right -= 12;
-
-            // App launchers to the left of the tray chevron: each shows the app's own icon and starts it (or brings it
-            // forward) on click. They launch the apps; they are not mirrors of any tray icon.
-            foreach (BarLauncher l in launchers)
-            {
-                if (l.Vantage)
-                {
-                    right -= 18;
-                    PaintVantage(g, new RectangleF(right, 6, 18, 18));
-                    AddHit(l.Id, right - 5, 28, OpenVantageWidget);
-                    right -= 12;
-                    continue;
-                }
-                EnsureLauncherIcon(l);
-                if (l.Icon == null) continue;
-                right -= 18;
-                g.DrawImage(l.Icon, new RectangleF(right, 6, 18, 18));
-                BarLauncher launch = l;
-                AddHit(l.Id, right - 5, 28, () => LaunchApp(launch));
-                right -= 12;
             }
+
+            // Windows tray icons the user picked (Settings > Menu bar & island). Clicks go to the original icon.
+            if (TrayIcons.BarOn)
+            {
+                var sel = TrayIcons.Selected();
+                var shown = TrayIcons.Cached.Where(t => sel.Contains(t.Key) && t.Icon != null).ToList();
+                bool fold = TrayIcons.Collapsible;
+                float target = fold && TrayIcons.Collapsed ? 0f : 1f;
+                if (!fold) trayAnim = 1f;
+                if (shown.Count > 0)
+                {
+                    if (Math.Abs(trayAnim - target) > 0.001f) StartTrayAnim(target); else trayAnim = target;
+                    if (fold)
+                    {
+                        // Small handle: points left while folded (click to unfold), right while open.
+                        right -= 12;
+                        using (var pen = new Pen(Color.FromArgb(220, 255, 255, 255), 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                        {
+                            // Rotates 180 degrees in step with the slide (points right when open, left when folded).
+                            var gs = g.Save();
+                            g.TranslateTransform(right + 6, 15);
+                            g.RotateTransform(180f * (1f - trayAnim));
+                            g.DrawLines(pen, new[] { new PointF(-3, -5), new PointF(3, 0), new PointF(-3, 5) });
+                            g.Restore(gs);
+                        }
+                        AddHit("trayfold", right - 4, 20, () => { ClosePanel(); TrayIcons.Collapsed = !TrayIcons.Collapsed; StartTrayAnim(TrayIcons.Collapsed ? 0f : 1f); });
+                        right -= 6;
+                    }
+                    float full = shown.Count * 26, w = full * trayAnim;
+                    if (w > 0.5f)
+                    {
+                        var st = g.Save();
+                        g.SetClip(new RectangleF(right - w, 0, w, BarHeight));
+                        float x0 = right;
+                        System.Drawing.Imaging.ImageAttributes fade = null;
+                        if (trayAnim < 0.995f)
+                        {
+                            fade = new System.Drawing.Imaging.ImageAttributes();
+                            fade.SetColorMatrix(new System.Drawing.Imaging.ColorMatrix(new float[][] {
+                                new float[] { 1, 0, 0, 0, 0 }, new float[] { 0, 1, 0, 0, 0 }, new float[] { 0, 0, 1, 0, 0 },
+                                new float[] { 0, 0, 0, Math.Max(0f, Math.Min(1f, trayAnim)), 0 }, new float[] { 0, 0, 0, 0, 1 } }));
+                        }
+                        for (int j = 0; j < shown.Count; j++)
+                        {
+                            TrayItem ti = shown[j];
+                            float ix = x0 - 16 - j * 26 - (full - w);
+                            var pi = g.InterpolationMode; var po = g.PixelOffsetMode;
+                            g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.Half;
+                            if (fade != null) g.DrawImage(ti.Icon, new Rectangle((int)Math.Round(ix), 7, 16, 16), 0, 0, ti.Icon.Width, ti.Icon.Height, GraphicsUnit.Pixel, fade);
+                            else g.DrawImage(ti.Icon, new Rectangle((int)Math.Round(ix), 7, 16, 16), 0, 0, ti.Icon.Width, ti.Icon.Height, GraphicsUnit.Pixel);
+                            g.InterpolationMode = pi; g.PixelOffsetMode = po;
+                            if (trayAnim > 0.99f)
+                                hits.Add(new Hit { Rect = new RectangleF(ix - 4, 0, 24, BarHeight), Click = () => { ClosePanel(); TrayIcons.Click(ti, false); }, RightClick = () => { ClosePanel(); TrayIcons.Click(ti, true); }, DoubleClick = () => { ClosePanel(); TrayIcons.Click(ti, 2); } });
+                        }
+                        if (fade != null) fade.Dispose();
+                        g.Restore(st);
+                        right -= w;
+                    }
+                }            }
+
             white.Dispose();
             dim.Dispose();
         }
 
         bool trayOpen;
+        float trayAnim = 1f;
+        VsyncDriver trayVsync;
+        float trayFrom = 1f, trayGoal = 1f;
+        bool trayRunning;
+        readonly Stopwatch trayWatch = Stopwatch.StartNew();
+        double trayT0, trayDur = 1;
 
-        sealed class BarLauncher
+        // Slides the tray icon group open or closed: time-based, eased, one step per display refresh (vsync).
+        void StartTrayAnim(float target)
         {
-            public string Id, Target, Exe; // Exe, when set, must exist for the launcher to show
-            public Bitmap Icon;
-            public bool Loading;
-            public bool Vantage;           // a lookalike drawn in code; its click finds the real tray icon (see OpenVantageWidget)
+            if (trayRunning && trayGoal == target) return;
+            if (!trayRunning && trayAnim == target) return;
+            trayFrom = trayAnim;
+            trayGoal = target;
+            trayT0 = trayWatch.Elapsed.TotalMilliseconds;
+            trayDur = Math.Max(90, 300 * Math.Abs(target - trayAnim)); // a reversal mid-flight continues from where it is
+            trayRunning = true;
+            if (trayVsync == null) trayVsync = new VsyncDriver(this, TrayStep);
+            trayVsync.Wake();
         }
 
-        readonly BarLauncher[] launchers =
+        void TrayStep()
         {
-            new BarLauncher { Id = "vantage", Vantage = true },
-            new BarLauncher { Id = "monitorian", Target = @"shell:AppsFolder\10186emoacht.Monitorian_0q7myvhtpbc7w!Monitorian" }
-        };
-
-        // Loads an app's icon once, off the UI thread. An app that isn't installed has no icon, so it simply isn't shown.
-        void EnsureLauncherIcon(BarLauncher l)
-        {
-            if (l.Icon != null || l.Loading || (l.Exe != null && !File.Exists(l.Exe))) return;
-            l.Loading = true;
-            var loader = new System.Threading.Thread(() =>
+            double p = (trayWatch.Elapsed.TotalMilliseconds - trayT0) / trayDur;
+            if (p >= 1)
             {
-                Bitmap b = null;
-                try { b = ShellIcons.Load(l.Target, 96); } catch { }
-                if (b == null) return;
-                l.Icon = b;
-                try { BeginInvoke(new Action(Redraw)); } catch { }
-            }) { IsBackground = true, Name = "Bar icon " + l.Id };
-            loader.SetApartmentState(System.Threading.ApartmentState.STA);
-            loader.Start();
-        }
-
-        // A lookalike of the red Lenovo Vantage widget icon (a red disc with a white L), drawn in code so it stays sharp.
-        static void PaintVantage(Graphics g, RectangleF r)
-        {
-            SmoothingMode old = g.SmoothingMode;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var red = new SolidBrush(Color.FromArgb(227, 30, 36))) g.FillEllipse(red, r);
-            var font = Typography.Text(8.5f, Weight.Semibold); // cached by Typography: not disposed here
-            
-            using (var white = new SolidBrush(Color.White))
-            using (var fmt = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString("L", font, white, new RectangleF(r.X, r.Y + 0.5f, r.Width, r.Height), fmt);
-            g.SmoothingMode = old;
-        }
-
-        [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-        [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-
-        // This is not the live tray icon. The bar shows a lookalike; clicking it finds the real red icon on screen and
-        // clicks that. It looks in the notification area first, then opens the hidden-icons flyout (Win+B, Enter) and
-        // looks there. If it isn't found, the flyout is closed and nothing else happens. Runs off the UI thread.
-        void OpenVantageWidget()
-        {
-            ClosePanel();
-            if (vantageBusy) return;
-            vantageBusy = true;
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                try
-                {
-                    Point restore = Cursor.Position;
-                    Rectangle area = Screen.PrimaryScreen.Bounds;
-                    Rectangle search = new Rectangle(area.Right - 700, area.Bottom - 520, 700, 520); // bottom-right: taskbar tray and its flyout
-                    Point? hit = FindRedDisc(search);
-                    bool openedFlyout = false;
-                    if (hit == null)
-                    {
-                        WinUtil.Combo(WinUtil.VK_LWIN, (byte)'B');
-                        System.Threading.Thread.Sleep(200);
-                        WinUtil.Combo(0x0D);
-                        openedFlyout = true;
-                        System.Threading.Thread.Sleep(260);
-                        hit = FindRedDisc(search);
-                    }
-                    if (hit != null)
-                    {
-                        SetCursorPos(hit.Value.X, hit.Value.Y);
-                        System.Threading.Thread.Sleep(40);
-                        mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); // left down
-                        mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero); // left up
-                    }
-                    else if (openedFlyout) WinUtil.Combo(0x1B); // not found: close the flyout again
-                    System.Threading.Thread.Sleep(60);
-                    SetCursorPos(restore.X, restore.Y);
-                }
-                catch (Exception ex) { Program.Log(ex); }
-                finally { vantageBusy = false; }
-            });
-        }
-
-        volatile bool vantageBusy;
-
-        // The centre of the biggest strongly-red, roughly round blob 14-30 px wide inside region (screen coordinates).
-        static Point? FindRedDisc(Rectangle region)
-        {
-            using (var shot = new Bitmap(region.Width, region.Height, System.Drawing.Imaging.PixelFormat.Format32bppRgb))
-            {
-                using (Graphics g = Graphics.FromImage(shot)) g.CopyFromScreen(region.Location, Point.Empty, region.Size);
-                var data = shot.LockBits(new Rectangle(0, 0, shot.Width, shot.Height), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
-                try
-                {
-                    int w = shot.Width, h = shot.Height, stride = data.Stride;
-                    var px = new byte[stride * h];
-                    Marshal.Copy(data.Scan0, px, 0, px.Length);
-                    var seen = new bool[w * h];
-                    Point? best = null; int bestArea = 0;
-                    for (int y = 0; y < h; y++)
-                        for (int x = 0; x < w; x++)
-                        {
-                            if (seen[y * w + x] || !IsRed(px, y * stride + x * 4)) continue;
-                            // flood fill this blob
-                            var stack = new Stack<int>(); stack.Push(y * w + x); seen[y * w + x] = true;
-                            int minX = x, maxX = x, minY = y, maxY = y, count = 0;
-                            while (stack.Count > 0)
-                            {
-                                int i = stack.Pop(), cx = i % w, cy = i / w;
-                                count++;
-                                if (cx < minX) minX = cx; if (cx > maxX) maxX = cx; if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
-                                for (int d = 0; d < 4; d++)
-                                {
-                                    int nx = cx + (d == 0 ? 1 : d == 1 ? -1 : 0), ny = cy + (d == 2 ? 1 : d == 3 ? -1 : 0);
-                                    if (nx < 0 || ny < 0 || nx >= w || ny >= h || seen[ny * w + nx]) continue;
-                                    if (!IsRed(px, ny * stride + nx * 4)) continue;
-                                    seen[ny * w + nx] = true;
-                                    stack.Push(ny * w + nx);
-                                }
-                            }
-                            int bw = maxX - minX + 1, bh = maxY - minY + 1;
-                            bool round = bw >= 14 && bw <= 30 && bh >= 14 && bh <= 30 && Math.Abs(bw - bh) <= 4;
-                            if (round && count > bestArea) { bestArea = count; best = new Point(region.Left + (minX + maxX) / 2, region.Top + (minY + maxY) / 2); }
-                        }
-                    return best;
-                }
-                finally { shot.UnlockBits(data); }
+                trayAnim = trayGoal;
+                trayRunning = false;
+                trayVsync.Sleep();
             }
-        }
-
-        static bool IsRed(byte[] px, int i) { return px[i + 2] > 190 && px[i + 1] < 75 && px[i] < 75; } // BGRA: R high, G and B low
-
-        void LaunchApp(BarLauncher l)
-        {
-            ClosePanel();
-            try { Process.Start(new ProcessStartInfo(l.Target) { UseShellExecute = true }); }
-            catch { if (l.Exe != null) { try { Process.Start(new ProcessStartInfo(l.Exe) { UseShellExecute = true }); } catch { } } }
-        }
-        // Win+B moves keyboard focus to the notification area; Enter then opens the overflow flyout, exactly like
+            else
+            {
+                double q = 1 - Math.Pow(1 - Math.Max(0, p), 3); // ease-out cubic
+                trayAnim = (float)(trayFrom + (trayGoal - trayFrom) * q);
+            }
+            lastKey = null;
+            Redraw();
+        }        // Win+B moves keyboard focus to the notification area; Enter then opens the overflow flyout, exactly like
         // clicking the ^ on the taskbar. Nothing is injected and the taskbar itself is left alone.
         void ToggleTrayOverflow()
         {
@@ -1069,9 +1025,48 @@ namespace MacDock
 
         // ---------- clicks ----------
 
+        bool clockWasOpen;
+        DateTime clockClosedAt = DateTime.MinValue;
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            clockWasOpen = false;
+            if (e.Button != MouseButtons.Left) return;
+            RectangleF cr;
+            if (iconRects.TryGetValue("clock", out cr) && cr.Contains(e.X, e.Y))
+                {
+                    try
+                    {
+                        IntPtr fg = Win32.GetForegroundWindow();
+                        uint pid; NativeMethods.GetWindowThreadProcessId(fg, out pid);
+                        string exe = pid == self ? null : DockForm.ProcessPath(pid);
+                        clockWasOpen = exe != null && exe.EndsWith("ShellExperienceHost.exe", StringComparison.OrdinalIgnoreCase);
+                        if (clockWasOpen) { WinUtil.Combo(0x1B); clockClosedAt = DateTime.UtcNow; }
+                    }
+                    catch { }
+                }
+        }
+
+        DateTime dblAt = DateTime.MinValue;
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            base.OnMouseDoubleClick(e);
+            if (e.Button != MouseButtons.Left) return;
+            foreach (Hit h in hits)
+                if (h.DoubleClick != null && h.Rect.Contains(e.X, e.Y)) { dblAt = DateTime.UtcNow; try { h.DoubleClick(); } catch { } return; }
+        }
+
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (e.Button == MouseButtons.Left && (DateTime.UtcNow - dblAt).TotalMilliseconds < 400) return;
+            if (e.Button == MouseButtons.Right)
+            {
+                foreach (Hit h in hits)
+                    if (h.RightClick != null && h.Rect.Contains(e.X, e.Y)) { CloseMenu(); try { h.RightClick(); } catch { } return; }
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
 
             for (int i = 0; i < titleRects.Length; i++)
@@ -1144,9 +1139,10 @@ namespace MacDock
                     m.Add(MenuEntry.Item("All Apps", null, () => MissionControl.Toggle(true)));
                     m.Add(MenuEntry.Sep());
                     m.Add(MenuEntry.Item("MacDock Settings...", null, () => SettingsForm.ShowSettings()));
-                    m.Add(MenuEntry.Item(DockForm.ShowDockOn ? "Hide Dock" : "Show Dock", null, () =>
+                    m.Add(MenuEntry.Item("Check for Updates...", null, () => Updater.Run()));
+                    m.Add(MenuEntry.Item((DockForm.AutoHideOn ? "✓ " : "    ") + "Auto-hide Dock", null, () =>
                     {
-                        SetCfg.SetBool("show-dock", !DockForm.ShowDockOn);
+                        SetCfg.SetBool("auto-hide-dock", !DockForm.AutoHideOn);
                         if (DockForm.Instance != null) DockForm.Instance.ApplyDockMode();
                     }));
                     m.Add(MenuEntry.Item("System Settings...", null, Open("ms-settings:")));

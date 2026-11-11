@@ -19,7 +19,37 @@ namespace MacDock
         // True for the AppsFolder id of a Chromium web app.
         public static bool IsWebAppId(string id)
         {
-            return id != null && id.IndexOf("._crx_", StringComparison.OrdinalIgnoreCase) > 0;
+            if (id == null) return false;
+            if (id.IndexOf("._crx_", StringComparison.OrdinalIgnoreCase) > 0) return true;
+            // Chromium --app=URL windows and other web-app flavours: "<Browser>._<app name>" (e.g. "Chrome._https_www.youtube.com")
+            int dot = id.IndexOf("._", StringComparison.Ordinal);
+            if (dot <= 0 || id.IndexOfAny(new[] { '!', '\\', '/' }) >= 0) return false;
+            string b = id.Substring(0, dot);
+            return b.StartsWith("Brave", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Chrome", StringComparison.OrdinalIgnoreCase)
+                || b.StartsWith("MSEdge", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Microsoft.Edge", StringComparison.OrdinalIgnoreCase)
+                || b.StartsWith("Chromium", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Vivaldi", StringComparison.OrdinalIgnoreCase)
+                || b.StartsWith("Opera", StringComparison.OrdinalIgnoreCase);
+        }
+
+        [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+        [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")] static extern IntPtr GetClassLongPtr(IntPtr hwnd, int index);
+
+        // The icon the window itself carries (Chromium sets the web app's icon on its window), as a bitmap, or null.
+        public static Bitmap WindowIcon(IntPtr hwnd)
+        {
+            try
+            {
+                IntPtr h = IntPtr.Zero;
+                foreach (IntPtr which in new[] { (IntPtr)1, (IntPtr)2 }) // ICON_BIG, ICON_SMALL
+                {
+                    SendMessageTimeout(hwnd, 0x7F, which, IntPtr.Zero, 2, 200, out h); // WM_GETICON
+                    if (h != IntPtr.Zero) break;
+                }
+                if (h == IntPtr.Zero) h = GetClassLongPtr(hwnd, -14); // GCL_HICON
+                if (h == IntPtr.Zero) return null;
+                using (Icon ico = Icon.FromHandle(h)) return new Bitmap(ico.ToBitmap());
+            }
+            catch { return null; }
         }
 
         public static string TargetFor(string aumid) { return AppsFolder + aumid; }

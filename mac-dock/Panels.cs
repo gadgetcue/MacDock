@@ -111,12 +111,12 @@ namespace MacDock
         // panel never swings back past zero.
         const double OpenOmega = 24, OpenZeta = 0.72, CloseOmega = 30, CloseZeta = 1.0;
 
-        readonly Font body = Typography.Text(10f);
+        readonly Font body = Typography.Secondary();
         readonly Font semibold = Typography.Text(12.5f, Weight.Semibold);
         readonly Font header = Typography.Text(8.25f, Weight.Semibold);
         readonly Font big = Typography.Display(26f, Weight.Semibold);
-        readonly Font small = Typography.Text(9f);
-        readonly Font tileTitle = Typography.Text(10f, Weight.Semibold);
+        readonly Font small = Typography.Caption();
+        readonly Font tileTitle = Typography.Heading();
         static readonly Font glyphFont = new Font("Segoe MDL2 Assets", 12f, FontStyle.Regular, GraphicsUnit.Point);
         readonly ImageAttributes fade = new ImageAttributes();
         readonly FrameClock clock = new FrameClock();
@@ -489,10 +489,19 @@ namespace MacDock
 
             var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             bool noSub = string.IsNullOrEmpty(r.Sub);
+            int textW = rc.Width - 66 - (r.Extra != null ? 22 : 0);
             using (var tb = new SolidBrush(fg))
-                g.DrawString(r.Text, tileTitle, tb, new Rectangle(rc.Left + 58, rc.Top + (noSub ? 22 : 12), rc.Width - 66, 20), left);
+                g.DrawString(r.Text, tileTitle, tb, new Rectangle(rc.Left + 58, rc.Top + (noSub ? 22 : 12), textW, 20), left);
             using (var sb = new SolidBrush(Color.FromArgb(light ? 150 : 175, fg)))
-                g.DrawString(r.Sub ?? "", small, sb, new Rectangle(rc.Left + 58, rc.Top + 32, rc.Width - 66, 18), left);
+                g.DrawString(r.Sub ?? "", small, sb, new Rectangle(rc.Left + 58, rc.Top + 32, textW, 18), left);
+            if (r.Extra != null)
+            {
+                // chevron at the right edge: opens this tile's own panel (networks / devices)
+                r.ExtraRect = new Rectangle(rc.Right - 40, rc.Top, 40, rc.Height);
+                float cx = rc.Right - 20, cy = rc.Top + rc.Height / 2f;
+                using (var pen = new Pen(Color.FromArgb(light ? 150 : 190, fg), 2f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                { g.DrawLine(pen, cx - 2.5f, cy - 5, cx + 2.5f, cy); g.DrawLine(pen, cx + 2.5f, cy, cx - 2.5f, cy + 5); }
+            }
         }
 
         void DrawGlassRound(Graphics g, PanelRow r, bool hot)
@@ -1303,8 +1312,9 @@ namespace MacDock
             var panel = new GlassPanel(Width, rows, anchor, barHeight, closed);
             if (id == "control") panel.EnableGlass();
 
-            if (id == "wifi") Background(panel, WifiRows);
-            else if (id == "bluetooth") Background(panel, BluetoothRows);
+            if (id == "wifi") Background(panel, () => WifiRows(panel));
+            else if (id == "bluetooth") Background(panel, () => BluetoothRows(panel));
+            else if (id == "nightlight" && NightLight.NeedsRead) Background(panel, () => { NightLight.ReadActual(); return NightLightRows(); });
             else if (id == "sound") Background(panel, () => { string def; List<string> outs = DeviceFeed.AudioOutputs(out def); return SoundRows(outs, def); });
             else if (id == "control") { ccEdit = false; Background(panel, () => ControlRows(panel)); }
             else if (id == "localsend") Background(panel, () => LocalSendRows(panel));
@@ -1377,14 +1387,19 @@ namespace MacDock
             return rows;
         }
 
-        static List<PanelRow> WifiRows()
+        static List<PanelRow> WifiRows(GlassPanel panel)
         {
             bool? radio = DeviceFeed.RadioOn("WiFi");
-            List<WifiNetwork> networks = Wifi.Scan();
+            List<WifiNetwork> networks = radio == false ? new List<WifiNetwork>() : Wifi.Scan();
             WifiNetwork current = networks.FirstOrDefault(n => n.Connected);
 
             var rows = new List<PanelRow>();
-            rows.Add(PanelRow.Title("Wi-Fi", radio, on => Task.Run(() => DeviceFeed.SetRadio("WiFi", on))));
+            rows.Add(PanelRow.Title("Wi-Fi", radio, on => Task.Run(() =>
+            {
+                DeviceFeed.SetRadio("WiFi", on);
+                System.Threading.Thread.Sleep(on ? 2500 : 300);
+                Background(panel, () => WifiRows(panel));
+            })));
 
             if (radio == null && SystemInfo.Net == NetKind.Ethernet)
                 rows.Add(PanelRow.Info("Ethernet", "Connected"));
@@ -1397,22 +1412,52 @@ namespace MacDock
             {
                 rows.Add(PanelRow.Separator());
                 rows.Add(PanelRow.Header("Networks"));
-                foreach (WifiNetwork n in networks.Take(7))
-                    rows.Add(PanelRow.Item(n.Name, (n.Security ?? "") + (n.Signal > 0 ? "  " + n.Signal + "%" : ""), n.Connected, Open("ms-settings:network-wifi")));
+                foreach (WifiNetwork net in networks.Take(8))
+                {
+                    WifiNetwork n = net;
+                    string detail = (n.Security ?? "") + (n.Signal > 0 ? "  " + n.Signal + "%" : "");
+                    PanelRow item = PanelRow.Item(n.Name, n.Connected ? "Connected - click to disconnect" : detail, n.Connected, null);
+                    item.KeepOpen = true;
+                    item.Click = () =>
+                    {
+                        item.Sub = n.Connected ? "Disconnecting..." : "Connecting...";
+                        Task.Run(() =>
+                        {
+                            string result = n.Connected ? Wifi.Disconnect() : Wifi.Connect(n);
+                            System.Threading.Thread.Sleep(2000);
+                            Background(panel, () =>
+                            {
+                                List<PanelRow> r2 = WifiRows(panel);
+                                if (result != null) r2.Insert(2, PanelRow.Info("Wi-Fi", result));
+                                return r2;
+                            });
+                        });
+                    };
+                    rows.Add(item);
+                }
                 if (networks.Count == 0) rows.Add(PanelRow.Info("Networks", "None found"));
             }
             rows.Add(PanelRow.Separator());
-            rows.Add(PanelRow.Button("Network Settings...", Open("ms-settings:network-wifi")));
+            PanelRow rescan = PanelRow.Button("Rescan", null);
+            rescan.KeepOpen = true;
+            rescan.Click = () => Background(panel, () => WifiRows(panel));
+            rows.Add(rescan);
             return rows;
         }
 
-        static List<PanelRow> BluetoothRows()
+        static List<PanelRow> BluetoothRows(GlassPanel panel)
         {
             bool? radio = DeviceFeed.RadioOn("Bluetooth");
-            List<string> devices = radio == true ? DeviceFeed.ConnectedBluetooth() : new List<string>();
+            List<BtDevice> devices = radio == true ? BtClassic.Paired() : new List<BtDevice>();
+            List<string> le = radio == true ? DeviceFeed.ConnectedBluetooth() : new List<string>();
 
             var rows = new List<PanelRow>();
-            rows.Add(PanelRow.Title("Bluetooth", radio, on => Task.Run(() => DeviceFeed.SetRadio("Bluetooth", on))));
+            rows.Add(PanelRow.Title("Bluetooth", radio, on => Task.Run(() =>
+            {
+                DeviceFeed.SetRadio("Bluetooth", on);
+                System.Threading.Thread.Sleep(on ? 2000 : 300);
+                Background(panel, () => BluetoothRows(panel));
+            })));
             if (radio == null)
             {
                 rows.Add(PanelRow.Info("Bluetooth", "Not available on this PC"));
@@ -1423,13 +1468,30 @@ namespace MacDock
                 if (radio == true)
                 {
                     rows.Add(PanelRow.Separator());
-                    rows.Add(PanelRow.Header("Connected devices"));
-                    foreach (string d in devices.Take(7)) rows.Add(PanelRow.Item(d, "Connected", true, Open("ms-settings:bluetooth")));
-                    if (devices.Count == 0) rows.Add(PanelRow.Info("Devices", "None connected"));
+                    rows.Add(PanelRow.Header("My devices"));
+                    foreach (BtDevice dev in devices.Take(8))
+                    {
+                        BtDevice d = dev;
+                        PanelRow item = PanelRow.Item(d.Name, d.Connected ? "Connected - click to disconnect" : "Not connected - click to connect", d.Connected, null);
+                        item.KeepOpen = true;
+                        item.Click = () =>
+                        {
+                            item.Sub = d.Connected ? "Disconnecting..." : "Connecting...";
+                            Task.Run(() =>
+                            {
+                                BtClassic.SetConnected(d.Address, !d.Connected);
+                                System.Threading.Thread.Sleep(1500);
+                                Background(panel, () => BluetoothRows(panel));
+                            });
+                        };
+                        rows.Add(item);
+                    }
+                    foreach (string n in le)
+                        if (!devices.Any(x => x.Name == n)) rows.Add(PanelRow.Info(n, "Connected"));
+                    if (devices.Count == 0 && le.Count == 0) rows.Add(PanelRow.Info("Devices", "None paired"));
                 }
             }
             rows.Add(PanelRow.Separator());
-            rows.Add(PanelRow.Button("Bluetooth Settings...", Open("ms-settings:bluetooth")));
             return rows;
         }
 
@@ -1471,11 +1533,23 @@ namespace MacDock
             return (seconds / 3600) + " h " + (seconds % 3600) / 60 + " min";
         }
 
+        static int prevSaverLevel = 0; // threshold to restore when Battery Saver is switched off
         static List<PanelRow> BatteryRows()
         {
             SystemInfo.UpdateFast();
             var rows = new List<PanelRow>();
-            rows.Add(PanelRow.Title("Battery"));
+            int saverLvl = SetSys.BatterySaverLevel();
+            if (SystemInfo.HasBattery && saverLvl >= 0)
+            {
+                bool saverOn = SetSys.BatterySaverOn() || saverLvl >= 100;
+                rows.Add(PanelRow.Title("Battery", saverOn, on => Task.Run(() =>
+                {
+                    if (on) { int cur = SetSys.BatterySaverLevel(); if (cur >= 0 && cur < 100) prevSaverLevel = cur; SetSys.SetBatterySaverLevel(100); }
+                    else SetSys.SetBatterySaverLevel(prevSaverLevel);
+                })));
+                rows.Add(PanelRow.Info("Battery Saver", SetSys.BatterySaverOn() ? "On" : saverLvl >= 100 ? "Armed (on when unplugged)" : "Off"));
+            }
+            else rows.Add(PanelRow.Title("Battery"));
 
             if (!SystemInfo.HasBattery)
             {
@@ -1519,10 +1593,11 @@ namespace MacDock
             {
                 PanelRow w = RadioTile("Wi-Fi", "WiFi", s.Wifi, "wifi", "ms-settings:network-wifi");
                 if (s.Wifi == true && !string.IsNullOrWhiteSpace(s.Ssid)) w.Sub = s.Ssid.Trim();
+                w.Extra = Go("wifi");
                 return new[] { w };
             } });
             l.Add(new CcTile { Id = "now", Name = "Now Playing", Tall = true, Build = s => new[] { new PanelRow { Kind = RowKind.Media, Text = "Now Playing" } } });
-            l.Add(new CcTile { Id = "bluetooth", Name = "Bluetooth", Build = s => new[] { RadioTile("Bluetooth", "Bluetooth", s.Bluetooth, "bluetooth", "ms-settings:bluetooth") } });
+            l.Add(new CcTile { Id = "bluetooth", Name = "Bluetooth", Build = s => { PanelRow b = RadioTile("Bluetooth", "Bluetooth", s.Bluetooth, "bluetooth", "ms-settings:bluetooth"); b.Extra = Go("bluetooth"); return new[] { b }; } });
             l.Add(new CcTile { Id = "localsend", Name = "LocalSend", Build = s => new[] { PanelRow.Tile("LocalSend", "", "localsend", false, false, Go("localsend")) } });
             l.Add(new CcTile { Id = "stage", Name = "Stage + Mirroring", Build = s => new[] {
                 round("stage", "Stage", () => WinUtil.Combo(WinUtil.VK_LWIN, 0x09)),
@@ -1745,7 +1820,7 @@ namespace MacDock
 
         static PanelRow RadioTile(string title, string kind, bool? on, string glyph, string settings)
         {
-            if (on == null) return PanelRow.Tile(title, "Not available", glyph, false, true, Open(settings));
+            if (on == null) return PanelRow.Tile(title, "Not available", glyph, false, true, null);
             PanelRow tile = PanelRow.Tile(title, on.Value ? "On" : "Off", glyph, on.Value, true, null);
             tile.KeepOpen = true;
             tile.Click = () =>

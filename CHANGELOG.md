@@ -1,5 +1,25 @@
 ﻿# Changelog
 
+## v1.9
+### Added
+- **Tray icons in the status bar**, with a collapsible tray and an arrow toggle; sharper tray icons and fixed click routing.
+- **Apple menu**: Auto-hide Dock and Check for Updates.
+- **Battery saver** toggle.
+- **CPU and RAM** status bar toggles.
+- **Profile picture** support.
+- New **iOS-style Settings sidebar icons**.
+
+### Changed
+- Settings: fade, tidier spacing, smooth scrolling and a consistent Inter type scale.
+- Dark dock icons.
+- Faster startup via an icon cache.
+- Smoother dock hover magnify.
+- Second click closes status bar menus.
+
+### Fixed
+- Idle Dynamic Island circle.
+- Launchpad issue with dark icons.
+- Web apps show their own icon in the running dock.
 ## v1.8
 ### Added
 - **Screenshot and screen record** buttons, in the menu bar and as Control Center tiles. The status bar buttons and the Control Center tiles are independent toggles in Settings.

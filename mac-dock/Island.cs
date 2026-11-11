@@ -23,7 +23,7 @@ namespace MacDock
 
         const int CanvasW = 520, CanvasH = 340, TopY = 0;
         // Idle: a round dot exactly as tall as the status bar.
-        static readonly int IdleW = TopBar.BarHeight - 1, IdleH = TopBar.BarHeight - 1;
+        static readonly int IdleW = TopBar.BarHeight - 10, IdleH = TopBar.BarHeight - 10;
         const int HeaderH = 70, MediaH = 56, RowH = 46, FooterH = 44, TabH = 36, ClipRowH = 34, ClipMax = 5;
 
         readonly Timer timer = new Timer();
@@ -31,7 +31,7 @@ namespace MacDock
         const double Omega = 19, Zeta = 0.62;
 
         readonly Font nameFont = Typography.Text(9f, Weight.Medium);
-        readonly Font bodyFont = Typography.Text(10f);
+        readonly Font bodyFont = Typography.Secondary();
         readonly Font boldFont = Typography.Text(11f, Weight.Semibold);
         readonly Font bigFont = Typography.Display(24f, Weight.Semibold);
         // Swipe a notification row sideways to dismiss it; the rows below slide up to fill the gap.
@@ -298,6 +298,8 @@ namespace MacDock
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
         DateTime lastRaise = DateTime.MinValue;
         Mode lastRaiseMode = Mode.Idle;
 
@@ -306,6 +308,7 @@ namespace MacDock
         {
             if (!IsHandleCreated) return;
             lastRaise = DateTime.Now;
+            if (GetWindow(Handle, 3) == IntPtr.Zero) return; // already above every other window: no z-order churn
             SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010 | 0x0200); // NOMOVE|NOSIZE|NOACTIVATE|NOOWNERZORDER
         }
 
@@ -331,7 +334,7 @@ namespace MacDock
             }
             if (!Visible) { Show(); Raise(); }
             if (frame % 20 == 0) Reposition();
-            if (mode != lastRaiseMode || (DateTime.Now - lastRaise).TotalMilliseconds > 150) { lastRaiseMode = mode; Raise(); }
+            if (mode != lastRaiseMode || (DateTime.Now - lastRaise).TotalMilliseconds > 40) { lastRaiseMode = mode; Raise(); }
             CheckPower();
 
             NativeMethods.POINT p;
@@ -445,6 +448,8 @@ namespace MacDock
             return busy;
         }
 
+        float IdleYOff() { float open = (float)Math.Max(0, Math.Min(1, (curW - IdleW) / 100.0)); return (float)Math.Round((TopBar.BarHeight - 1 - IdleH) / 2.0 * (1 - open)); }
+
         int PanelHeight()
         {
             int h = HeaderH + (Feed.Media != null ? MediaH : 0) + TabH;
@@ -468,7 +473,7 @@ namespace MacDock
             hits.Clear();
             rowRects.Clear();
             // Clear only where the pill is now or was last frame (plus shadow margin), not the whole canvas.
-            var now = Rectangle.Ceiling(new RectangleF((CanvasW - (float)curW) / 2f - 12, TopY - 4, (float)curW + 24, (float)curH + 20));
+            var now = Rectangle.Ceiling(new RectangleF((CanvasW - (float)curW) / 2f - 12, TopY - 4, (float)curW + 24, (float)curH + 20 + IdleYOff()));
             Rectangle dirty = prevDirty.IsEmpty ? new Rectangle(0, 0, CanvasW, CanvasH) : Rectangle.Union(prevDirty, now);
             prevDirty = now;
             using (Graphics g = surface.BeginRegion(dirty))
@@ -477,7 +482,8 @@ namespace MacDock
                 Typography.Prepare(g);
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-                var pill = new RectangleF((CanvasW - (float)curW) / 2f, TopY, (float)curW, (float)curH);
+                var pill = new RectangleF((CanvasW - (float)curW) / 2f, TopY + IdleYOff(), (float)curW, (float)curH);
+                if (mode == Mode.Idle && curW < IdleW + 1.5 && curH < IdleH + 1.5) pill = new RectangleF((CanvasW - IdleW) / 2, TopY + IdleYOff(), IdleW, IdleH); // exact pixel-aligned circle
                 float radius = Math.Min(pill.Height / 2f, mode == Mode.Idle || mode == Mode.Power || mode == Mode.Copy ? 20f : 28f);
 
                 using (GraphicsPath path = Layered.RoundedRect(pill, radius))
@@ -510,7 +516,7 @@ namespace MacDock
                     // Lay content out on the final (target) rect and let the moving pill reveal it: text no longer
                     // slides and re-rasterises at fractional offsets every frame.
                     float lw = mode == Mode.Idle ? (float)curW : (float)targetW, lh = mode == Mode.Idle ? (float)curH : (float)targetH;
-                    var layout = new RectangleF((float)Math.Round((CanvasW - lw) / 2f), TopY, (float)Math.Round(lw), (float)Math.Round(lh));
+                    var layout = new RectangleF((float)Math.Round((CanvasW - lw) / 2f), TopY + IdleYOff(), (float)Math.Round(lw), (float)Math.Round(lh));
                     g.SetClip(RectangleF.Inflate(pill, -1f, -1f));
                     DrawContent(g, layout, (int)(alpha * 255));
                     g.ResetClip();

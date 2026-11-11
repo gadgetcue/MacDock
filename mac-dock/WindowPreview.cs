@@ -39,7 +39,7 @@ namespace MacDock
         readonly Action<IntPtr> focus;
         readonly Action closed;
         readonly Func<Point, bool> keepOpen; // true while the cursor is over the dock icon this popup belongs to
-        readonly Font font = Typography.Text(9f);
+        readonly Font font = Typography.Caption();
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         readonly ThumbHost host;
         ThumbHost xo; Surface xs;

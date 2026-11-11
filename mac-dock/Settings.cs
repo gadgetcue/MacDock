@@ -1,4 +1,4 @@
-// MacDock settings window: a dark, macOS "System Settings"-style page (sidebar + grouped rows).
+﻿// MacDock settings window: a dark, macOS "System Settings"-style page (sidebar + grouped rows).
 //
 // Launcher options are stored as "@key value" lines in dock.txt (the same file the dock reads), so changes made here
 // are picked up by the running dock (the taskbar option applies at once) and by the next start (the rest).
@@ -118,8 +118,8 @@ namespace MacDock
         {
             var g = e.Graphics;
             using (var b = new SolidBrush(BackColor)) g.FillRectangle(b, ClientRectangle);
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            TextRenderer.DrawText(g, Text, Font, ClientRectangle, ForeColor, BackColor,
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            SetText.DrawText(g, Text, Font, ClientRectangle, ForeColor, BackColor,
                 TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
         }
     }
@@ -217,8 +217,8 @@ namespace MacDock
             g.SmoothingMode = old;
             string glyph = index == 0 ? initial : AvatarGlyphs[index];
             const TextFormatFlags mid = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding;
-            if (index == 0) TextRenderer.DrawText(g, glyph, Typography.Text(r.Width * 0.3f, Weight.Semibold), r, Color.White, mid); // cached font: not disposed
-            else using (var f = new Font("Segoe UI Symbol", r.Width * 0.4f, GraphicsUnit.Pixel)) TextRenderer.DrawText(g, glyph, f, r, Color.White, mid);
+            if (index == 0) SetText.DrawText(g, glyph, Typography.Text(r.Width * 0.3f, Weight.Semibold), r, Color.White, mid); // cached font: not disposed
+            else using (var f = new Font("Segoe UI Symbol", r.Width * 0.4f, GraphicsUnit.Pixel)) SetText.DrawText(g, glyph, f, r, Color.White, mid);
         }
 
         public static GraphicsPath Round(RectangleF r, float radius)
@@ -482,16 +482,16 @@ namespace MacDock
             int labelRight = Width - 12;
             if (!string.IsNullOrEmpty(Value))
             {
-                Font vf = Typography.Text(10.5f);
-                int vw = TextRenderer.MeasureText(g, Value, vf, new Size(int.MaxValue, Height), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + 2;
+                Font vf = Typography.Body();
+                int vw = SetText.MeasureText(g, Value, vf, new Size(int.MaxValue, Height), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + 2;
                 vw = Math.Min(vw, (int)(Width * 0.45f));
                 int left = right - vw;
-                TextRenderer.DrawText(g, Value, vf, new Rectangle(left, 0, vw, Height), SetUi.Dim, f | TextFormatFlags.Right);
+                SetText.DrawText(g, Value, vf, new Rectangle(left, 0, vw, Height), SetUi.Dim, f | TextFormatFlags.Right);
                 labelRight = left - 12;
             }
             else if (Widget != null) labelRight = Widget.Left - 12;
             else labelRight = right;
-            TextRenderer.DrawText(g, Label, Typography.Text(10.5f), new Rectangle(14, 0, Math.Max(0, labelRight - 14), Height), SetUi.Text, f | TextFormatFlags.Left);
+            SetText.DrawText(g, Label, Typography.Body(), new Rectangle(14, 0, Math.Max(0, labelRight - 14), Height), SetUi.Text, f | TextFormatFlags.Left);
         }
     }
 
@@ -900,7 +900,7 @@ namespace MacDock
             menu.Renderer = new ToolStripProfessionalRenderer(new SetMenuColors());
             menu.BackColor = SetUi.Card;
             menu.ForeColor = SetUi.Text;
-            menu.Font = Typography.Text(10f);
+            menu.Font = Typography.Secondary();
             menu.ShowImageMargin = false;
             menu.ShowCheckMargin = true;
             for (int i = 0; i < options.Length; i++)
@@ -923,7 +923,7 @@ namespace MacDock
             
             string text = index >= 0 && index < options.Length ? options[index] : "";
             Color fg = Enabled ? SetUi.Text : SetUi.Dim;
-            TextRenderer.DrawText(g, text, Typography.Text(10f), new Rectangle(0, 0, Width - 30, Height), fg, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            SetText.DrawText(g, text, Typography.Secondary(), new Rectangle(0, 0, Width - 30, Height), fg, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
             using (var pen = new Pen(SetUi.Chevron, 1.6f))
             {
                 pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
@@ -998,7 +998,7 @@ namespace MacDock
                     else
                         using (var p = new Pen(i == hover ? SetUi.Dim : SetUi.CardLine, 1f)) g.DrawPath(p, path);
                 }
-                TextRenderer.DrawText(g, Cells[i].Title, Typography.Text(9f), new Rectangle(r.X, r.Bottom + 3, r.Width, LabelH - 3), i == Selected ? SetUi.Text : SetUi.Dim, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+                SetText.DrawText(g, Cells[i].Title, Typography.Caption(), new Rectangle(r.X, r.Bottom + 3, r.Width, LabelH - 3), i == Selected ? SetUi.Text : SetUi.Dim, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
             }
         }
     }
@@ -1138,7 +1138,8 @@ namespace MacDock
         {
             q = (q ?? "").Trim();
             shown = q.Length == 0 ? new List<Item>(All) : All.Where(i => i.Kind == 0 && i.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
-            off = 0;
+            off = 0; offF = 0; offTarget = 0;
+            if (vsync != null) vsync.Sleep();
             Invalidate();
         }
 
@@ -1148,11 +1149,27 @@ namespace MacDock
         }
 
         int Total() { int t = 0; foreach (Item i in shown) t += HeightOf(i); return t + 8; }
+        public static bool BenchOn; public static readonly List<double> BGap = new List<double>(), BPaint = new List<double>();
+        public int BenchTotal { get { return Total(); } }
 
+        float offF, offTarget;
+        VsyncDriver vsync; readonly FrameClock clock = new FrameClock();
+
+        // Wheel input moves a target; a vsync-timed loop (monitor refresh rate, delta-time easing) glides the offset to it.
         public void Scroll(int delta)
         {
-            off = Math.Max(0, Math.Min(Math.Max(0, Total() - Height), off + delta));
-            Invalidate();
+            offTarget = Math.Max(0, Math.Min(Math.Max(0, Total() - Height), offTarget + delta));
+            if (vsync == null)
+                vsync = new VsyncDriver(this, () =>
+                {
+                    double rawS = clock.Next(); if (BenchOn) BGap.Add(rawS * 1000.0); double dt = vsync.Frame(rawS);
+                    double d = offTarget - offF;
+                    if (Math.Abs(d) < 0.5) { offF = offTarget; vsync.Sleep(); }
+                    else offF += (float)(d * (1 - Math.Pow(0.7, dt * 1000.0 / 8.0)));
+                    int n = (int)Math.Round(offF);
+                    if (n != off) { off = n; scrollInval = true; Invalidate(); scrollInval = false; Update(); }
+                });
+            if (!vsync.Active) { offF = off; offTarget = Math.Max(0, Math.Min(Math.Max(0, Total() - Height), off + delta)); clock.Reset(); vsync.Wake(); }
         }
 
         int IndexAt(int y)
@@ -1193,11 +1210,32 @@ namespace MacDock
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            var g = e.Graphics;
+            var psw = System.Diagnostics.Stopwatch.StartNew();
+            int w = Math.Max(1, Width), h = Math.Max(1, Total());
+            if (cache == null || cacheDirty || cache.Width != w || cache.Height != h)
+            {
+                if (cache != null && (cache.Width != w || cache.Height != h)) { cache.Dispose(); cache = null; }
+                if (cache == null) cache = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+                using (Graphics cg = Graphics.FromImage(cache)) PaintList(cg);
+                cacheDirty = false;
+            }
+            e.Graphics.Clear(SetUi.Side);
+            e.Graphics.DrawImageUnscaled(cache, 0, -off);
+            if (BenchOn) BPaint.Add(psw.Elapsed.TotalMilliseconds);
+        }
+
+        // The whole list is drawn once into a bitmap and only re-drawn when something changes (hover, selection, filter,
+        // theme); scrolling just blits it, so a frame costs well under one refresh interval.
+        Bitmap cache; bool cacheDirty = true, scrollInval;
+        protected override void OnInvalidated(InvalidateEventArgs e) { if (!scrollInval) cacheDirty = true; base.OnInvalidated(e); }
+        protected override void Dispose(bool disposing) { if (disposing && cache != null) { cache.Dispose(); cache = null; } base.Dispose(disposing); }
+
+        void PaintList(Graphics g)
+        {
             g.Clear(SetUi.Side);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             const TextFormatFlags f = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.Left;
-            int y = -off;
+            int y = 0;
             for (int idx = 0; idx < shown.Count; idx++)
             {
                 Item it = shown[idx];
@@ -1208,13 +1246,13 @@ namespace MacDock
                 }
                 else if (it.Kind == 3)
                 {
-                    TextRenderer.DrawText(g, it.Name, Typography.Text(9f, Weight.Semibold), new Rectangle(18, y, Width - 24, h), SetUi.Dim, (f & ~TextFormatFlags.VerticalCenter) | TextFormatFlags.Bottom);
+                    SetText.DrawText(g, it.Name, Typography.Label(), new Rectangle(18, y, Width - 24, h), SetUi.Dim, (f & ~TextFormatFlags.VerticalCenter) | TextFormatFlags.Bottom);
                 }
                 else if (it.Kind == 2)
                 {
                     SetUi.DrawAvatar(g, new Rectangle(14, y + 12, 42, 42), SetUi.AvatarIndex(), it.Glyph);
-                    TextRenderer.DrawText(g, it.Name, Typography.Text(10f, Weight.Semibold), new Rectangle(68, y + 14, Width - 74, 22), SetUi.Text, f);
-                    TextRenderer.DrawText(g, it.Key, Typography.Text(9f), new Rectangle(68, y + 35, Width - 74, 22), SetUi.Dim, f);
+                    SetText.DrawText(g, it.Name, Typography.Heading(), new Rectangle(68, y + 14, Width - 74, 22), SetUi.Text, f);
+                    SetText.DrawText(g, it.Key, Typography.Caption(), new Rectangle(68, y + 35, Width - 74, 22), SetUi.Dim, f);
                 }
                 else
                 {
@@ -1225,24 +1263,27 @@ namespace MacDock
                         using (var b = new SolidBrush(sel ? Color.FromArgb(59, 130, 246) : SetUi.HoverFill))
                             g.FillPath(b, path);
                     var icon = new RectangleF(17, y + (h - 24) / 2f, 24, 24);
+                    bool drawnIcon = SideIcons.Draw(g, it.Key, icon, it.Glyph, iconFont);
+                    if (!drawnIcon)
                     using (var path = SetUi.Round(icon, 6.5f))
                     using (var b = new SolidBrush(SetUi.Tile(it.Color))) g.FillPath(b, path);
-                    if (iconFont != null && it.Glyph.Length == 1 && it.Glyph[0] >= 0xE000)
+                    if (drawnIcon) { }
+                    else if (iconFont != null && it.Glyph.Length == 1 && it.Glyph[0] >= 0xE000)
                     {
                         InkFit fit = FitGlyph(it.Glyph, iconFont);
                         using (var font = new Font(iconFont, fit.Size))
                         {
                             Rectangle gr = Rectangle.Round(icon);
                             gr.Offset(fit.Off.X, fit.Off.Y);
-                            TextRenderer.DrawText(g, it.Glyph, font, gr, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                            SetText.DrawText(g, it.Glyph, font, gr, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                         }
                     }
                     else
                     {
                         string letter = it.Name.Substring(0, 1);
-                        TextRenderer.DrawText(g, letter, Typography.Text(8.5f, Weight.Semibold), Rectangle.Round(icon), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                        SetText.DrawText(g, letter, Typography.Text(8.5f, Weight.Semibold), Rectangle.Round(icon), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                     }
-                    TextRenderer.DrawText(g, it.Name, Typography.Text(11f), new Rectangle(52, y, Width - 60, h), sel ? Color.White : SetUi.Text, f);
+                    SetText.DrawText(g, it.Name, Typography.Menu(), new Rectangle(52, y, Width - 60, h), sel ? Color.White : SetUi.Text, f);
                 }
                 y += h;
             }
@@ -1250,6 +1291,27 @@ namespace MacDock
     }
 
     // ---------- the window ----------
+
+    // Panel that composes its children off-screen and presents them once, so moving it while scrolling doesn't flicker.
+    sealed class SmoothPanel : Panel
+    {
+        public SmoothPanel() { DoubleBuffered = true; SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true); }
+    }
+
+    // While the page glides, a bitmap snapshot of it is blitted instead of moving hundreds of child controls
+    // (which re-laid-out and repainted every frame and left artifacts on pages with many toggles).
+    sealed class SnapView : Control
+    {
+        public Bitmap Bmp; public int Off;
+        public SnapView() { SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Opaque, true); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            if (Bmp != null) e.Graphics.DrawImageUnscaled(Bmp, 0, -Off);
+            SettingsForm.SnapPaintCost(sw.Elapsed.TotalMilliseconds);
+        }
+        protected override void Dispose(bool d) { if (d && Bmp != null) { Bmp.Dispose(); Bmp = null; } base.Dispose(d); }
+    }
 
     sealed class SettingsForm : Form, IMessageFilter
     {
@@ -1316,8 +1378,8 @@ namespace MacDock
         }
 
         readonly SetSide side = new SetSide();
-        readonly Panel viewport = new Panel();
-        readonly Panel body = new Panel();
+        readonly Panel viewport = new SmoothPanel();
+        readonly Panel body = new SmoothPanel();
         readonly TextBox search = new TextBox();
         readonly Panel searchHost = new Panel();
         readonly List<Control> flow = new List<Control>();
@@ -1381,7 +1443,7 @@ namespace MacDock
             search.BorderStyle = BorderStyle.None;
             search.BackColor = SetUi.SearchFill;
             search.ForeColor = SetUi.Dim;
-            search.Font = Typography.Text(10.5f);
+            search.Font = Typography.Body();
             search.Text = "Search";
             search.SetBounds(34, 0, searchHost.Width - 46, search.Height);
             search.Top = (searchHost.Height - search.Height) / 2 + 1;
@@ -1442,15 +1504,83 @@ namespace MacDock
                 while (history.Count > historyAt + 1) history.RemoveAt(history.Count - 1);
                 if (history[historyAt] != key) { history.Add(key); historyAt = history.Count - 1; }
             }
-            side.Selected = key;
+            side.Selected = key == "tray" ? "menubar" : key;
             side.Invalidate();
+            Bitmap from = null, to = null;
+            bool fade = IsHandleCreated && Visible && viewport.Width > 0 && viewport.Height > 0 && key != current;
+            if (fade)
+            {
+                try { from = new Bitmap(viewport.Width, viewport.Height); viewport.DrawToBitmap(from, new Rectangle(0, 0, from.Width, from.Height)); }
+                catch { if (from != null) from.Dispose(); from = null; fade = false; }
+            }
+            if (fadeCover != null) { Controls.Remove(fadeCover); fadeCover.Dispose(); fadeCover = null; }
+            if (fade) SendMessage(viewport.Handle, 0x000B, IntPtr.Zero, IntPtr.Zero); // WM_SETREDRAW off: build without flicker
             BuildPage(key);
+            if (fade)
+            {
+                SendMessage(viewport.Handle, 0x000B, (IntPtr)1, IntPtr.Zero);
+                try { to = new Bitmap(viewport.Width, viewport.Height); viewport.DrawToBitmap(to, new Rectangle(0, 0, to.Width, to.Height)); }
+                catch { if (to != null) to.Dispose(); to = null; }
+            }
+            if (fade && from != null && to != null) StartFade(from, to);
+            else { if (from != null) from.Dispose(); if (to != null) to.Dispose(); viewport.Invalidate(true); }
             Invalidate(new Rectangle(SideW, 0, Width - SideW, TopH));
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+        Control fadeCover;
+
+        // Clean cross-fade between category pages: old and new pages are snapshotted and blended on a cover; no layout is animated.
+        void StartFade(Bitmap from, Bitmap to)
+        {
+            var cover = new FadeCover(from, to) { Bounds = viewport.Bounds };
+            fadeCover = cover;
+            Controls.Add(cover);
+            cover.BringToFront();
+            var t = new System.Windows.Forms.Timer { Interval = 15 };
+            var sw = Stopwatch.StartNew();
+            t.Tick += (s, e) =>
+            {
+                if (cover.IsDisposed) { t.Dispose(); return; }
+                double k = Math.Min(1.0, sw.ElapsedMilliseconds / 160.0);
+                cover.Alpha = (float)(1 - Math.Pow(1 - k, 2));
+                cover.Invalidate();
+                if (k >= 1.0)
+                {
+                    t.Dispose();
+                    if (fadeCover == cover) fadeCover = null;
+                    Controls.Remove(cover); cover.Dispose();
+                    viewport.Invalidate(true);
+                }
+            };
+            t.Start();
+        }
+
+        sealed class FadeCover : Control
+        {
+            readonly Bitmap a, b; public float Alpha;
+            public FadeCover(Bitmap from, Bitmap to)
+            {
+                a = from; b = to;
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.Opaque, true);
+            }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics;
+                g.DrawImageUnscaled(a, 0, 0);
+                using (var ia = new System.Drawing.Imaging.ImageAttributes())
+                {
+                    ia.SetColorMatrix(new System.Drawing.Imaging.ColorMatrix { Matrix33 = Alpha });
+                    g.DrawImage(b, new Rectangle(0, 0, b.Width, b.Height), 0, 0, b.Width, b.Height, GraphicsUnit.Pixel, ia);
+                }
+            }
+            protected override void Dispose(bool d) { if (d) { a.Dispose(); b.Dispose(); } base.Dispose(d); }
         }
 
         string TitleOf(string key)
         {
             if (key == "profile") return "Profile";
+            if (key == "tray") return "Tray Icons";
             foreach (var i in side.All) if (i.Kind == 0 && i.Key == key) return i.Name;
             return "";
         }
@@ -1485,10 +1615,10 @@ namespace MacDock
             }
             Color backC = historyAt > 0 ? SetUi.Text : SetUi.NavDim;
             Color fwdC = historyAt < history.Count - 1 ? SetUi.Text : SetUi.NavDim;
-            using (var p = new Pen(backC, 1.8f)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; g.DrawLines(p, new[] { new PointF(SideW + 38, 25), new PointF(SideW + 34, 31), new PointF(SideW + 38, 37) }); }
-            using (var p = new Pen(fwdC, 1.8f)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; g.DrawLine(new Pen(SetUi.PillLine), SideW + 43, 22, SideW + 43, 40); g.DrawLines(p, new[] { new PointF(SideW + 50, 25), new PointF(SideW + 54, 31), new PointF(SideW + 50, 37) }); }
+            using (var p = new Pen(backC, 1.8f)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; g.DrawLines(p, new[] { new PointF(SideW + 31f, 24.5f), new PointF(SideW + 26f, 31f), new PointF(SideW + 31f, 37.5f) }); }
+            using (var p = new Pen(fwdC, 1.8f)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; using (var sp = new Pen(SetUi.PillLine)) g.DrawLine(sp, SideW + 43, 23, SideW + 43, 39); g.DrawLines(p, new[] { new PointF(SideW + 55f, 24.5f), new PointF(SideW + 60f, 31f), new PointF(SideW + 55f, 37.5f) }); }
 
-            TextRenderer.DrawText(g, TitleOf(side.Selected), Typography.Text(15f, Weight.Semibold), new Rectangle(SideW + 90, 0, Math.Max(0, Width - SideW - 104), TopH), SetUi.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            SetText.DrawText(g, TitleOf(current == "tray" ? "tray" : side.Selected), Typography.Title(), new Rectangle(SideW + 90, 0, Math.Max(0, Width - SideW - 104), TopH), SetUi.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
 
         bool lightsHover;
@@ -1652,22 +1782,121 @@ namespace MacDock
         {
             if (m.Msg != 0x020A || !Visible || !Bounds.Contains(Cursor.Position)) return false;
             int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
-            if (side.RectangleToScreen(side.ClientRectangle).Contains(Cursor.Position)) { side.Scroll(-delta / 120 * 60); return true; }
+            if (side.RectangleToScreen(side.ClientRectangle).Contains(Cursor.Position)) { side.Scroll(-delta * 60 / 120); return true; }
+            Wheel(delta);
+            return true;
+        }
+
+        // ----- scroll benchmark (MacDock.exe --scroll-bench <out.txt>) -----
+        public static bool NoSnap;
+        static readonly List<double> bGap = new List<double>(), bCost = new List<double>(), bPaint = new List<double>();
+        static bool benching;
+
+        internal static void SnapPaintCost(double ms) { if (benching) bPaint.Add(ms); }
+
+        static string Stats(string name, List<double> v, double refMs)
+        {
+            if (v.Count == 0) return name + ": n=0";
+            var s = new List<double>(v); s.Sort();
+            double mean = 0; foreach (double x in s) mean += x; mean /= s.Count;
+            int late = 0; foreach (double x in s) if (x > refMs * 1.5) late++;
+            return string.Format("{0}: n={1} mean={2:0.00} p50={3:0.00} p95={4:0.00} p99={5:0.00} max={6:0.00} late(>1.5xrefresh)={7:0.0}%",
+                name, s.Count, mean, s[s.Count / 2], s[(int)(s.Count * 0.95)], s[Math.Min(s.Count - 1, (int)(s.Count * 0.99))], s[s.Count - 1], 100.0 * late / s.Count);
+        }
+
+        public static int ScrollBench(string outPath)
+        {
+            var lines = new List<string>();
+            Application.EnableVisualStyles();
+            ShowSettings();
+            var f = instance;
+            Action<int> pump = ms => { var sw = Stopwatch.StartNew(); while (sw.ElapsedMilliseconds < ms) { Application.DoEvents(); System.Threading.Thread.Sleep(1); } };
+            pump(600);
+            var dm = new VsyncDriver(f, () => { });
+            double refMs = dm.Dt * 1000.0; dm.Dispose();
+            lines.Add("refresh interval ms: " + refMs.ToString("0.00") + " (" + (1000.0 / refMs).ToString("0") + " Hz); window " + f.Width + "x" + f.Height);
+            benching = true;
+            foreach (bool nosnap in new[] { true, false })
+                foreach (string page in new[] { "general", "appearance", "dock", "menubar", "launchpad", "icons" })
+                {
+                    NoSnap = nosnap;
+                    f.GoTo(page, false); pump(500);
+                    bGap.Clear(); bCost.Clear(); bPaint.Clear();
+                    // a fast flick: 5 wheel notches per 16 ms frame-ish for ~1.2 s, then down/up
+                    for (int pass = 0; pass < 2; pass++)
+                    {
+                        int sign = pass == 0 ? -120 : 120;
+                        for (int i = 0; i < 40; i++) { f.Wheel(sign); pump(30); }
+                        pump(900);
+                    }
+                    lines.Add("");
+                    lines.Add("== page=" + page + " body=" + f.body.Height + "px snapshot=" + (!nosnap));
+                    lines.Add(Stats("  frame gap ms ", bGap, refMs));
+                    lines.Add(Stats("  step cost ms ", bCost, refMs));
+                    lines.Add(Stats("  snap paint ms", bPaint, refMs));
+                }
+            benching = false;
+            f.Height = 560; pump(400);
+            SetSide.BenchOn = true; SetSide.BGap.Clear(); SetSide.BPaint.Clear();
+            for (int pass = 0; pass < 2; pass++) { for (int i = 0; i < 40; i++) { f.side.Scroll(pass == 0 ? 60 : -60); pump(30); } pump(900); }
+            SetSide.BenchOn = false;
+            lines.Add(""); lines.Add("== sidebar content=" + f.side.BenchTotal + "px view=" + f.side.Height + "px");
+            lines.Add(Stats("  frame gap ms ", SetSide.BGap, refMs)); lines.Add(Stats("  paint ms     ", SetSide.BPaint, refMs));
+            File.WriteAllLines(outPath, lines.ToArray());
+            f.Close();
+            return 0;
+        }
+
+        internal void Wheel(int delta)
+        {
             // Accumulate fractional (touchpad) deltas and glide to the target instead of jumping a notch per tick.
             scrollTarget -= delta * 56f / 120f;
             ClampTarget();
             if (vsync == null)
                 vsync = new VsyncDriver(this, () =>
                 {
-                    double dt = vsyncClock.Next();
+                    var cw = Stopwatch.StartNew();
+                    double raw = vsyncClock.Next();
+                    if (benching) bGap.Add(raw * 1000.0);
+                    double dt = vsync.Frame(raw);
                     double d = scrollTarget - scrollF;
                     if (Math.Abs(d) < 0.5) { scrollF = scrollTarget; vsync.Sleep(); }
                     else scrollF += (float)(d * (1 - Math.Pow(0.7, dt * 1000.0 / 8.0))); // frame-rate independent ease
                     scroll = (int)Math.Round(scrollF);
                     ApplyScroll();
+                    if (!vsync.Active) EndSnap(); // glide finished: put the real controls back
+                    if (benching) { bCost.Add(cw.Elapsed.TotalMilliseconds); }
                 });
-            if (!vsync.Active) { scrollF = scroll; vsyncClock.Reset(); vsync.Wake(); }
-            return true;
+            if (!vsync.Active) { scrollF = scroll; BeginSnap(); vsyncClock.Reset(); vsync.Wake(); }
+        }
+
+        SnapView snap;
+
+        void BeginSnap()
+        {
+            EndSnap();
+            int w = body.Width, h = body.Height;
+            if (NoSnap || w < 1 || h <= viewport.Height || h > 14000) return;
+            try
+            {
+                var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                body.DrawToBitmap(bmp, new Rectangle(0, 0, w, h));
+                snap = new SnapView { Bmp = bmp, Off = scroll, Bounds = viewport.ClientRectangle };
+                viewport.Controls.Add(snap);
+                snap.BringToFront();
+                snap.Update();
+            }
+            catch { EndSnap(); }
+        }
+
+        void EndSnap()
+        {
+            if (snap == null) return;
+            var s = snap; snap = null;
+            body.Top = -scroll;
+            body.Update();
+            viewport.Controls.Remove(s);
+            s.Dispose();
         }
 
         float scrollF, scrollTarget;
@@ -1690,23 +1919,25 @@ namespace MacDock
             body.Controls.Clear();
             scroll = 0; scrollF = 0; scrollTarget = 0;
             if (vsync != null) vsync.Sleep();
+            EndSnap();
         }
 
         void Relayout()
         {
+            EndSnap();
             int w = viewport.Width - 2 * Margin;
             int y = 6;
             for (int i = 0; i < flow.Count; i++)
             {
                 Control c = flow[i];
                 string kind = c.Tag as string;
-                if (kind == "head") y += (i == 0 ? 0 : 20);
+                if (kind == "head") y += (i == 0 ? 0 : 26);
                 int h = c.Height;
                 if (kind == "grid") h = ((IFlowGrid)c).HeightFor(w);
                 if (kind == "note")
-                    h = TextRenderer.MeasureText(c.Text, c.Font, new Size(w - 8, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding).Height + 4;
+                    h = SetText.MeasureText(c.Text, c.Font, new Size(w - 8, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding).Height + 6;
                 c.SetBounds(Margin, y, w, h);
-                y += h + (kind == "head" ? 8 : (kind == "note" ? 18 : 10));
+                y += h + (kind == "head" ? 12 : 16);
             }
             body.Height = y + 16;
             body.Width = viewport.Width;
@@ -1719,13 +1950,14 @@ namespace MacDock
             if (scroll < 0) scroll = 0;
             if (scroll > max) scroll = max;
             ClampTarget();
+            if (snap != null) { if (snap.Off != scroll) { snap.Off = scroll; snap.Invalidate(); snap.Update(); /* paint right after the vsync wake so it lands in the next DWM frame */ } return; }
             if (body.Top != -scroll) body.Top = -scroll;
         }
 
         void Head(string text)
         {
             var l = new CrispLabel();
-            l.Text = text; l.Tag = "head"; l.AutoSize = false; l.Height = 24; l.UseMnemonic = false;
+            l.Text = text; l.Tag = "head"; l.AutoSize = false; l.Height = 30; l.UseMnemonic = false;
             l.Font = Typography.Text(12.5f, Weight.Semibold); l.ForeColor = SetUi.Text; l.BackColor = SetUi.Content;
             Add(l);
         }
@@ -1734,7 +1966,7 @@ namespace MacDock
         {
             var l = new CrispLabel();
             l.Text = text; l.Tag = "note"; l.AutoSize = false; l.UseMnemonic = false;
-            l.Font = Typography.Text(10f); l.ForeColor = SetUi.Dim; l.BackColor = SetUi.Content;
+            l.Font = Typography.Secondary(); l.ForeColor = SetUi.Dim; l.BackColor = SetUi.Content;
             Add(l);
             return l;
         }
@@ -2040,7 +2272,7 @@ namespace MacDock
             var tb = new TextBox();
             tb.BorderStyle = BorderStyle.None;
             tb.BackColor = SetUi.Card; tb.ForeColor = SetUi.Text;
-            tb.Font = Typography.Text(10.5f);
+            tb.Font = Typography.Body();
             tb.TextAlign = HorizontalAlignment.Right;
             tb.Width = 260;
             tb.UseSystemPasswordChar = secret;
@@ -2239,6 +2471,22 @@ namespace MacDock
                     Note("Settings are saved to dock.txt in " + AppPaths.DataDir + ". Dock pins, the icon map and downloaded icons live there too.");
                     break;
 
+                case "tray":
+                    Head("Tray icons shown in the menu bar");
+                    c = NewCard();
+                    {
+                        var traySel = TrayIcons.Selected();
+                        var trayItems = TrayIcons.Cached;
+                        foreach (TrayItem ti in trayItems)
+                        {
+                            TrayItem t2 = ti;
+                            Toggle(c, t2.Title + (t2.Hidden ? "  (hidden)" : ""), traySel.Contains(t2.Key), v => { TrayIcons.SetSelected(t2.Key, v); });
+                        }
+                        if (trayItems.Count == 0) Note("No tray icons scanned yet. Press Scan tray icons.");
+                        Link(c, "Scan tray icons (briefly opens the hidden-icons flyout)", null, () => TrayIcons.Scan(() => OnUi(() => BuildPage(current))));
+                    }
+                    break;
+
                 case "profile":
                     Head("Avatar");
                     var grid = new SetAvatarGrid();
@@ -2330,10 +2578,21 @@ namespace MacDock
                     Head("Menu bar & island");
                     c = NewCard();
                     Toggle(c, "Show Dynamic Island", SetCfg.GetBool("island", true), v => { SetCfg.SetBool("island", v); IslandForm.SetEnabled(v); });
+                    Toggle(c, "Show CPU usage in status bar", SetCfg.GetBool("stats-cpu", true), v => SetCfg.SetBool("stats-cpu", v));
+                    Toggle(c, "Show RAM usage in status bar", SetCfg.GetBool("stats-ram", true), v => SetCfg.SetBool("stats-ram", v));
                     Toggle(c, "Screenshot in status bar", ScreenCapture.BarShot, v => ScreenCapture.BarShot = v);
                     Toggle(c, "Screen record in status bar", ScreenCapture.BarRec, v => ScreenCapture.BarRec = v);
                     Toggle(c, "Screenshot tile in Control Center", ScreenCapture.TileShot, v => Panels.CcSetMember("shot", v));
                     Toggle(c, "Screen record tile in Control Center", ScreenCapture.TileRec, v => Panels.CcSetMember("rec", v));
+                    Head("Windows tray icons in the menu bar");
+                    c = NewCard();
+                    Toggle(c, "Show tray icons in the menu bar", TrayIcons.BarOn, v => { TrayIcons.BarOn = v; });
+                    Toggle(c, "Show the tray arrow", TrayIcons.Arrow, v => { TrayIcons.Arrow = v; });
+                    Toggle(c, "Collapsible tray icons (fold into a small handle)", TrayIcons.Collapsible, v => { TrayIcons.Collapsible = v; });
+                    Toggle(c, "Keep tray icons collapsed", TrayIcons.Collapsed, v => { TrayIcons.Collapsed = v; });
+                    Link(c, "Choose tray icons", TrayIcons.Selected().Count + " shown", () => GoTo("tray", true));
+                    Note("Pick which Windows tray icons appear in the menu bar, including the ones Windows hides in its overflow. Click an icon to send a left click to the original app, right-click for its menu. Windows 11 only exposes its tray through the on-screen icons, so scanning briefly opens the hidden-icons flyout; clicking an icon does the same for an instant.");
+                    c = NewCard();
                     Link(c, "Open Windows notification settings", null, () => SetUi.OpenTarget("ms-settings:notifications"));
                     Link(c, "Open Focus settings", null, () => SetUi.OpenTarget("ms-settings:quiethours"));
                     Note("The notification island and menu bar items follow your Windows notification and Focus settings.");

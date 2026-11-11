@@ -109,6 +109,8 @@ namespace MacDock
             int test = Array.FindIndex(args, a => a.Equals("/wt-selftest", StringComparison.OrdinalIgnoreCase));
             if (test >= 0 && test + 1 < args.Length) { Environment.ExitCode = WindowThemeTest.Run(args[test + 1]); return; }
 
+            { int sb = Array.FindIndex(args, a => a.Equals("--scroll-bench", StringComparison.OrdinalIgnoreCase)); if (sb >= 0 && sb + 1 < args.Length) { Environment.ExitCode = SettingsForm.ScrollBench(args[sb + 1]); return; } }
+
             // "MacDock.exe --send <file>" (Explorer right-click verb): queue the file for the LocalSend panel in the running dock.
             if (args.Length >= 2 && args[0].Equals("--send", StringComparison.OrdinalIgnoreCase)) { LocalSend.QueueSend(args.Skip(1).ToArray()); return; }
 
@@ -160,12 +162,13 @@ namespace MacDock
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Log("UNHANDLED (terminating=" + e.IsTerminating + ") " + e.ExceptionObject);
                 System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) => Log("UNOBSERVED " + e.Exception);
                 Microsoft.Win32.SystemEvents.SessionEnding += (s, e) => Log("SessionEnding reason=" + e.Reason);
-                Theme.Refresh();
+ Theme.Refresh();
                 Motion.Refresh();
                 SetUi.EnsureAutostart(); // rewritten every launch unless the user turned it off in Settings
                 Typography.Configure(AppPaths.Config);
 
-                var dock = new DockForm();
+ var dock = new DockForm();
+                dock.VisibleChanged += (s0, e0) => { if (dock.Visible) Log("READY dock visible " + (int)(DateTime.Now - Process.GetCurrentProcess().StartTime).TotalMilliseconds + " ms after process start"); };
                 var quitEvt = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, "MacDockQuitEvent");
                 new System.Threading.Thread(() =>
                 {
@@ -224,8 +227,7 @@ namespace MacDock
                 try
                 {
                     LocalSend.EnsureStarted();
-                    LocalSend.EnsureVerb();
-                    LocalSend.EnsureSendTo();
+                    { var lsT = new Timer { Interval = 4000 }; lsT.Tick += (s3, e3) => { lsT.Stop(); lsT.Dispose(); try { LocalSend.EnsureVerb(); LocalSend.EnsureSendTo(); } catch (Exception ex3) { Log(ex3); } }; lsT.Start(); } // shell integration: after the dock is up
                     LocalSend.WatchSends(id => bar.OpenPanel(id), bar);
                     bar.Show();
                     if (IslandForm.Enabled) island.Show(); else { island.Show(); island.Hide(); } // handle must exist so it can be re-shown live
@@ -262,7 +264,7 @@ namespace MacDock
                     MissionControl.PrewarmSoon(4000);
                     foreach (int ms in new[] { 1500, 3000, 4500, 6000, 8000, 10000, 13000, 16000, 20000, 25000, 30000 }) { var st = new Timer { Interval = ms }; st.Tick += (s2, e2) => { ((Timer)s2).Stop(); MemTrim.Now(true); }; st.Start(); startupTrims.Add(st); }
                     AppDomain.CurrentDomain.UnhandledException += (s, e) => { if (!QuitRequested) Relaunch(); };
-                    Application.Run(dock);
+ Application.Run(dock);
                 }
                 catch (Exception ex) { Log(ex); }
                 finally
@@ -498,6 +500,7 @@ namespace MacDock
         public Kind Kind;
         public string Target;
         public string Label;
+        public Bitmap WinIcon;  // a running web app window's own icon (fallback when no Start-menu icon is found)
         public string Aumid;    // AppUserModelID of the app's window, when running (Store apps, web apps...)
         public Entry Entry;     // null for running apps that are not pinned
         public int Section;     // 0 pinned apps, 1 running-only apps, 2 right-hand section
@@ -621,6 +624,7 @@ namespace MacDock
         readonly FrameClock clock = new FrameClock();
         VsyncDriver vsync;
         bool wasBusy;
+        double smoothX = double.NaN; long smoothTk; const double SmoothTau = 0.014;
 
         // Long press to rearrange: hold still on a pinned icon to pick it up, drag it sideways, release to drop it.
         const int HoldMs = 380, HoldTolerance = 4;
@@ -1114,7 +1118,7 @@ namespace MacDock
         // ---------- animation and layout ----------
 
         // Auto-hide: the dock slides away while a normal app window is in front, and comes back when the cursor
-        // rests on the bottom edge of the screen (about 150 ms) or while it stays over the dock. The cursor is
+        // rests on the bottom 3 px of the screen (about 150 ms) or while it stays over the dock. The cursor is
         // polled here, so the reveal works even while the dock window is hidden.
         bool revealed;
         DateTime edgeSince = DateTime.MaxValue;
@@ -1130,7 +1134,7 @@ namespace MacDock
             bool onDockScreen = screen == dockScreen;
 
             bool held = (Control.MouseButtons & (MouseButtons.Left | MouseButtons.Right)) != 0 && pressItem == null && dragItem == null && popup == null; // resizing a window must not reveal the dock
-            bool atEdge = onDockScreen && !held && p.Y >= dockScreen.Bottom - 3;
+            bool atEdge = onDockScreen && !held && p.Y >= dockScreen.Bottom - 3; // thin strip at the very bottom pixel rows, so app controls just above it never trigger
             if (atEdge)
             {
                 if (edgeSince == DateTime.MaxValue) edgeSince = DateTime.Now;
@@ -1213,16 +1217,28 @@ namespace MacDock
             // A button held that the dock didn't start (resizing/moving a window, dragging a selection) must not wake the dock:
             // no magnify, no window-preview popup while the cursor passes over it.
             bool foreignPress = (Control.MouseButtons & (MouseButtons.Left | MouseButtons.Right)) != 0 && pressItem == null && dragItem == null && dropIndex < 0 && popup == null;
-            bool nearDock = !away && !foreignPress && hideSpring.Value < 0.05 && ClientRectangle.Contains(local) && local.Y >= pillRect.Top - (MaxScale - 1) * BasePx - 4;
+            // Entering needs the cursor near the pill (app controls just above must not wake the dock); once icons are magnified the full height keeps them hoverable.
+            bool magnified = false;
+            for (int i = 0; i < n; i++) if (items[i].Scale > 1.02) { magnified = true; break; }
+            bool nearDock = !away && !foreignPress && hideSpring.Value < 0.05 && ClientRectangle.Contains(local) && local.Y >= pillRect.Top - (magnified ? (MaxScale - 1) * BasePx + 4 : 6);
+            // Magnify follows a time-based low-pass of the cursor X (sub-pixel, frame-rate independent) so integer
+            // cursor steps and uneven frame gaps don't show up as stepping in the icon sizes. Hover uses the raw X.
+            long nowTk = System.Diagnostics.Stopwatch.GetTimestamp();
+            double sdt = smoothTk == 0 ? 1 : Math.Min(0.05, (nowTk - smoothTk) / (double)System.Diagnostics.Stopwatch.Frequency);
+            smoothTk = nowTk;
+            if (!nearDock || Motion.Reduced || double.IsNaN(smoothX) || Math.Abs(smoothX - local.X) > BasePx * 4) smoothX = local.X;
+            else smoothX += (local.X - smoothX) * (1 - Math.Exp(-sdt / SmoothTau));
+            bool smoothBusy = nearDock && Math.Abs(smoothX - local.X) > 0.05;
+            if (!smoothBusy) smoothX = local.X;
             int hover = -1;
             for (int i = 0; i < n; i++)
             {
                 double center = baseLeft + baseX[i] + BasePx / 2.0;
-                double dist = Math.Abs(local.X - center);
+                double dist = Math.Abs(smoothX - center);
                 double t = dist / (BasePx * 2.2);
                 if (dragItem != null) items[i].Goal = items[i] == dragItem ? DragScale : 1; // no magnifying while rearranging
                 else items[i].Goal = nearDock && t < 1 ? 1 + (MaxScale - 1) * Math.Pow(Math.Cos(t * Math.PI / 2), 2) : 1;
-                if (dragItem == null && nearDock && dist < BasePx / 2.0) hover = i;
+                if (dragItem == null && nearDock && Math.Abs(local.X - center) < BasePx / 2.0) hover = i;
             }
 
             double dt;
@@ -1248,7 +1264,7 @@ namespace MacDock
 
                 if (StepBounce(it, dt)) busy = true;
             }
-            if (dragItem != null) busy = true; // follow the cursor every frame
+            if (dragItem != null || smoothBusy) busy = true; // follow the cursor every frame
             if (preview is DownloadsFan) busy = true; // the folder tile fades and bobs with the fan
 
             double hideTarget = away ? 1 : 0;
@@ -1649,7 +1665,7 @@ namespace MacDock
             var oldX = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             foreach (Item old in items) oldX[old.Key] = Left + old.Rect.Left; // on-screen position before the change
 
-            items = list;
+ items = list;
             foreach (Item fi in list) if (fi.Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(fi.Target)); // warm the fan caches
             if (hoverIndex >= items.Count) hoverIndex = -1;
             refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue || i.FocusUntil != DateTime.MinValue) ? 500 : 2000;
@@ -1712,6 +1728,8 @@ namespace MacDock
                     break;
                 }
             }
+            if (kind == Kind.App && Pwa.IsWebAppId(Pwa.IdOfTarget(target)) && running.TryGetValue(target, out win))
+                foreach (IntPtr h in win.Take(3)) { it.WinIcon = Pwa.WindowIcon(h); if (it.WinIcon != null) break; }
             it.Icon = GetIcon(it);
 
             List<IntPtr> handles;
@@ -2471,7 +2489,14 @@ namespace MacDock
             Bitmap bmp;
             if (!iconCache.TryGetValue(key, out bmp))
             {
-                bmp = BuildIcon(it);
+                // Disk cache for stable icons (not http site icons, which start as a globe, nor the changing Trash / coloured folders).
+                bool disk = it.Kind != Kind.Trash && it.Kind != Kind.Folder && !(it.Kind == Kind.Url && it.Target.StartsWith("http", StringComparison.OrdinalIgnoreCase));
+                bmp = disk ? IconDisk.TryLoad(key, it.Target) : null;
+                if (bmp == null)
+                {
+                    bmp = BuildIcon(it);
+                    if (disk) IconDisk.Save(key, it.Target, bmp);
+                }
                 iconCache[key] = bmp;
             }
             return bmp;
@@ -2505,7 +2530,10 @@ namespace MacDock
                 default:
                     if (ShellIcons.IsAppsFolderItem(it.Target))
                     {
-                        Bitmap webIcon = Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target)) ? Pwa.IconFor(it.Label) : null; // web apps keep their own icon
+                        bool isWeb = Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target));
+                        Bitmap webIcon = isWeb ? Pwa.IconFor(it.Label) : null; // web apps keep their own icon
+                        if (webIcon == null && it.WinIcon != null) webIcon = it.WinIcon; // else the icon the app's own window carries
+                        if (isWeb && webIcon == null) return Tile(Logo()); // never fall back to the browser's icon
                         return Tile(webIcon ?? ShellIcons.Load(it.Target, IconSource) ?? Logo());
                     }
 

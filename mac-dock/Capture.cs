@@ -89,7 +89,7 @@ namespace MacDock
         }
 
         // Small self-closing label at the top centre of the screen.
-        static void Toast(string text)
+        internal static void Toast(string text)
         {
             var t = new Thread(() =>
             {
@@ -100,7 +100,9 @@ namespace MacDock
                         FormBorderStyle = FormBorderStyle.None, ShowInTaskbar = false, TopMost = true, StartPosition = FormStartPosition.Manual,
                         BackColor = Color.FromArgb(32, 32, 36), Opacity = 0.94, Size = new Size(320, 40)
                     };
-                    var l = new Label { Text = text, ForeColor = Color.White, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 10f) };
+                    var l = new ToastLabel { Text = text, Font = Typography.Body(), Dock = DockStyle.Fill };
+                    using (var mg = f.CreateGraphics()) { int w = (int)Math.Ceiling(mg.MeasureString(text, l.Font, 2000, StringFormat.GenericTypographic).Width) + 48; f.Width = Math.Max(240, Math.Min(w, 640)); }
+                    f.Region = new Region(SetUi.Round(new RectangleF(0, 0, f.Width, f.Height), 12));
                     f.Controls.Add(l);
                     Rectangle wa = Screen.PrimaryScreen.WorkingArea;
                     f.Location = new Point(wa.Left + (wa.Width - f.Width) / 2, wa.Top + 40);
@@ -114,6 +116,21 @@ namespace MacDock
             t.SetApartmentState(ApartmentState.STA);
             t.IsBackground = true;
             t.Start();
+        }
+    }
+
+    // Toast text: grayscale anti-aliasing, centred, ellipsis instead of clipping.
+    sealed class ToastLabel : Control
+    {
+        public ToastLabel() { SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw, true); BackColor = Color.FromArgb(32, 32, 36); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(BackColor);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+            using (var b = new SolidBrush(Color.FromArgb(245, 245, 247)))
+                g.DrawString(Text, Font, b, new RectangleF(16, 0, Width - 32, Height), sf);
         }
     }
 }

@@ -209,11 +209,12 @@ namespace MacDock
         // In dark mode icons\dark\<name>.png wins when it exists; apps without a dark version keep their normal icon.
         static Bitmap Load(string name)
         {
+            if (!Theme.Light) { Bitmap dk = LoadFile("darkp|" + name, Path.Combine(AppPaths.ExeDir, "icons-dark", name + ".png")); if (dk != null) return dk; }
             Bitmap themed = LoadThemed(name);
             if (themed != null) return themed;
             if (!Theme.Light)
             {
-                Bitmap dark = LoadFile("dark|" + name, Path.Combine(Folder, "dark", name + ".png"));
+                Bitmap dark = LoadFile("dark|" + name, Path.Combine(Folder, "dark", name + ".png")) ?? LoadFile("darkp|" + name, Path.Combine(AppPaths.ExeDir, "icons-dark", name + ".png"));
                 if (dark != null) return dark;
             }
             return LoadFile(name, Path.Combine(Folder, name + ".png"));

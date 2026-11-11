@@ -92,3 +92,4 @@ Windows Apps	shell:AppsFolder\C:\Users\sidta\OneDrive\Desktop\Games
 Windows Apps	shell:AppsFolder\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\dfrgui.exe
 Windows Apps	shell:AppsFolder\Microsoft.Windows.ControlPanel
 Misc	shell:AppsFolder\{6D809377-6AF0-444B-8957-A3773F02200E}\WinRAR\Rar.txt
+Windows Apps	shell:AppsFolder\MicrosoftWindows.Client.CoreAI_cw5n1h2txyewy!ClickToDoApp

@@ -18,6 +18,7 @@ namespace MacDock
         public int Signal;
         public string Security;
         public bool Connected;
+        public string Auth;
     }
 
     static class DeviceFeed
@@ -145,7 +146,7 @@ namespace MacDock
                     if (last == null) continue;
 
                     Match auth = Regex.Match(line, @"^Authentication\s*:\s*(.+)$");
-                    if (auth.Success) { last.Security = auth.Groups[1].Value.Trim() == "Open" ? "Open" : "Secured"; continue; }
+                    if (auth.Success) { last.Auth = auth.Groups[1].Value.Trim(); last.Security = last.Auth == "Open" ? "Open" : "Secured"; continue; }
 
                     Match sig = Regex.Match(line, @"^Signal\s*:\s*(\d+)%");
                     if (sig.Success && last.Signal == 0) last.Signal = int.Parse(sig.Groups[1].Value);
@@ -158,8 +159,62 @@ namespace MacDock
             return result.OrderByDescending(n => n.Connected).ThenByDescending(n => n.Signal).ToList();
         }
 
-        static string Run(string file, string args)
+        // Disconnects from the current network. Returns an error text, or null on success.
+        public static string Disconnect()
         {
+            try { Run("netsh", "wlan disconnect"); return null; }
+            catch (Exception e) { return e.Message; }
+        }
+
+        // Connects to a network: a saved profile is used as is; otherwise an open network gets a profile, and a secured one
+        // asks for the password first. Returns an error text, or null when the connect request went through.
+        public static string Connect(WifiNetwork n)
+        {
+            try
+            {
+                string profiles = Run("netsh", "wlan show profiles");
+                bool known = Regex.IsMatch(profiles, @":\s*" + Regex.Escape(n.Name) + @"\s*$", RegexOptions.Multiline);
+                if (!known)
+                {
+                    string key = null;
+                    if (n.Security != "Open")
+                    {
+                        key = Microsoft.VisualBasic.Interaction.InputBox("Password for \"" + n.Name + "\":", "Wi-Fi", "");
+                        if (string.IsNullOrEmpty(key)) return null;
+                    }
+                    string err = AddProfile(n, key);
+                    if (err != null) return err;
+                }
+                string outp = Run("netsh", "wlan connect name=\"" + n.Name + "\" ssid=\"" + n.Name + "\"");
+                return outp.Contains("successfully") ? null : "Could not connect";
+            }
+            catch (Exception e) { return e.Message; }
+        }
+
+        static string AddProfile(WifiNetwork n, string key)
+        {
+            string name = System.Security.SecurityElement.Escape(n.Name);
+            string sec;
+            if (key == null) sec = "<authEncryption><authentication>open</authentication><encryption>none</encryption><useOneX>false</useOneX></authEncryption>";
+            else
+            {
+                string a = n.Auth != null && n.Auth.Contains("WPA3") ? "WPA3SAE" : "WPA2PSK";
+                sec = "<authEncryption><authentication>" + a + "</authentication><encryption>AES</encryption><useOneX>false</useOneX></authEncryption>" +
+                      "<sharedKey><keyType>passphrase</keyType><protected>false</protected><keyMaterial>" + System.Security.SecurityElement.Escape(key) + "</keyMaterial></sharedKey>";
+            }
+            string xml = "<?xml version=\"1.0\"?><WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\"><name>" + name + "</name><SSIDConfig><SSID><name>" + name +
+                         "</name></SSID></SSIDConfig><connectionType>ESS</connectionType><connectionMode>auto</connectionMode><MSM><security>" + sec + "</security></MSM></WLANProfile>";
+            string file = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wifi-profile.tmp.xml");
+            try
+            {
+                System.IO.File.WriteAllText(file, xml);
+                string outp = Run("netsh", "wlan add profile filename=\"" + file + "\" user=current");
+                return outp.Contains("added") ? null : "Could not save the network";
+            }
+            finally { try { System.IO.File.Delete(file); } catch { } }
+        }
+
+        static string Run(string file, string args)        {
             var psi = new ProcessStartInfo(file, args)
             {
                 UseShellExecute = false,
@@ -175,6 +230,99 @@ namespace MacDock
         }
     }
 
+    sealed class BtDevice
+    {
+        public string Name;
+        public ulong Address;
+        public bool Connected;
+    }
+
+    // Paired Bluetooth devices with connect / disconnect, through the Win32 Bluetooth APIs (bthprops.cpl):
+    // a device is connected by enabling its audio / headset / HID services and disconnected by disabling them.
+    static class BtClassic
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct SYSTEMTIME { public ushort a, b, c, d, e, f, g, h; }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct DEVICE_INFO
+        {
+            public uint dwSize;
+            public ulong Address;
+            public uint ulClassofDevice;
+            public int fConnected, fRemembered, fAuthenticated;
+            public SYSTEMTIME stLastSeen, stLastUsed;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 248)] public string szName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SEARCH_PARAMS
+        {
+            public uint dwSize;
+            public int fReturnAuthenticated, fReturnRemembered, fReturnUnknown, fReturnConnected, fIssueInquiry;
+            public byte cTimeoutMultiplier;
+            public IntPtr hRadio;
+        }
+
+        [DllImport("bthprops.cpl", CharSet = CharSet.Unicode)] static extern IntPtr BluetoothFindFirstDevice(ref SEARCH_PARAMS p, ref DEVICE_INFO d);
+        [DllImport("bthprops.cpl", CharSet = CharSet.Unicode)] static extern bool BluetoothFindNextDevice(IntPtr h, ref DEVICE_INFO d);
+        [DllImport("bthprops.cpl")] static extern bool BluetoothFindDeviceClose(IntPtr h);
+        [DllImport("bthprops.cpl", CharSet = CharSet.Unicode)] static extern uint BluetoothSetServiceState(IntPtr radio, ref DEVICE_INFO d, ref Guid service, uint flags);
+
+        static readonly string[] Services = { "0000110b", "0000110e", "0000111e", "00001108", "00001124" }; // A2DP sink, AVRCP, Handsfree, Headset, HID
+
+        static List<DEVICE_INFO> Enumerate()
+        {
+            var list = new List<DEVICE_INFO>();
+            var sp = new SEARCH_PARAMS { fReturnAuthenticated = 1, fReturnRemembered = 1, fReturnConnected = 1 };
+            sp.dwSize = (uint)Marshal.SizeOf(typeof(SEARCH_PARAMS));
+            var di = new DEVICE_INFO();
+            di.dwSize = (uint)Marshal.SizeOf(typeof(DEVICE_INFO));
+            IntPtr h = BluetoothFindFirstDevice(ref sp, ref di);
+            if (h == IntPtr.Zero) return list;
+            try
+            {
+                do { list.Add(di); di.dwSize = (uint)Marshal.SizeOf(typeof(DEVICE_INFO)); }
+                while (BluetoothFindNextDevice(h, ref di));
+            }
+            finally { BluetoothFindDeviceClose(h); }
+            return list;
+        }
+
+        public static List<BtDevice> Paired()
+        {
+            var r = new List<BtDevice>();
+            try
+            {
+                foreach (DEVICE_INFO d in Enumerate())
+                    if (!string.IsNullOrWhiteSpace(d.szName) && (d.fAuthenticated != 0 || d.fConnected != 0))
+                        r.Add(new BtDevice { Name = d.szName, Address = d.Address, Connected = d.fConnected != 0 });
+            }
+            catch { }
+            return r.OrderByDescending(x => x.Connected).ThenBy(x => x.Name).ToList();
+        }
+
+        public static bool SetConnected(ulong address, bool connect)
+        {
+            try
+            {
+                foreach (DEVICE_INFO dev in Enumerate())
+                {
+                    if (dev.Address != address) continue;
+                    DEVICE_INFO d = dev;
+                    foreach (string sv in Services)
+                    {
+                        Guid g = new Guid(sv + "-0000-1000-8000-00805f9b34fb");
+                        BluetoothSetServiceState(IntPtr.Zero, ref d, ref g, 0);
+                        if (connect) BluetoothSetServiceState(IntPtr.Zero, ref d, ref g, 1);
+                    }
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+    }
     // Master volume of the default output device (Core Audio).
     static class Audio
     {

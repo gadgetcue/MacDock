@@ -115,6 +115,21 @@ namespace MacDock
             return lastSet >= 0 ? lastSet : StrengthFromRegistry();
         }
 
+        // The stored registry copy goes stale on current Windows 11 builds, so the real slider value is read from Settings
+        // (hidden) once, in the background, the first time the panel opens. Returns the value or -1.
+        public static bool NeedsRead { get { return lastSet < 0; } }
+        public static void ReadActual()
+        {
+            StrengthSession ses = null;
+            try
+            {
+                ses = OpenStrength();
+                if (ses != null && lastSet < 0) lastSet = (int)Math.Round(ses.Slider.Current.Value);
+            }
+            catch (Exception e) { Log("read: " + e.Message); }
+            finally { CloseStrength(ses); }
+        }
+
         static int StrengthFromRegistry()
         {
             try
@@ -141,23 +156,47 @@ namespace MacDock
         static bool sRunning;
         static int lastSet = -1;
 
-        // Windows ignores edits to the stored strength, so the value is set the way the user would: on the Strength slider of
-        // Settings > Night light, through UI Automation, with that window parked off screen and closed again. Slider drags
-        // are collapsed: the newest value is applied once the slider has been still for a moment.
+        // Drags are collapsed: the newest value wins. The hidden Settings window stays open while values keep arriving.
         public static void SetStrengthLatest(int pct)
         {
             lastSet = pct;
             lock (sGate) { sWanted = pct; if (sRunning) return; sRunning = true; }
             Task.Run(() =>
             {
-                while (true)
+                StrengthSession ses = null;
+                try
                 {
-                    System.Threading.Thread.Sleep(450);
-                    int v;
-                    lock (sGate) { v = sWanted; sWanted = -1; if (v < 0) { sRunning = false; return; } }
-                    SetStrength(v);
+                    int idle = 0;
+                    while (true)
+                    {
+                        System.Threading.Thread.Sleep(ses == null ? 450 : 60);
+                        int v;
+                        lock (sGate)
+                        {
+                            v = sWanted;
+                            if (v >= 0) sWanted = -1;
+                            else if (ses == null || idle >= 2000) { sRunning = false; return; }
+                        }
+                        if (v < 0) { idle += 60; continue; }
+                        idle = 0;
+                        try
+                        {
+                            if (ses == null) ses = OpenStrength();
+                            if (ses == null) { Log("gave up setting " + v); continue; }
+                            ses.Slider.SetValue(v);
+                            Log("set " + v + " -> " + ses.Slider.Current.Value);
+                        }
+                        catch (Exception e) { Log("retry: " + e.Message); CloseStrength(ses); ses = null; }
+                    }
                 }
+                finally { CloseStrength(ses); }
             });
+        }
+
+        sealed class StrengthSession
+        {
+            public System.Windows.Automation.AutomationElement Win;
+            public System.Windows.Automation.RangeValuePattern Slider;
         }
 
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
@@ -167,44 +206,37 @@ namespace MacDock
             try { System.IO.File.AppendAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "nightlight.log"), DateTime.Now.ToString("HH:mm:ss ") + m + "\r\n"); } catch { }
         }
 
-        static void SetStrength(int pct)
+        static void CloseStrength(StrengthSession s)
+        {
+            if (s == null) return;
+            try { ((System.Windows.Automation.WindowPattern)s.Win.GetCurrentPattern(System.Windows.Automation.WindowPattern.Pattern)).Close(); } catch { }
+        }
+
+        // Windows ignores edits to the stored strength, so the value is set the way the user would: on the Strength slider of
+        // Settings > Night light, through UI Automation, with that window parked off screen.
+        static StrengthSession OpenStrength()
         {
             var AE = System.Windows.Automation.AutomationElement.RootElement;
             var byName = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Settings");
             var strength = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Strength");
             var isSlider = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Slider);
             var both = new System.Windows.Automation.AndCondition(strength, isSlider);
-            System.Windows.Automation.AutomationElement win = null;
-            bool opened = false, done = false;
-            try
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ms-settings:nightlight") { UseShellExecute = true });
+            for (int i = 0; i < 100; i++)
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ms-settings:nightlight") { UseShellExecute = true });
-                for (int i = 0; i < 80 && !done; i++)
+                System.Threading.Thread.Sleep(100);
+                try
                 {
-                    System.Threading.Thread.Sleep(150);
-                    try
-                    {
-                        System.Windows.Automation.AutomationElement w = AE.FindFirst(System.Windows.Automation.TreeScope.Children, byName);
-                        if (w == null) continue;
-                        if (win == null) { win = w; opened = true; }
-                        try { SetWindowPos((IntPtr)w.Current.NativeWindowHandle, IntPtr.Zero, -32000, -32000, 0, 0, 0x0001 | 0x0004 | 0x0010); } catch { }
-                        System.Windows.Automation.AutomationElement slider = w.FindFirst(System.Windows.Automation.TreeScope.Descendants, both);
-                        if (slider == null) continue;
-                        var rv = (System.Windows.Automation.RangeValuePattern)slider.GetCurrentPattern(System.Windows.Automation.RangeValuePattern.Pattern);
-                        rv.SetValue(pct);
-                        System.Threading.Thread.Sleep(300);
-                        done = Math.Abs(rv.Current.Value - pct) < 2;
-                        Log("set " + pct + " -> " + rv.Current.Value);
-                    }
-                    catch (Exception e) { Log("retry: " + e.Message); }
+                    System.Windows.Automation.AutomationElement w = AE.FindFirst(System.Windows.Automation.TreeScope.Children, byName);
+                    if (w == null) continue;
+                    try { SetWindowPos((IntPtr)w.Current.NativeWindowHandle, IntPtr.Zero, -32000, -32000, 0, 0, 0x0001 | 0x0004 | 0x0010); } catch { }
+                    System.Windows.Automation.AutomationElement slider = w.FindFirst(System.Windows.Automation.TreeScope.Descendants, both);
+                    if (slider == null) continue;
+                    return new StrengthSession { Win = w, Slider = (System.Windows.Automation.RangeValuePattern)slider.GetCurrentPattern(System.Windows.Automation.RangeValuePattern.Pattern) };
                 }
-                if (!done) Log("gave up setting " + pct);
+                catch (Exception e) { Log("retry: " + e.Message); }
             }
-            catch (Exception e) { Log("error: " + e); }
-            finally
-            {
-                try { if (win != null && opened) ((System.Windows.Automation.WindowPattern)win.GetCurrentPattern(System.Windows.Automation.WindowPattern.Pattern)).Close(); } catch { }
-            }
+            return null;
         }
 
         public static bool Set(bool on)
