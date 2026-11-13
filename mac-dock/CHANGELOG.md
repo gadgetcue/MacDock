@@ -1,6 +1,6 @@
 ﻿# Changelog
 
-## v1.10
+## v2.0
 ### Added
 - **Use original app icons** toggle (Settings > Icons): show each app's own icon instead of the MacDock icon pack; per-app choice and custom icons from the right-click menu.
 - **Folders dropped on a dock icon are pinned** instead of being opened with the app; hold Shift or Ctrl to move or copy into a folder icon.
