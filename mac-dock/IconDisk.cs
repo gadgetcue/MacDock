@@ -34,7 +34,7 @@ namespace MacDock
 
         static string PathFor(string key, string target)
         {
-            string stamp = BaseStamp() + "|" + key;
+            string stamp = BaseStamp() + "|ic" + IconChoice.Version + IconChoice.GlobalOriginal + "|" + key;
             try { if (!string.IsNullOrEmpty(target) && File.Exists(target)) stamp += "|" + File.GetLastWriteTimeUtc(target).Ticks; } catch { }
             using (var sha = SHA1.Create())
             {
@@ -48,7 +48,7 @@ namespace MacDock
             try
             {
                 string p = PathFor(key, target);
-                if (!File.Exists(p) || File.GetLastWriteTimeUtc(p) < DateTime.UtcNow.AddDays(-7)) return null; // weekly refresh, so a one-off fallback icon doesn't stick
+                if (!File.Exists(p) || File.GetLastWriteTimeUtc(p) < DateTime.UtcNow.AddDays(-1)) return null; // daily refresh, so a one-off fallback icon doesn't stick
                 using (var fs = new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.Read))
                 using (var img = Image.FromStream(fs, false, false))
                     return new Bitmap(img); // detached copy: no file lock, no stream dependency

@@ -460,6 +460,9 @@ namespace MacDock
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+        [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
+        public delegate bool EnumChildProc(IntPtr h, IntPtr lp);
+        [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc p, IntPtr lp);
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
@@ -1615,6 +1618,7 @@ namespace MacDock
             Dictionary<string, List<IntPtr>> running = EnumerateRunningWindows();
             var previous = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
             foreach (Item old in items) previous[old.Key] = old;
+            prevKeys = new HashSet<string>(previous.Keys, StringComparer.OrdinalIgnoreCase);
 
             var list = new List<Item>();
             var pinnedApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1730,7 +1734,7 @@ namespace MacDock
             }
             if (kind == Kind.App && Pwa.IsWebAppId(Pwa.IdOfTarget(target)) && running.TryGetValue(target, out win))
                 foreach (IntPtr h in win.Take(3)) { it.WinIcon = Pwa.WindowIcon(h); if (it.WinIcon != null) break; }
-            it.Icon = GetIcon(it);
+            it.Icon = GetIcon(it, runKey != null && prevKeys.Count > 0 && !prevKeys.Contains(it.Key));
 
             List<IntPtr> handles;
             if (runKey != null && running.TryGetValue(runKey, out handles)) it.Handles = handles;
@@ -2222,6 +2226,11 @@ namespace MacDock
                 list.Add(MenuEntry.Sep());
             }
 
+            if (it != null && it.Kind == Kind.App)
+            {
+                IconChoice.AddMenu(list, it.Target, ItemNames.Display(it.Target, it.Label), this);
+                list.Add(MenuEntry.Sep());
+            }
             if (it != null && (it.Kind == Kind.App || it.Kind == Kind.Folder || it.Kind == Kind.Url || it.Kind == Kind.File))
             {
                 Item rn = it;
@@ -2359,6 +2368,15 @@ namespace MacDock
             return i >= 0 && items[i].Kind == Kind.Trash;
         }
 
+        // Folders dropped on a dock icon are pinned (not opened with the app or moved into a folder icon); hold Shift/Ctrl to move/copy into a folder icon instead.
+        static bool PinsFolders(string[] files, Item target, int keyState)
+        {
+            if (files == null || files.Length == 0) return false;
+            foreach (string f in files) if (!Directory.Exists(f)) return false;
+            if (target.Kind == Kind.Folder && (keyState & 12) != 0) return false;
+            return true;
+        }
+
         static DragDropEffects Pick(DragDropEffects allowed, params DragDropEffects[] prefer)
         {
             foreach (DragDropEffects p in prefer) if ((allowed & p) != 0) return p;
@@ -2377,10 +2395,12 @@ namespace MacDock
                 Item it = items[i];
                 DragDropEffects eff = DragDropEffects.None;
                 if (it.Kind == Kind.Trash) eff = Pick(e.AllowedEffect, DragDropEffects.Move, DragDropEffects.Copy);
+                else if (PinsFolders(files, it, e.KeyState)) eff = Pick(e.AllowedEffect, DragDropEffects.Copy, DragDropEffects.Link, DragDropEffects.Move);
                 else if (it.Kind == Kind.Folder) eff = DockDrop.Choose(files, Environment.ExpandEnvironmentVariables(it.Target), e.KeyState, e.AllowedEffect);
                 else if (it.Kind == Kind.App && DockDrop.CanOpenWith(it.Target)) eff = Pick(e.AllowedEffect, DragDropEffects.Copy, DragDropEffects.Link, DragDropEffects.Move);
                 else eff = Pick(e.AllowedEffect, DragDropEffects.Copy, DragDropEffects.Link, DragDropEffects.Move); // anything else just pins the file
-                if (it.Kind == Kind.Trash || it.Kind == Kind.Folder || it.Kind == Kind.App && DockDrop.CanOpenWith(it.Target))
+                if (it.Kind != Kind.Trash && PinsFolders(files, it, e.KeyState)) e.Effect = eff;
+                else if (it.Kind == Kind.Trash || it.Kind == Kind.Folder || it.Kind == Kind.App && DockDrop.CanOpenWith(it.Target))
                 {
                     e.Effect = eff;
                     if (eff != DragDropEffects.None) hot = it;
@@ -2420,6 +2440,11 @@ namespace MacDock
                 {
                     // Deferred so the drag source (Explorer) isn't blocked while confirmation/progress UI shows.
                     BeginInvoke((Action)(() => { RecycleBin.Delete(dropped); RebuildItems(); }));
+                    return;
+                }
+                if (target.Kind != Kind.Trash && PinsFolders(dropped, target, e.KeyState))
+                {
+                    foreach (string f in dropped) AddPath(f);
                     return;
                 }
                 if (target.Kind == Kind.Folder)
@@ -2482,28 +2507,54 @@ namespace MacDock
 
         // ---------- icons ----------
 
-        Bitmap GetIcon(Item it)
+        readonly Dictionary<string, KeyValuePair<long, DateTime>> iconStamp = new Dictionary<string, KeyValuePair<long, DateTime>>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> prevKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        static long FileStamp(string path)
+        {
+            try { if (!string.IsNullOrEmpty(path) && path.Length > 2 && path[1] == ':' && File.Exists(path)) return File.GetLastWriteTimeUtc(path).Ticks; } catch { }
+            return 0;
+        }
+
+        Bitmap GetIcon(Item it, bool force = false)
         {
             bool shared = (it.Kind == Kind.Url && !it.Target.StartsWith("http", StringComparison.OrdinalIgnoreCase)) || it.Kind == Kind.Start || it.Kind == Kind.Mission || it.Kind == Kind.Launchpad;
             string key = shared ? "@" + it.Kind : it.Kind == Kind.Trash ? "@Trash" + RecycleBin.IsFull() : it.Target;
             Bitmap bmp;
-            if (!iconCache.TryGetValue(key, out bmp))
+            // Refresh: the exe changed on disk, the entry is 10 minutes old, or a new window just appeared.
+            if (iconCache.TryGetValue(key, out bmp) && !shared && it.Kind != Kind.Trash && it.Kind != Kind.Folder)
+            {
+                KeyValuePair<long, DateTime> st;
+                if (force || !iconStamp.TryGetValue(key, out st) || st.Key != FileStamp(it.Target) || DateTime.UtcNow - st.Value > TimeSpan.FromMinutes(10))
+                {
+                    iconCache.Remove(key); // the old bitmap is left to the GC: an item on screen may still draw it
+                    force = true;
+                    bmp = null;
+                }
+            }
+            if (bmp == null)
             {
                 // Disk cache for stable icons (not http site icons, which start as a globe, nor the changing Trash / coloured folders).
                 bool disk = it.Kind != Kind.Trash && it.Kind != Kind.Folder && !(it.Kind == Kind.Url && it.Target.StartsWith("http", StringComparison.OrdinalIgnoreCase));
-                bmp = disk ? IconDisk.TryLoad(key, it.Target) : null;
+                bmp = disk && !force ? IconDisk.TryLoad(key, it.Target) : null;
                 if (bmp == null)
                 {
                     bmp = BuildIcon(it);
                     if (disk) IconDisk.Save(key, it.Target, bmp);
                 }
                 iconCache[key] = bmp;
+                iconStamp[key] = new KeyValuePair<long, DateTime>(FileStamp(it.Target), DateTime.UtcNow);
             }
             return bmp;
         }
 
         static Bitmap BuildIcon(Item it)
         {
+            if (it.Kind == Kind.App)
+            {
+                Bitmap cust = IconChoice.Custom(it.Target, it.Label);
+                if (cust != null) return Tile(cust);
+            }
             // An installed icon pack wins when it has a macOS counterpart for this app.
             Bitmap packed = IconPack.ForItem(it.Kind, it.Target, it.Label);
             if (packed != null) return packed;
@@ -3013,13 +3064,28 @@ namespace MacDock
                     if (title.ToString() != "MacDock Settings") return true;
                 }
 
+                // Owned windows (dialogs, pop-ups) are not taskbar buttons unless they ask for one, like the native taskbar.
+                if ((ex & WS_EX_APPWINDOW) == 0 && NativeMethods.GetWindow(hWnd, 4) != IntPtr.Zero) return true; // GW_OWNER
+
                 string exe;
-                if (!pathByPid.TryGetValue(pid, out exe))
+                if (cls == "ApplicationFrameWindow")
+                {
+                    // A UWP / Settings window is hosted by ApplicationFrameHost.exe; the real app owns a CoreWindow child.
+                    uint childPid = 0, hostPid = pid;
+                    NativeMethods.EnumChildWindows(hWnd, (c, lp) =>
+                    {
+                        uint cp; NativeMethods.GetWindowThreadProcessId(c, out cp);
+                        if (cp != 0 && cp != hostPid) { childPid = cp; return false; }
+                        return true;
+                    }, IntPtr.Zero);
+                    if (childPid != 0) pid = childPid;
+                }
+                if (!pathByPid.TryGetValue(pid, out exe) || exe == null)
                 {
                     exe = ProcessPath(pid);
-                    pathByPid[pid] = exe;
+                    if (exe != null) pathByPid[pid] = exe; // a failed lookup (elevated / protected process) is retried next refresh
                 }
-                if (exe == null) return true;
+                if (exe == null) exe = "elevated:" + cls; // access denied: still list the window, grouped by class
 
                 // A Brave / Edge / Chrome web app is its own app: group its windows under its AppsFolder id, not under
                 // the browser's exe, so it neither merges into the browser nor into other web apps.

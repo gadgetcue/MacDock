@@ -410,6 +410,8 @@ namespace MacDock
             {
                 foreach (Tile t in work)
                 {
+                    Bitmap cust = IconChoice.Custom(t.Target, t.Name);
+                    if (cust != null) { Bitmap ct = DockForm.Tile(cust); lock (tileIconCache) tileIconCache[t.Target] = ct; t.Icon = ct; dirty = true; continue; }
                     bool webApp = Pwa.IsWebAppId(Pwa.IdOfTarget(t.Target)); // a Brave / Edge / Chrome web app keeps its own icon
                     Bitmap packed = webApp ? null : IconPack.ForName(t.Name); // macOS icon, if the pack has one for this app
                     if (packed != null) { lock (tileIconCache) tileIconCache[t.Target] = packed; t.Icon = packed; dirty = true; continue; }
@@ -433,6 +435,18 @@ namespace MacDock
             Preload();
         }
 
+        // The icon choice changed: forget every tile icon, reload, and refill any open or pre-built overview.
+        public static void IconsChanged()
+        {
+            lock (tileIconCache) { tileIconCache.Clear(); iconsFailed.Clear(); iconsLoading.Clear(); }
+            foreach (MissionControl mc in new[] { current, spare })
+            {
+                if (mc == null || mc.IsDisposed || mc.disposedFlag) continue;
+                try { mc.allTiles.Clear(); mc.BuildTiles(); mc.LayoutAll(); mc.dirty = true; mc.lastStaticKey = int.MinValue; } catch { }
+            }
+            Preload();
+        }
+
         public static void Preload()
         {
             var t = new Thread(() =>
@@ -445,6 +459,8 @@ namespace MacDock
                     string target = ShellIcons.AppsFolderPrefix + app.Value;
                     lock (tileIconCache) if (tileIconCache.ContainsKey(target) || iconsFailed.Contains(target) || !iconsLoading.Add(target)) continue;
                     bool webApp = Pwa.IsWebAppId(app.Value);
+                    Bitmap custom = IconChoice.Custom(target, app.Key);
+                    if (custom != null) { lock (tileIconCache) tileIconCache[target] = DockForm.Tile(custom); continue; }
                     Bitmap bmp = webApp ? null : IconPack.ForName(app.Key);
                     if (bmp == null)
                     {
@@ -816,11 +832,13 @@ namespace MacDock
 
         // ---------- animation ----------
 
+        // Frame-time logs write files from inside the frame loop, which itself drops frames; keep off outside profiling.
+        const bool PerfLog = false;
         void FlushAnimLog()
         {
             int n = animN; animN = 0;
             if (n < 2) return;
-            try
+            if (PerfLog) try
             {
                 double min = double.MaxValue, max = 0, sum = 0;
                 for (int i = 0; i < n; i++) { double v = animDt[i] * 1000; if (v < min) min = v; if (v > max) max = v; sum += v; }
@@ -874,7 +892,7 @@ namespace MacDock
                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 Render();
                 perfN++; perfSum += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; perfDt += dt;
-                if (perfN == 60) { try { System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "launchpad_perf.txt"), string.Format("mask {6:0.0} tiles {7:0.0} foot {8:0.0} bg {3:0.0} blit {4:0.0} present {5:0.0} | render avg {0:0.0} ms, frame dt avg {1:0.0} ms, vsync dt {2:0.0} ms\r\n", perfSum / 60, perfDt / 60 * 1000, vsync.Dt * 1000, pBg * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pBlit * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pPresent * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pMask * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pTiles * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pFoot * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60)); pBg = pBlit = pPresent = pMask = pTiles = pFoot = 0; } catch { } perfN = 0; perfSum = 0; perfDt = 0; }
+                if (perfN == 60) { if (PerfLog) try { System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "launchpad_perf.txt"), string.Format("mask {6:0.0} tiles {7:0.0} foot {8:0.0} bg {3:0.0} blit {4:0.0} present {5:0.0} | render avg {0:0.0} ms, frame dt avg {1:0.0} ms, vsync dt {2:0.0} ms\r\n", perfSum / 60, perfDt / 60 * 1000, vsync.Dt * 1000, pBg * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pBlit * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pPresent * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pMask * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pTiles * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60, pFoot * 1000.0 / System.Diagnostics.Stopwatch.Frequency / 60)); pBg = pBlit = pPresent = pMask = pTiles = pFoot = 0; } catch { } perfN = 0; perfSum = 0; perfDt = 0; }
             }
             else if (moving)
             {
@@ -995,7 +1013,7 @@ namespace MacDock
             if (!firstLogged && tTrig != 0 && !closing && prog > 0)
             {
                 firstLogged = true; double F = System.Diagnostics.Stopwatch.Frequency / 1000.0; long n = System.Diagnostics.Stopwatch.GetTimestamp();
-                try { System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\launchpad_anim.txt", string.Format("{0:s} trigger->first frame {1:0.0} ms (ctor shot+blur {2:0.0}, tiles+layout {3:0.0}, rest {4:0.0}) [tiles {5:0.0}, layout {6:0.0}, blurwait {7:0.0}, show->render {8:0.0}, render {9:0.0}{10} renders {11} firstPres->now {12:0.0} prog {13:0.00}{14}]\r\n", DateTime.Now, (n - tTrig) / F, (tShot - tTrig) / F, (tBuilt - tShot) / F, (n - tBuilt) / F, (tTiles - tShot) / F, (tLay - tTiles) / F, (tBuilt - tLay) / F, (tRend - tBuilt) / F, (n - tRend) / F, rdbg, nRender, (n - tFirstPres) / F, prog, stepLog)); } catch { }
+                if (PerfLog) try { System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\launchpad_anim.txt", string.Format("{0:s} trigger->first frame {1:0.0} ms (ctor shot+blur {2:0.0}, tiles+layout {3:0.0}, rest {4:0.0}) [tiles {5:0.0}, layout {6:0.0}, blurwait {7:0.0}, show->render {8:0.0}, render {9:0.0}{10} renders {11} firstPres->now {12:0.0} prog {13:0.00}{14}]\r\n", DateTime.Now, (n - tTrig) / F, (tShot - tTrig) / F, (tBuilt - tShot) / F, (n - tBuilt) / F, (tTiles - tShot) / F, (tLay - tTiles) / F, (tBuilt - tLay) / F, (tRend - tBuilt) / F, (n - tRend) / F, rdbg, nRender, (n - tFirstPres) / F, prog, stepLog)); } catch { }
             }
             double e = Eased;
             byte a = (byte)Math.Max(0, Math.Min(255, (int)Math.Round(FadeEased * 255)));
@@ -2198,6 +2216,8 @@ namespace MacDock
             else
             {
                 list.Add(MenuEntry.Item("Open", null, () => LaunchTile(t)));
+                IconChoice.AddMenu(list, t.Target, t.Name, this);
+                list.Add(MenuEntry.Sep());
                 list.Add(MenuEntry.Item(LaunchpadPins.Contains(PinKey(t)) ? "Unpin from Top Row" : "Pin to Top Row", null, () => TogglePinRow(t)));
                 bool pinned = IsPinned(t);
                 list.Add(MenuEntry.Item(pinned ? "Remove from Dock" : "Add to Dock", null, () => TogglePin(t)));

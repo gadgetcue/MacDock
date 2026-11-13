@@ -135,6 +135,7 @@ namespace MacDock
         public static Bitmap ForItem(Kind kind, string target, string label)
         {
             if (!Enabled) return null;
+            if (kind == Kind.App && IconChoice.UseOriginal(target, label)) return null;
             switch (kind)
             {
                 case Kind.Mission: return Load("Mission Control");
@@ -160,6 +161,7 @@ namespace MacDock
         public static Bitmap ForName(string appName)
         {
             if (!Enabled || string.IsNullOrEmpty(appName)) return null;
+            if (IconChoice.UseOriginal(null, appName)) return null;
             return ForKeys(new[] { appName });
         }
 

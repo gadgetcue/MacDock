@@ -1152,7 +1152,7 @@ namespace MacDock
         public static bool BenchOn; public static readonly List<double> BGap = new List<double>(), BPaint = new List<double>();
         public int BenchTotal { get { return Total(); } }
 
-        float offF, offTarget;
+        float offF, offTarget; Spring offS = new Spring(0);
         VsyncDriver vsync; readonly FrameClock clock = new FrameClock();
 
         // Wheel input moves a target; a vsync-timed loop (monitor refresh rate, delta-time easing) glides the offset to it.
@@ -1163,13 +1163,13 @@ namespace MacDock
                 vsync = new VsyncDriver(this, () =>
                 {
                     double rawS = clock.Next(); if (BenchOn) BGap.Add(rawS * 1000.0); double dt = vsync.Frame(rawS);
-                    double d = offTarget - offF;
-                    if (Math.Abs(d) < 0.5) { offF = offTarget; vsync.Sleep(); }
-                    else offF += (float)(d * (1 - Math.Pow(0.7, dt * 1000.0 / 8.0)));
+                    offS.Step(offTarget, SettingsForm.ScrollOmega, 1, dt);
+                    if (offS.IsSettled(offTarget, 0.5)) { offS.Snap(offTarget); vsync.Sleep(); }
+                    offF = (float)offS.Value;
                     int n = (int)Math.Round(offF);
                     if (n != off) { off = n; scrollInval = true; Invalidate(); scrollInval = false; Update(); }
                 });
-            if (!vsync.Active) { offF = off; offTarget = Math.Max(0, Math.Min(Math.Max(0, Total() - Height), off + delta)); clock.Reset(); vsync.Wake(); }
+            if (!vsync.Active) { offF = off; offS.Snap(off); offTarget = Math.Max(0, Math.Min(Math.Max(0, Total() - Height), off + delta)); clock.Reset(); vsync.Wake(); }
         }
 
         int IndexAt(int y)
@@ -1830,7 +1830,7 @@ namespace MacDock
                         pump(900);
                     }
                     lines.Add("");
-                    lines.Add("== page=" + page + " body=" + f.body.Height + "px snapshot=" + (!nosnap));
+                    lines.Add("== page=" + page + " body=" + f.body.Height + "px view=" + f.viewport.Height + "px snapshot=" + (!nosnap));
                     lines.Add(Stats("  frame gap ms ", bGap, refMs));
                     lines.Add(Stats("  step cost ms ", bCost, refMs));
                     lines.Add(Stats("  snap paint ms", bPaint, refMs));
@@ -1859,18 +1859,23 @@ namespace MacDock
                     double raw = vsyncClock.Next();
                     if (benching) bGap.Add(raw * 1000.0);
                     double dt = vsync.Frame(raw);
-                    double d = scrollTarget - scrollF;
-                    if (Math.Abs(d) < 0.5) { scrollF = scrollTarget; vsync.Sleep(); }
-                    else scrollF += (float)(d * (1 - Math.Pow(0.7, dt * 1000.0 / 8.0))); // frame-rate independent ease
+                    // Critically damped spring: speed builds and decays continuously, so notches blend into one glide.
+                    scrollS.Step(scrollTarget, ScrollOmega, 1, dt);
+                    if (scrollS.IsSettled(scrollTarget, 0.5)) { scrollS.Snap(scrollTarget); vsync.Sleep(); }
+                    scrollF = (float)scrollS.Value;
                     scroll = (int)Math.Round(scrollF);
                     ApplyScroll();
-                    if (!vsync.Active) EndSnap(); // glide finished: put the real controls back
+                    if (!vsync.Active) snapTimer.Start(); // glide finished: real controls come back shortly, unless the wheel turns again
                     if (benching) { bCost.Add(cw.Elapsed.TotalMilliseconds); }
                 });
-            if (!vsync.Active) { scrollF = scroll; BeginSnap(); vsyncClock.Reset(); vsync.Wake(); }
+            if (snapTimer == null) { snapTimer = new System.Windows.Forms.Timer { Interval = 260 }; snapTimer.Tick += (s, e) => { if (vsync == null || !vsync.Active) EndSnap(); else snapTimer.Stop(); }; }
+            snapTimer.Stop();
+            // The page snapshot is costly to take, so one taken for the previous notch is reused instead of re-taken per notch.
+            if (!vsync.Active) { scrollF = scroll; scrollS.Snap(scroll); if (snap == null) BeginSnap(); vsyncClock.Reset(); vsync.Wake(); }
         }
 
-        SnapView snap;
+        SnapView snap; System.Windows.Forms.Timer snapTimer;
+        internal const double ScrollOmega = 24; // rad/s: one notch settles in about a quarter second
 
         void BeginSnap()
         {
@@ -1882,6 +1887,7 @@ namespace MacDock
                 var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
                 body.DrawToBitmap(bmp, new Rectangle(0, 0, w, h));
                 snap = new SnapView { Bmp = bmp, Off = scroll, Bounds = viewport.ClientRectangle };
+                snap.MouseDown += (s, e) => { scrollTarget = scroll; if (vsync != null) vsync.Sleep(); EndSnap(); }; // a click stops the glide and frees the controls
                 viewport.Controls.Add(snap);
                 snap.BringToFront();
                 snap.Update();
@@ -1891,6 +1897,7 @@ namespace MacDock
 
         void EndSnap()
         {
+            if (snapTimer != null) snapTimer.Stop();
             if (snap == null) return;
             var s = snap; snap = null;
             body.Top = -scroll;
@@ -1899,7 +1906,7 @@ namespace MacDock
             s.Dispose();
         }
 
-        float scrollF, scrollTarget;
+        float scrollF, scrollTarget; Spring scrollS = new Spring(0);
         VsyncDriver vsync; readonly FrameClock vsyncClock = new FrameClock();
 
         void ClampTarget()
@@ -2508,6 +2515,10 @@ namespace MacDock
                     Toggle(c, "Match Windows appearance", theme == "system", v => { SetCfg.Set("theme", v ? "system" : (SetUi.Dark ? "dark" : "light"), false); ReapplyTheme(); });
                     Toggle(c, "Dark mode", SetUi.Dark, v => { SetCfg.Set("theme", v ? "dark" : "light", false); DarkMode.Set(v); ReapplyTheme(); });
                     Note("Dark mode also switches Windows apps to dark or light. This window, its sidebar icons and the colours follow it. Saved as @theme dark, light or system in dock.txt.");
+                    Head("Icons");
+                    c = NewCard();
+                    Toggle(c, "Use original app icons", SetCfg.GetBool("original-icons", false), v => { SetCfg.SetBool("original-icons", v); IconChoice.Changed(); });
+                    Note("Shows each app's own icon instead of MacDock's replacement icon pack. Right-click an app in the dock or Launchpad to choose per app or pick a custom icon. Saved as @original-icons in dock.txt.");
                     Head("Typography");
                     c = NewCard();
                     Field(c, "Font", SetCfg.Get("font"), null, false, v => SetCfg.Set("font", v.Length == 0 ? null : v, true));

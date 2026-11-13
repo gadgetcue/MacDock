@@ -50,6 +50,7 @@ namespace MacDock
         Point anchor; Rectangle full;   // anchor + bounds the backdrop covers
         bool dragMode;                  // opened while a file drag was in progress (button held)
         int dwellIdx = -1; DateTime dwellSince;
+        DateTime leftSince = DateTime.MinValue, lastPrune = DateTime.UtcNow;
 
         public WindowPreview(List<IntPtr> windows, Bitmap icon, Point anchorTopCenter, Action<IntPtr> focus, Func<Point, bool> keepOpen, Action closed)
         {
@@ -106,6 +107,13 @@ namespace MacDock
         {
             Tile t = tiles[i];
             try { Win32.PostMessage(t.Window, WinUtil.WM_CLOSE, IntPtr.Zero, IntPtr.Zero); } catch { }
+            RemoveDead(i);
+        }
+
+        // Drops tile i (its window is closing or gone) and relayouts; the card hides when none remain.
+        void RemoveDead(int i)
+        {
+            Tile t = tiles[i];
             if (t.Thumb != IntPtr.Zero) { DwmUnregisterThumbnail(t.Thumb); t.Thumb = IntPtr.Zero; }
             tiles.RemoveAt(i);
             hover = -1; xHot = false;
@@ -125,6 +133,8 @@ namespace MacDock
             full = Bounds;
             if (surface != null) { surface.Dispose(); surface = null; }
             host.Bounds = Bounds;
+            // Cells moved: drop every registered thumbnail so SetupThumbs re-places them at the new positions.
+            foreach (Tile o in tiles) { if (o.Thumb != IntPtr.Zero) { DwmUnregisterThumbnail(o.Thumb); o.Thumb = IntPtr.Zero; } o.Box = Rectangle.Empty; }
             SetupThumbs();
             Redraw();
         }
@@ -206,7 +216,18 @@ namespace MacDock
             Rectangle zone = Rectangle.Inflate(Bounds, 6, 0);
             zone.Height += 76; // the gap down to the dock icon keeps the popup open
             bool over = Bounds.Contains(sp);
-            if (!over && !keepOpen(sp) && !zone.Contains(sp)) { Close(); return; }
+            if (!over && !keepOpen(sp) && !zone.Contains(sp))
+            {
+                if (leftSince == DateTime.MinValue) leftSince = DateTime.UtcNow;
+                if ((DateTime.UtcNow - leftSince).TotalMilliseconds >= 150) { Close(); return; }
+            }
+            else leftSince = DateTime.MinValue;
+            if ((DateTime.UtcNow - lastPrune).TotalMilliseconds >= 400)
+            {
+                lastPrune = DateTime.UtcNow;
+                for (int i = tiles.Count - 1; i >= 0; i--)
+                    if (!NativeMethods.IsWindow(tiles[i].Window)) { RemoveDead(i); if (IsDisposed || !Visible) return; }
+            }
 
             int idx = -1;
             if (over)
