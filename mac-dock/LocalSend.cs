@@ -667,7 +667,14 @@ namespace MacDock
                     {
                         string dl = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "LocalSend");
                         try { if (File.Exists(FolderFile)) { string saved = File.ReadAllText(FolderFile).Trim(); if (saved.Length > 0) dl = saved; } } catch { }
-                        var n = new LocalSendNode(53317, Environment.MachineName, dl, Path.Combine(AppPaths.DataDir, "localsend.pfx"));
+                        // 53317 is the protocol default, but the LocalSend app (or a stale instance) may already hold it: fall back to the next free port (peers learn it from the announce).
+                        LocalSendNode n = null; Exception last = null;
+                        for (int port = 53317; port < 53327 && n == null; port++)
+                        {
+                            var cand = new LocalSendNode(port, Environment.MachineName, dl, Path.Combine(AppPaths.DataDir, "localsend.pfx"));
+                            try { cand.Start(); n = cand; } catch (Exception ex) { last = ex; try { cand.Stop(); } catch { } }
+                        }
+                        if (n == null) throw last ?? new Exception("no free port");
                         n.Confirm = (who, count, summary) =>
                             AutoAccept ? true : MessageBox.Show(who + " wants to send you " + count + (count == 1 ? " file" : " files") + ":\r\n\r\n" + summary + "\r\n\r\nAccept?\r\nSaved to: " + n.SaveDir,
                                 "LocalSend", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1, (MessageBoxOptions)0x40000) == DialogResult.Yes;
@@ -677,10 +684,9 @@ namespace MacDock
                             try { Process.Start("explorer.exe", "/select,\"" + paths[0] + "\""); } catch { }
                         };
                         n.Log = s => { try { Program.Log("localsend " + s); } catch { } };
-                        n.Start();
                         node = n;
                     }
-                    catch (Exception ex) { Status = "Port 53317 busy (is the LocalSend app running?)"; Program.Log("localsend start: " + ex.Message); }
+                    catch (Exception ex) { Status = "LocalSend could not open a network port (ports 53317-53326 busy)"; Program.Log("localsend start: " + ex.Message); }
                     return node;
                 }
             }
@@ -719,7 +725,7 @@ namespace MacDock
             t.Start();
         }
 
-        // ---- Explorer "Share with MacDock LocalSend" verb: files queued by `MacDock.exe --send <path>` wait here until a device is picked.
+        // ---- Explorer "Send with LocalSend" verb: files queued by `MacDock.exe --send <path>` wait here until a device is picked.
         public static readonly List<string> Pending = new List<string>();
         const string VerbKey = @"Software\Classes\*\shell\MacDockLocalSend";
         static string SpoolDir { get { return Path.Combine(AppPaths.DataDir, "ls-send"); } }
@@ -730,8 +736,8 @@ namespace MacDock
             try
             {
                 string want = "\"" + Path.GetFullPath(Application.ExecutablePath) + "\" --send \"%1\"";
-                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(VerbKey + @"mmand"))
-                    if (k != null && string.Equals(k.GetValue("") as string, want, StringComparison.Ordinal)) return;
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(VerbKey + @"\command"))
+                    if (k != null && string.Equals(k.GetValue("") as string, want, StringComparison.Ordinal)) { using (var pk = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(VerbKey)) if (pk != null && (pk.GetValue("") as string) == "Send with LocalSend") return; }
             }
             catch { }
             SetVerb(true);
@@ -750,7 +756,7 @@ namespace MacDock
                 string exe = Path.GetFullPath(Application.ExecutablePath);
                 using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(VerbKey))
                 {
-                    k.SetValue("", "Share with MacDock LocalSend");
+                    k.SetValue("", "Send with LocalSend");
                     k.SetValue("Icon", "\"" + exe + "\"");
                     using (var c = k.CreateSubKey("command")) c.SetValue("", "\"" + exe + "\" --send \"%1\"");
                 }
@@ -775,31 +781,29 @@ namespace MacDock
         // Dock side: wait for the event, give Explorer ~700 ms to deliver the rest of a multi-selection, then open the panel.
         public static void WatchSends(Action<string> navigate, Control ui)
         {
-            var evt = new EventWaitHandle(false, EventResetMode.AutoReset, "MacDockSendEvent");
-            var t = new Thread(() =>
+            // Polls the spool folder on the UI thread (a 1 s timer is cheap); a short settle tick lets Explorer deliver a whole multi-selection.
+            int settle = 0;
+            var tm = new System.Windows.Forms.Timer { Interval = 700 };
+            tm.Tick += (s, e) =>
             {
-                bool first = true;
-                while (true)
+                try
                 {
-                    if (first) { first = false; Thread.Sleep(3000); if (!Directory.Exists(SpoolDir) || Directory.GetFiles(SpoolDir).Length == 0) continue; }
-                    else { evt.WaitOne(); Thread.Sleep(700); }
-                    try
+                    if (!Directory.Exists(SpoolDir)) return;
+                    string[] spool = Directory.GetFiles(SpoolDir, "*.txt");
+                    if (spool.Length == 0) { settle = 0; return; }
+                    if (settle++ < 1) return;
+                    settle = 0;
+                    var got = new List<string>();
+                    foreach (string f in spool)
                     {
-                        if (!Directory.Exists(SpoolDir)) continue;
-                        var got = new List<string>();
-                        foreach (string f in Directory.GetFiles(SpoolDir, "*.txt"))
-                        {
-                            try { string p = File.ReadAllText(f).Trim(); File.Delete(f); if (File.Exists(p) && !got.Contains(p)) got.Add(p); } catch { }
-                        }
-                        if (got.Count == 0) continue;
-                        lock (Pending) { foreach (string p in got) if (!Pending.Contains(p)) Pending.Add(p); }
-                        Status = Pending.Count + (Pending.Count == 1 ? " file" : " files") + " ready to send";
-                        ui.BeginInvoke(new Action(() => navigate("localsend")));
+                        try { string p = File.ReadAllText(f).Trim(); File.Delete(f); if (File.Exists(p) && !got.Contains(p)) got.Add(p); } catch (Exception rex) { Program.Log(rex); }
                     }
-                    catch { }
+                    if (got.Count == 0) return;
+                    LocalSendPopup.Open(got.ToArray());
                 }
-            }) { IsBackground = true };
-            t.Start();
+                catch (Exception ex) { Program.Log(ex); }
+            };
+            tm.Start();
         }
 
         // Sends the queued files to the chosen device (no picker).
@@ -821,7 +825,8 @@ namespace MacDock
         {
             try
             {
-                string lnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\SendTo", "MacDock LocalSend.lnk");
+                try { File.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\SendTo", "AirDrop (MacDock).lnk")); } catch { }
+                string lnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\SendTo", "Send with LocalSend.lnk");
                 string exe = Path.GetFullPath(Application.ExecutablePath);
                 Type t = Type.GetTypeFromProgID("WScript.Shell");
                 dynamic sh = Activator.CreateInstance(t);
@@ -831,7 +836,7 @@ namespace MacDock
                     if (string.Equals((string)cur.TargetPath, exe, StringComparison.OrdinalIgnoreCase) && (string)cur.Arguments == "--send") return;
                 }
                 dynamic s = sh.CreateShortcut(lnk);
-                s.TargetPath = exe; s.Arguments = "--send"; s.IconLocation = exe + ",0"; s.Description = "Send with MacDock LocalSend";
+                s.TargetPath = exe; s.Arguments = "--send"; s.IconLocation = exe + ",0"; s.Description = "Send with LocalSend";
                 s.Save();
             }
             catch (Exception ex) { Program.Log("localsend sendto: " + ex.Message); }

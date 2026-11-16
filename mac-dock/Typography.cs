@@ -149,7 +149,7 @@ namespace MacDock
                     else style = FontStyle.Bold;
                 }
                 FontFamily priv = null;
-                if (privateFonts && !SystemHas(name)) privateMap.TryGetValue(name + "|" + (style == FontStyle.Bold ? "Bold" : "Regular"), out priv);
+                if (privateFonts && (bundled.Contains(name) || !SystemHas(name))) privateMap.TryGetValue(name + "|" + (style == FontStyle.Bold ? "Bold" : "Regular"), out priv);
                 font = priv != null ? new Font(priv, points, style, GraphicsUnit.Point) : new Font(name, points, style, GraphicsUnit.Point);
                 cache[key] = font;
                 return font;

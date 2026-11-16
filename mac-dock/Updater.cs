@@ -21,7 +21,7 @@ namespace MacDock
             var t = new Thread(() =>
             {
                 try { Do(); }
-                catch (Exception e) { MacDockProgram_Log(e); ScreenCapture.Toast("Update failed: " + e.Message); }
+                catch (Exception e) { MacDockProgram_Log(e); try { ScreenCapture.Toast("Update failed: " + e.Message); } catch { } }
                 finally { busy = 0; }
             });
             t.IsBackground = true;
@@ -97,7 +97,20 @@ namespace MacDock
             ScreenCapture.Toast("Updated to " + tag + " - restarting...");
             Thread.Sleep(1500);
             // Restart through the MacDockGuard task once this instance has exited.
-            Process.Start(new ProcessStartInfo("cmd.exe", "/c ping -n 4 127.0.0.1 >nul & schtasks /Run /TN MacDockGuard") { CreateNoWindow = true, UseShellExecute = false });
+            // Only quit if the restart could really be scheduled; otherwise roll back and keep the dock running.
+            bool relaunch = false;
+            try
+            {
+                using (var en = Process.Start(new ProcessStartInfo("schtasks.exe", "/Change /TN MacDockGuard /ENABLE") { CreateNoWindow = true, UseShellExecute = false })) en.WaitForExit(8000);
+                Process.Start(new ProcessStartInfo("cmd.exe", "/c ping -n 4 127.0.0.1 >nul & schtasks /Run /TN MacDockGuard") { CreateNoWindow = true, UseShellExecute = false });
+                relaunch = true;
+            }
+            catch (Exception e) { MacDockProgram_Log(e); }
+            if (!relaunch)
+            {
+                try { File.Delete(staged); File.Move(exe, staged); File.Move(old, exe); } catch (Exception e) { MacDockProgram_Log(e); }
+                throw new Exception("could not schedule restart; update rolled back");
+            }
             Program.QuitRequested = true;
             Environment.Exit(0);
         }

@@ -16,8 +16,8 @@ namespace MacDock
         {
             try
             {
-                if (collect) GC.Collect(2, GCCollectionMode.Forced, true);
-                SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
+                var sw = Stopwatch.StartNew(); if (collect) GC.Collect(2, GCCollectionMode.Forced, true);
+                SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1)); Program.Slow("MemTrim", sw);
             }
             catch { }
         }

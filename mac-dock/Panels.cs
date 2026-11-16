@@ -107,6 +107,7 @@ namespace MacDock
         readonly Point anchor;
         readonly Action closed;
         readonly Timer timer = new Timer();
+        VsyncDriver vd;
         // Opening is a slightly under-damped spring (a hint of overshoot); closing is critically damped so the
         // panel never swings back past zero.
         const double OpenOmega = 24, OpenZeta = 0.72, CloseOmega = 30, CloseZeta = 1.0;
@@ -117,7 +118,9 @@ namespace MacDock
         readonly Font big = Typography.Display(26f, Weight.Semibold);
         readonly Font small = Typography.Caption();
         readonly Font tileTitle = Typography.Heading();
-        static readonly Font glyphFont = new Font("Segoe MDL2 Assets", 12f, FontStyle.Regular, GraphicsUnit.Point);
+        static readonly Font glyphFont = MakeGlyph();
+        static Font MakeGlyph() { var sw = System.Diagnostics.Stopwatch.StartNew(); Font f = null; try { string ff = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts", "segmdl2.ttf"); if (System.IO.File.Exists(ff)) { glyphPfc = new System.Drawing.Text.PrivateFontCollection(); glyphPfc.AddFontFile(ff); f = new Font(glyphPfc.Families[0], 12f, FontStyle.Regular, GraphicsUnit.Point); } } catch { f = null; } if (f == null) f = new Font("Segoe MDL2 Assets", 12f, FontStyle.Regular, GraphicsUnit.Point); Program.Slow("glyphFont", sw); return f; }
+        static System.Drawing.Text.PrivateFontCollection glyphPfc; // private copy: a lookup by name walks every installed font, which froze the UI for seconds
         readonly ImageAttributes fade = new ImageAttributes();
         readonly FrameClock clock = new FrameClock();
         readonly Stopwatch fadeWatch = Stopwatch.StartNew(); // times the menu-style fade; no blur window, the panel is opaque
@@ -161,6 +164,7 @@ namespace MacDock
             CaptureBackdrop();
             Relayout(true);
 
+            vd = new VsyncDriver(this, Step);
             timer.Interval = 16;
             timer.Tick += (s, e) => Step();
             timer.Start();
@@ -188,6 +192,7 @@ namespace MacDock
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             timer.Stop();
+            if (vd != null) vd.Dispose();
             base.OnFormClosed(e);
             MemTrim.Soon(400);
             if (closed != null) closed();
@@ -327,7 +332,7 @@ namespace MacDock
             goal = 0;
             fadeStart = fadeWatch.Elapsed.TotalMilliseconds;
             clock.Reset();
-            timer.Interval = 16;
+            if (!vd.Active) { timer.Stop(); vd.Wake(); }
         }
 
         // ---------- layout ----------
@@ -411,6 +416,8 @@ namespace MacDock
         // Launchpad / All Apps glass: blurred backdrop, fixed dark tint (alpha 96), thin white rim. No sheen.
         internal static readonly Color LaunchpadTint = Color.FromArgb(96, 36, 38, 48);
         internal static void DrawLaunchpadGlass(Graphics g, Rectangle rc, float radius, Bitmap backdrop, Point backdropOrigin)
+        { var swG = System.Diagnostics.Stopwatch.StartNew(); DrawLaunchpadGlass0(g, rc, radius, backdrop, backdropOrigin); Program.Slow("glass fill", swG); }
+        static void DrawLaunchpadGlass0(Graphics g, Rectangle rc, float radius, Bitmap backdrop, Point backdropOrigin)
         {
             using (GraphicsPath pp = Layered.RoundedRect(rc, radius))
             {
@@ -932,7 +939,8 @@ namespace MacDock
             tilesMoved |= StepLayout(dt);
             if (tilesMoved) RenderContent();
             if (!settled || dragging != null || tilesMoved) Compose(); // nothing to redraw while the panel just sits there
-            timer.Interval = settled && dragging == null && !tilesMoved ? 40 : 16;
+            if (settled && dragging == null && !tilesMoved) { if (vd.Active) vd.Sleep(); timer.Interval = 40; if (!timer.Enabled) timer.Start(); }
+            else if (!vd.Active) { timer.Stop(); vd.Wake(); } // moving: one step per refresh of this monitor
 
             if (ticks % 2 == 0) PollInput();
         }
@@ -1316,7 +1324,13 @@ namespace MacDock
             else if (id == "bluetooth") Background(panel, () => BluetoothRows(panel));
             else if (id == "nightlight" && NightLight.NeedsRead) Background(panel, () => { NightLight.ReadActual(); return NightLightRows(); });
             else if (id == "sound") Background(panel, () => { string def; List<string> outs = DeviceFeed.AudioOutputs(out def); return SoundRows(outs, def); });
-            else if (id == "control") { ccEdit = false; Background(panel, () => ControlRows(panel)); }
+            else if (id == "control")
+            {
+                ccEdit = false;
+                // Cached values paint the panel at once; the live pass (Wi-Fi scan, WMI, radios) then replaces them.
+                if (ccWarm) Background(panel, () => ControlRows(panel, true));
+                Background(panel, () => ControlRows(panel));
+            }
             else if (id == "localsend") Background(panel, () => LocalSendRows(panel));
             return panel;
         }
@@ -1372,7 +1386,7 @@ namespace MacDock
                 clr.Click = () => { lock (LocalSend.Pending) LocalSend.Pending.Clear(); Background(panel, () => LocalSendRows(panel, true)); };
                 rows.Add(clr);
             }
-            if (peers.Count == 0) rows.Add(PanelRow.Info("None found", "Open LocalSend on another device"));
+            if (peers.Count == 0) rows.Add(PanelRow.Info("None found", "Open LocalSend on iPhone, iPad or Mac"));
             foreach (LsPeer p in peers.Take(8))
             {
                 LsPeer peer = p;
@@ -1699,22 +1713,67 @@ namespace MacDock
 
         static bool ccEdit;
 
-        static List<PanelRow> ControlRows(GlassPanel panel)
+        // Custom tile names: persisted as "id=name|id=name" in the "ccnames" setting.
+        static Dictionary<string, string> ccNames = CcLoadNames();
+        static Dictionary<string, string> CcLoadNames()
+        {
+            var d = new Dictionary<string, string>();
+            string v = SetCfg.Get("ccnames");
+            if (v == null) return d;
+            foreach (string p in v.Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int i = p.IndexOf('=');
+                if (i > 0 && i < p.Length - 1) d[p.Substring(0, i)] = p.Substring(i + 1);
+            }
+            return d;
+        }
+        static void CcRename(string id)
+        {
+            CcTile t = CcCatalog.First(c => c.Id == id);
+            string cur = ccNames.ContainsKey(id) ? ccNames[id] : t.Name;
+            string n = Microsoft.VisualBasic.Interaction.InputBox("Tile name (leave empty to reset):", "Rename tile", cur);
+            if (n == null) return;
+            n = n.Replace("|", " ").Replace("=", " ").Replace("\r", " ").Replace("\n", " ").Trim();
+            if (n.Length == 0 || n == t.Name) ccNames.Remove(id); else ccNames[id] = n;
+            SetCfg.Set("ccnames", string.Join("|", ccNames.Select(k => k.Key + "=" + k.Value).ToArray()), true);
+        }
+
+        static volatile bool ccWarm;
+        static bool? ccWifi, ccBt;
+        static string ccSsid;
+        static int ccBright = -1;
+
+        // Called once at startup (background): loads WinRT/WMI/Wi-Fi so the first click on Control Center is instant.
+        public static void WarmControlCenter()
+        {
+            Task.Run(() => { try { ControlRows(null); } catch { } });
+        }
+
+        static List<PanelRow> ControlRows(GlassPanel panel, bool quick = false)
         {
             bool edit = ccEdit;
             List<string> ids = CcLoad();
             var st = new CcState { Edit = edit };
-            if (ids.Contains("wifi") || ids.Contains("airplane")) st.Wifi = DeviceFeed.RadioOn("WiFi");
-            if (ids.Contains("bluetooth") || ids.Contains("airplane")) st.Bluetooth = DeviceFeed.RadioOn("Bluetooth");
-            if (!edit && st.Wifi == true && ids.Contains("wifi"))
-                try { WifiNetwork cur = Wifi.Scan().FirstOrDefault(n => n.Connected); if (cur != null) st.Ssid = cur.Name; } catch { }
-            int brightness = Brightness.Get();
+            int brightness;
+            if (quick)
+            {
+                st.Wifi = ccWifi; st.Bluetooth = ccBt; st.Ssid = ccSsid; brightness = ccBright;
+            }
+            else
+            {
+                if (ids.Contains("wifi") || ids.Contains("airplane")) st.Wifi = DeviceFeed.RadioOn("WiFi");
+                if (ids.Contains("bluetooth") || ids.Contains("airplane")) st.Bluetooth = DeviceFeed.RadioOn("Bluetooth");
+                if (!edit && st.Wifi == true && ids.Contains("wifi"))
+                    try { WifiNetwork cur = Wifi.Scan().FirstOrDefault(n => n.Connected); if (cur != null) st.Ssid = cur.Name; } catch { }
+                brightness = Brightness.Get();
+                ccWifi = st.Wifi; ccBt = st.Bluetooth; ccSsid = st.Ssid; ccBright = brightness; ccWarm = true;
+            }
             float volume = Audio.Volume;
 
             const int W = 330, Col = 160, Gap = 10, Row = 64;
             int xr = W - Col;
             var rows = new List<PanelRow>();
-            Action refresh = () => Background(panel, () => ControlRows(panel));
+            Action refresh = () => { if (panel != null) Background(panel, () => ControlRows(panel)); };
 
             int yl = 0, yr = 0;
             foreach (string id in ids)
@@ -1736,6 +1795,7 @@ namespace MacDock
                     int cx = x0, cw = cellW;
                     if (cells.Length == 2) { cw = Row; cx = x0 + (i == 0 ? 0 : cellW - Row); }
                     c.Key = id + "#" + i;
+                    if (cells.Length == 1 && ccNames.ContainsKey(id) && c.Kind != RowKind.Media) c.Text = ccNames[id];
                     if (edit)
                     {
                         if (c.Kind == RowKind.Tile) { c.Sub = ""; c.Active = false; c.Anim = 0; }
@@ -1750,6 +1810,9 @@ namespace MacDock
                     string sizeLabel = t.Tall ? ((size & 1) != 0 ? "W" : "T") : new[] { "S", "W", "T", "L" }[size & 3];
                     rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Key = id + "!x", Text = "×", KeepOpen = true,
                         Click = () => { CcSetMember(removeId, false); refresh(); } }, x0 + 6, y0 + 6, 26, 22));
+                    if (cells.Length == 1 && t.Id != "now")
+                        rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Key = id + "!r", Text = "✎", KeepOpen = true,
+                            Click = () => { CcRename(removeId); refresh(); } }, x0 + 36, y0 + 6, 26, 22));
                     rows.Add(PanelRow.At(new PanelRow { Kind = RowKind.Chip, Key = id + "!s", Text = sizeLabel, KeepOpen = true,
                         Click = () => { CcCycleSize(removeId); refresh(); } }, x0 + cellW - 32, y0 + 6, 26, 22));
                     // Grip in the bottom-right corner: drag right/left for wide/narrow, down/up for tall/short.

@@ -1338,7 +1338,7 @@ namespace MacDock
             var f = instance;
             Point home = f.Location;
             var sw = Stopwatch.StartNew();
-            var t = new System.Windows.Forms.Timer { Interval = 15 };
+            var t = new FrameTimer(f);
             t.Tick += (s, e) =>
             {
                 if (f.IsDisposed || f.WindowState != FormWindowState.Normal) { t.Dispose(); if (!f.IsDisposed) f.Opacity = 1; return; }
@@ -1363,7 +1363,7 @@ namespace MacDock
                 fadingOut = true;
                 double start = Opacity;
                 var sw = Stopwatch.StartNew();
-                var t = new System.Windows.Forms.Timer { Interval = 15 };
+                var t = new FrameTimer(this);
                 t.Tick += (s, ev) =>
                 {
                     double k = Math.Min(1.0, sw.ElapsedMilliseconds / 160.0);
@@ -1537,7 +1537,7 @@ namespace MacDock
             fadeCover = cover;
             Controls.Add(cover);
             cover.BringToFront();
-            var t = new System.Windows.Forms.Timer { Interval = 15 };
+            var t = new FrameTimer(this);
             var sw = Stopwatch.StartNew();
             t.Tick += (s, e) =>
             {
@@ -2035,20 +2035,22 @@ namespace MacDock
             return card.Add(row);
         }
 
+        bool sysReady, sysBusy; int sBr = -1; bool? sNight, sWifi, sBt; float sVol = -1; bool sMuted;
+
         void DisplayControls()
         {
             Head("Display");
             SetCard c = NewCard();
-            int br = Brightness.Get();
+            int br = sBr;
             SliderRow(c, "Brightness", br < 0 ? 0.5 : br / 100.0, br >= 0, v => Brightness.SetLatest((int)Math.Round(v * 100)));
-            bool? night = NightLight.IsOn();
+            bool? night = sNight;
             if (night.HasValue) ToggleAsync(c, "Night light", night, on => NightLight.Set(on), "Windows refused the Night light change.", null);
             else Open(c, "Night light", "ms-settings:nightlight");
             if (br < 0) Note("No adjustable display found. Windows only exposes brightness for built-in laptop panels, so external monitors can't be dimmed from here.");
 
             Head("Sound");
             c = NewCard();
-            float vol = Audio.Volume;
+            float vol = sVol;
             bool hasAudio = vol >= 0;
             SetToggle muteT = null;
             SliderRow(c, "Output volume", hasAudio ? vol : 0, hasAudio, v =>
@@ -2056,7 +2058,7 @@ namespace MacDock
                 Audio.Volume = (float)v;
                 if (muteT != null && muteT.On) { Audio.Muted = false; muteT.On = false; }
             });
-            SetRow muteRow = Toggle(c, "Mute", hasAudio && Audio.Muted, v => Audio.Muted = v);
+            SetRow muteRow = Toggle(c, "Mute", hasAudio && sMuted, v => Audio.Muted = v);
             muteT = (SetToggle)muteRow.Widget;
             muteT.Enabled = hasAudio;
             if (!hasAudio) Note("No audio output device found.");
@@ -2066,7 +2068,7 @@ namespace MacDock
         {
             Head("Wireless");
             SetCard c = NewCard();
-            bool? wifi = DeviceFeed.RadioOn("WiFi"), bt = DeviceFeed.RadioOn("Bluetooth");
+            bool? wifi = sWifi, bt = sBt;
             Action refresh = () => { if (current == "sys-network") BuildPage("sys-network"); };
             const string refused = " Windows refused the change. It may need administrator rights, or a policy or hardware switch is blocking it.";
             ToggleAsync(c, "Wi-Fi", wifi, on => DeviceFeed.SetRadio("WiFi", on), "Couldn't change Wi-Fi." + refused, refresh);
@@ -2406,6 +2408,16 @@ namespace MacDock
             return full.StartsWith(root, StringComparison.OrdinalIgnoreCase) ? full : null; // never write outside the icons folder
         }
 
+        void InstallIconPack(string source)
+        {
+            string err;
+            int n = IconPack.InstallPack(source, out err);
+            if (n < 0) { MessageBox.Show(err, "MacDock", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            IconChoice.Changed();
+            BuildPage("icons");
+            MessageBox.Show("Installed " + n + " icon(s). They show for apps whose name matches a file name.", "MacDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
         void DoRestore()
         {
             using (var d = new OpenFileDialog())
@@ -2456,6 +2468,26 @@ namespace MacDock
         {
             ClearBody();
             current = key;
+            if ((key == "sys-display" || key == "sys-network") && !sysReady)
+            {
+                // WMI / WinRT radio queries can take seconds: fetch off the UI thread, then rebuild this page with the answers.
+                if (!sysBusy)
+                {
+                    sysBusy = true;
+                    System.Threading.Tasks.Task.Run(() =>
+                    {
+                        try
+                        {
+                            if (key == "sys-display") { sBr = Brightness.Get(); sNight = NightLight.IsOn(); sVol = Audio.Volume; sMuted = sVol >= 0 && Audio.Muted; }
+                            else { sWifi = DeviceFeed.RadioOn("WiFi"); sBt = DeviceFeed.RadioOn("Bluetooth"); }
+                        }
+                        catch (Exception ex) { Program.Log(ex); }
+                        sysReady = true; sysBusy = false;
+                        try { BeginInvoke((Action)(() => { if (current == key) BuildPage(key); })); } catch { }
+                    });
+                }
+                return;
+            }
             SetCard c;
             switch (key)
             {
@@ -2466,6 +2498,7 @@ namespace MacDock
                     Head("Application");
                     c = NewCard();
                     RestartRow(c);
+                    Link(c, "Show welcome tour...", null, () => OnboardingForm.Open());
                     Link(c, "Force stop MacDock", null, () =>
                     {
                         if (MessageBox.Show("Stop MacDock completely?\n\nThe dock will close and will not come back on its own until you start MacDock yourself.", "MacDock", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
@@ -2621,6 +2654,26 @@ namespace MacDock
                     break;
 
                 case "icons":
+                    Head("Icon style");
+                    c = NewCard();
+                    Toggle(c, "Use original app icons", SetCfg.GetBool("original-icons", false), v => { SetCfg.SetBool("original-icons", v); IconChoice.Changed(); });
+                    Note("Master switch. Off: MacDock's styled icons (and your custom pack). On: every app shows its own original icon in the dock, Launchpad, Mission Control and notifications. Per-app choices (right-click an app, Icon) still win.");
+                    Head("Custom icon pack");
+                    c = NewCard();
+                    Info(c, "Installed icons", IconPack.CustomPackCount() + " in custom-pack");
+                    Link(c, "Install icon pack from folder...", null, () =>
+                    {
+                        using (var fd = new FolderBrowserDialog { Description = "Choose a folder of icons (PNG, ICO or ICNS named after each app)" })
+                            if (fd.ShowDialog(this) == DialogResult.OK) InstallIconPack(fd.SelectedPath);
+                    });
+                    Link(c, "Install icon pack from .zip...", null, () =>
+                    {
+                        using (var od = new OpenFileDialog { Title = "Choose an icon pack", Filter = "Zip archive (*.zip)|*.zip" })
+                            if (od.ShowDialog(this) == DialogResult.OK) InstallIconPack(od.FileName);
+                    });
+                    Link(c, "Open custom pack folder", null, () => { try { Directory.CreateDirectory(IconPack.CustomDir); } catch { } SetUi.OpenTarget(IconPack.CustomDir); });
+                    Link(c, "Remove custom pack", null, () => { IconPack.RemovePack(); IconChoice.Changed(); BuildPage("icons"); });
+                    Note("Format: one image per app, named exactly like the app as shown in the dock (Chrome.png, Visual Studio Code.png) or its exe name without .exe (chrome.png, Code.png). Accepted: .png, .ico, .icns, .jpg; square, 256 px or larger works best, transparent corners are kept. A zip may hold the files at its top level or in a folder. Installing replaces the previous custom pack. You can also drop files straight into " + IconPack.CustomDir + ". Apps without a file keep the normal icon. The pack is used when 'Use original app icons' is off.");
                     Head("Icon pack");
                     c = NewCard();
                     Toggle(c, "Use macOS-style icons", SetCfg.GetBool("icons", true), v => SetCfg.SetBool("icons", v));
@@ -2661,6 +2714,13 @@ namespace MacDock
                     c = NewCard();
                     Open(c, "About (Windows Settings)", "ms-settings:about");
                     Link(c, "Task Manager", "Ctrl + Shift + Esc", () => Process.Start("taskmgr.exe"));
+                    Head("About MacDock");
+                    c = NewCard();
+                    Info(c, "Credits", Credits.Line);
+                    Link(c, "Welcome tour...", null, () => OnboardingForm.Open());
+                    Head("Follow us");
+                    c = NewCard();
+                    foreach (string[] l in Credits.Links) { string u = l[1]; Link(c, l[0], null, () => SetUi.OpenTarget(u)); }
                     break;
 
                 default:
@@ -2695,8 +2755,8 @@ namespace MacDock
                 }
                 statusNote = null;
                 bool live = key == "sys-display" || key == "sys-network" || key == "sys-power" || key == "sys-personal";
-                if (key == "sys-display") DisplayControls();
-                else if (key == "sys-network") NetworkControls();
+                if (key == "sys-display") { DisplayControls(); sysReady = false; }
+                else if (key == "sys-network") { NetworkControls(); sysReady = false; }
                 else if (key == "sys-power") PowerControls();
                 else if (key == "sys-personal") WallpaperControls();
                 Head(live ? "More..." : p[1]);

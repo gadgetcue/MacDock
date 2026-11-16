@@ -191,7 +191,22 @@ namespace MacDock
 
         static Bitmap MakeThumb(string path)
         {
-            if (new FileInfo(path).Length > 40 * 1024 * 1024) return null;
+            // The shell's cached thumbnail decodes outside GDI+. Decoding big images with GDI+ on this background thread held GDI+'s
+            // process-wide lock for seconds and froze every dock paint (the "folder click hangs" stall).
+            try
+            {
+                using (Bitmap t = ShellIcons.LoadThumb(path, IconSize))
+                    if (t != null)
+                    {
+                        double sc = Math.Min((double)IconSize / t.Width, (double)IconSize / t.Height);
+                        int w = Math.Max(1, (int)(t.Width * sc)), h = Math.Max(1, (int)(t.Height * sc));
+                        var o = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                        using (Graphics g = Graphics.FromImage(o)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(t, 0, 0, w, h); }
+                        return o;
+                    }
+            }
+            catch { }
+            if (new FileInfo(path).Length > 3 * 1024 * 1024) return null;
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             using (Image img = Image.FromStream(fs, false, false))
             {
@@ -266,7 +281,7 @@ namespace MacDock
 
         void Poll()
         {
-            if (IsDisposed) return;
+            Program.Mark = "fan-poll"; if (IsDisposed) return;
             if (closeStart != DateTime.MinValue)
             {
                 if ((DateTime.UtcNow - closeStart).TotalMilliseconds >= 120) { closeDone = true; Close(); return; }
@@ -381,9 +396,10 @@ namespace MacDock
                 MenuEntry.Item(it.Name.Length > 28 ? it.Name.Substring(0, 25) + "..." : it.Name, null, null), // header
                 MenuEntry.Sep(),
                 MenuEntry.Item("Open", null, () => Open(path)),
-                MenuEntry.Item("Show in Folder", null, () => { try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + path + "\""); } catch { } }),
+                MenuEntry.Item("Show in Folder", null, () => { ThreadPool.QueueUserWorkItem(_ => { try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + path + "\""); } catch { } }); }),
                 MenuEntry.Item("Copy Path", null, () => { try { Clipboard.SetText(path); } catch { } }),
                 MenuEntry.Sep(),
+                isDir ? MenuEntry.Item("Copy Name", null, () => { try { Clipboard.SetText(it.Name); } catch { } }) : MenuEntry.Item("Send with LocalSend", null, () => LocalSendPopup.Open(new[] { path })),
                 MenuEntry.Item("Move to Recycle Bin", null, () =>
                 {
                     try
@@ -401,11 +417,19 @@ namespace MacDock
             Rectangle area = Screen.FromPoint(at).Bounds;
             menu.Top = Math.Max(area.Top + 4, at.Y - menu.Height - 8);
             menu.Show();
+            // Force the menu above the fan inside the topmost band.
+            Action raise = () => { try { if (!menu.IsDisposed && menu.IsHandleCreated) SetWindowPos(menu.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); } catch { } };
+            raise();
+            BeginInvoke(raise);
         }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
         static void Open(string path)
         {
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); } catch { }
+            // ShellExecute can block for ~1s (Explorer handshake); never run it on the UI thread or the fan's close animation and the dock freeze.
+            var t = new Thread(() => { try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); } catch { } }) { IsBackground = true };
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
         }
 
         static readonly System.Diagnostics.Stopwatch clk = System.Diagnostics.Stopwatch.StartNew();
@@ -413,7 +437,7 @@ namespace MacDock
         static readonly bool Dbg = File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fan.debug"));
         static void Log(string s) { if (!Dbg) return; try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fan.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " " + s + Environment.NewLine); } catch { } }
         void Draw()
-        {
+        { Program.Mark = "fan-draw";
             if (!IsHandleCreated) return;
             dirty = false; long dt0 = clk.ElapsedTicks;
             if (surface == null) surface = new Surface(Width, Height);
@@ -564,7 +588,7 @@ namespace MacDock
                         g.DrawString("Folder is empty", font, tb, new RectangleF(origin.X - 80, Height - 70, 160, 28), fmt);
                 }
             }
-            long te = clk.ElapsedTicks; surface.Present(Handle, Left, Top, 255);
+            Program.Mark = "fan-present"; long te = clk.ElapsedTicks; surface.Present(Handle, Left, Top, 255); Program.Mark = "fan-idle";
             double dd = (clk.ElapsedTicks - dt0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency, ppr = (clk.ElapsedTicks - te) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             drawN++; drawSum += dd; if (dd > drawMax) drawMax = dd;
             if (drawN <= 3 || drawN % 20 == 0) Log("frame " + drawN + " draw=" + dd.ToString("0.0") + "ms (present " + ppr.ToString("0.0") + "ms) avg=" + (drawSum / drawN).ToString("0.0") + " max=" + drawMax.ToString("0.0"));

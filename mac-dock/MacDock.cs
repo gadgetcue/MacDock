@@ -1,4 +1,4 @@
-// MacDock - a lightweight macOS-style dock for Windows.
+﻿// MacDock - a lightweight macOS-style dock for Windows.
 //
 // dock.txt (in %APPDATA%\MacDock) controls what is pinned:
 //   - apps (.exe / .lnk), folders, files, websites (https://...), shell:/ms-settings: links, and [start]
@@ -34,7 +34,7 @@ namespace MacDock
         {
             // Parent the new process to explorer.exe so it is outside the caller's process tree / job object.
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + Application.ExecutablePath + "\"") { UseShellExecute = false }); }
-            catch (Exception ex) { Log(ex); }
+            catch (Exception ex) { Program.Log(ex); }
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -122,6 +122,7 @@ namespace MacDock
             }
 
             if (args.Any(a => a.Equals("--ls-selftest", StringComparison.OrdinalIgnoreCase))) { Environment.ExitCode = LocalSendTest.Run(args); return; }
+            if (args.Any(a => a.Equals("--airdrop-probe", StringComparison.OrdinalIgnoreCase))) { Environment.ExitCode = AirDropProbe.Run(); return; }
 
             // "--wait" (used by Restart): give the previous instance a moment to exit before taking the single-instance lock.
             if (args.Any(a => a.Equals("--wait", StringComparison.OrdinalIgnoreCase))) System.Threading.Thread.Sleep(2500);
@@ -144,7 +145,7 @@ namespace MacDock
                             Process.Start(new ProcessStartInfo("schtasks.exe", "/Run /TN MacDockGuard") { UseShellExecute = false, CreateNoWindow = true });
                             if (DetachedUp()) { Log("DETACH ok via MacDockGuard task"); return; }
                         }
-                        catch (Exception ex) { Log(ex); }
+                        catch (Exception ex) { Program.Log(ex); }
                         Log("DETACH failed; running in place");
                     }
                 }
@@ -162,12 +163,12 @@ namespace MacDock
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Log("UNHANDLED (terminating=" + e.IsTerminating + ") " + e.ExceptionObject);
                 System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) => Log("UNOBSERVED " + e.Exception);
                 Microsoft.Win32.SystemEvents.SessionEnding += (s, e) => Log("SessionEnding reason=" + e.Reason);
- Theme.Refresh();
+Program.T("main-enter"); Theme.Refresh(); Program.T("theme");
                 Motion.Refresh();
-                SetUi.EnsureAutostart(); // rewritten every launch unless the user turned it off in Settings
-                Typography.Configure(AppPaths.Config);
+SetUi.EnsureAutostart(); Program.T("autostart"); // rewritten every launch unless the user turned it off in Settings
+Typography.Configure(AppPaths.Config); Program.T("typo");
 
- var dock = new DockForm();
+ T("pre-dock"); var dock = new DockForm(); T("dock-ctor"); try { dock.Show(); Application.DoEvents(); } catch (Exception exs) { Log(exs); } T("dock-shown");
                 dock.VisibleChanged += (s0, e0) => { if (dock.Visible) Log("READY dock visible " + (int)(DateTime.Now - Process.GetCurrentProcess().StartTime).TotalMilliseconds + " ms after process start"); };
                 var quitEvt = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, "MacDockQuitEvent");
                 new System.Threading.Thread(() =>
@@ -199,7 +200,7 @@ namespace MacDock
                         touchpad.SwipeDown += MissionControl.Dismiss;
                     }
                 }
-                catch (Exception ex) { Log(ex); }
+                catch (Exception ex) { Program.Log(ex); }
 
                 // Windows can drop topmost state and move windows around across sleep, unlock and display changes.
                 Action reassert = () =>
@@ -209,10 +210,10 @@ namespace MacDock
                         if (!dock.IsHandleCreated || dock.IsDisposed) return;
                         dock.BeginInvoke((Action)(() =>
                         {
-                            try { dock.Reassert(); bar.Reposition(); island.Reposition(); if (!Fullscreen.Active) { DockForm.KeepOnTop(bar); if (IslandForm.Enabled) DockForm.KeepOnTop(island); } } catch (Exception ex) { Log(ex); }
+                            try { dock.Reassert(); bar.Reposition(); island.Reposition(); if (!Fullscreen.Active) { DockForm.KeepOnTop(bar); if (IslandForm.Enabled) DockForm.KeepOnTop(island); } } catch (Exception ex) { Program.Log(ex); }
                         }));
                     }
-                    catch (Exception ex) { Log(ex); }
+                    catch (Exception ex) { Program.Log(ex); }
                 };
                 Microsoft.Win32.PowerModeChangedEventHandler onPower = (s, e) => { if (e.Mode == Microsoft.Win32.PowerModes.Resume) reassert(); };
                 Microsoft.Win32.SessionSwitchEventHandler onSession = (s, e) =>
@@ -226,12 +227,13 @@ namespace MacDock
 
                 try
                 {
-                    LocalSend.EnsureStarted();
+                    T("pre-localsend"); LocalSend.EnsureStarted(); T("localsend-started");
                     { var lsT = new Timer { Interval = 4000 }; lsT.Tick += (s3, e3) => { lsT.Stop(); lsT.Dispose(); try { LocalSend.EnsureVerb(); LocalSend.EnsureSendTo(); } catch (Exception ex3) { Log(ex3); } }; lsT.Start(); } // shell integration: after the dock is up
                     LocalSend.WatchSends(id => bar.OpenPanel(id), bar);
-                    bar.Show();
+                    T("pre-bar"); bar.Show(); T("bar-shown");
                     if (IslandForm.Enabled) island.Show(); else { island.Show(); island.Hide(); } // handle must exist so it can be re-shown live
-                    Feed.Start();
+                    T("island-shown"); Feed.Start(); T("feed-started");
+                    Panels.WarmControlCenter();
                     var watchdog = new Timer { Interval = 2000 };
                     watchdog.Tick += (s, e) =>
                     {
@@ -246,9 +248,10 @@ namespace MacDock
                             if (IslandForm.Enabled) { if (!island.Visible) island.Show(); DockForm.KeepOnTop(island); }
                             DockForm.KeepOnTop(bar);
                         }
-                        catch (Exception ex) { Log(ex); }
+                        catch (Exception ex) { Program.Log(ex); }
                     };
                     watchdog.Start();
+                    StartStallWatch(dock);
                     // Memory diet: every 45 s compact the heap and hand unused pages back to Windows (they fault back in on demand).
                     var trim = new Timer { Interval = 45000 };
                     trim.Tick += (s, e) =>
@@ -262,11 +265,12 @@ namespace MacDock
                     };
                     trim.Start();
                     MissionControl.PrewarmSoon(4000);
+                    { var obT = new Timer { Interval = 2500 }; obT.Tick += (s4, e4) => { obT.Stop(); obT.Dispose(); OnboardingForm.ShowIfFirstRun(); }; obT.Start(); } // first-run tour, after the dock is up
                     foreach (int ms in new[] { 1500, 3000, 4500, 6000, 8000, 10000, 13000, 16000, 20000, 25000, 30000 }) { var st = new Timer { Interval = ms }; st.Tick += (s2, e2) => { ((Timer)s2).Stop(); MemTrim.Now(true); }; st.Start(); startupTrims.Add(st); }
                     AppDomain.CurrentDomain.UnhandledException += (s, e) => { if (!QuitRequested) Relaunch(); };
- Application.Run(dock);
+ T("run-loop"); Application.Run(dock);
                 }
-                catch (Exception ex) { Log(ex); }
+                catch (Exception ex) { Program.Log(ex); }
                 finally
                 {
                     Microsoft.Win32.SystemEvents.PowerModeChanged -= onPower;
@@ -284,6 +288,45 @@ namespace MacDock
         }
 
         // Errors go to %LOCALAPPDATA%\MacDock\dock.log instead of a modal dialog.
+        // UI-thread stall detector: a background thread posts a ping to the UI thread every 500 ms; if the answer takes >1.2 s it logs "UI STALL" with the duration and the hottest threads' CPU.
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+        static Dictionary<int, double> ThreadCpu() { var d = new Dictionary<int, double>(); try { foreach (ProcessThread t in Process.GetCurrentProcess().Threads) try { d[t.Id] = t.TotalProcessorTime.TotalMilliseconds; } catch { } } catch { } return d; }
+        static string ThreadDelta(Dictionary<int, double> a, int uiId)
+        {
+            var b = ThreadCpu(); var l = new List<string>();
+            foreach (var kv in b) { double was; a.TryGetValue(kv.Key, out was); double dlt = kv.Value - was; if (dlt >= 200 || kv.Key == uiId) l.Add((kv.Key == uiId ? "UI" : "t" + kv.Key) + "=" + (int)dlt + "ms"); }
+            return string.Join(" ", l.ToArray());
+        }
+        internal static void StartStallWatch(Form ui)
+        {
+            int uiId = (int)GetCurrentThreadId(); Dictionary<int, double> cpu0 = null;
+            var t = new System.Threading.Thread(() =>
+            {
+                long lastPong = Environment.TickCount; bool logged = false; long stallStart = 0;
+                while (true)
+                {
+                    System.Threading.Thread.Sleep(500);
+                    try
+                    {
+                        if (ui.IsDisposed) return;
+                        long sent = Environment.TickCount;
+                        long pong = lastPong;
+                        if (sent - pong > 1200)
+                        {
+                            if (!logged) { logged = true; stallStart = pong; cpu0 = ThreadCpu(); Log("UI STALL begin (no response for " + (sent - pong) + " ms) mark=" + Mark); }
+                        }
+                        else if (logged) { logged = false; Log("UI STALL end after ~" + (sent - stallStart) + " ms; cpu: " + ThreadDelta(cpu0, uiId)); }
+                        ui.BeginInvoke((Action)(() => { long now = Environment.TickCount; if (logged && now - lastPong > 0) { } lastPong = now; }));
+                    }
+                    catch { }
+                }
+            });
+            t.IsBackground = true; t.Name = "StallWatch"; t.Priority = System.Threading.ThreadPriority.AboveNormal; t.Start();
+        }
+
+        internal static volatile string Mark = ""; // breadcrumb: where the UI thread last announced itself; the stall detector prints it
+        internal static void Slow(string what, Stopwatch sw) { if (sw.ElapsedMilliseconds >= 150) Log("SLOW " + what + " " + sw.ElapsedMilliseconds + " ms"); }
+        internal static void T(string what) { try { var p = Process.GetCurrentProcess(); Log("T " + what + " wall=" + (int)(DateTime.Now - p.StartTime).TotalMilliseconds + " cpu=" + (int)p.TotalProcessorTime.TotalMilliseconds); } catch { } }
         internal static void Log(string message)
         {
             Log(new Exception(message));
@@ -487,7 +530,7 @@ namespace MacDock
         [DllImport("shell32.dll")] public static extern int SHGetImageList(int listType, ref Guid iid, out IImageList list);
     }
 
-    enum Kind { App, Folder, File, Url, Start, Mission, Launchpad, Trash }
+    enum Kind { App, Folder, File, Url, Start, Mission, Launchpad, Trash, Split }
 
     // One line of dock.txt.
     sealed class Entry
@@ -513,6 +556,7 @@ namespace MacDock
         public readonly Dictionary<int, Bitmap> Scaled = new Dictionary<int, Bitmap>();
         public Bitmap ScaledFrom;
         public List<IntPtr> Handles = new List<IntPtr>();
+        public List<Item> Members; // Split: the app items in the group
         public Spring ScaleSpring = new Spring(1);
         public double Goal = 1;
         public double BounceHeight, BounceVelocity;      // launch bounce: a ball bouncing on the dock
@@ -613,6 +657,8 @@ namespace MacDock
         DateTime hoverSince = DateTime.UtcNow;
         Point speedPt; DateTime speedAt = DateTime.UtcNow; bool cursorSlow = true;
         Font labelFont = Typography.Text(9.5f, Weight.Medium);
+        readonly bool tFields = TF();
+        static bool TF() { Program.T("fields-after-font"); return true; }
         readonly Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
         readonly string configPath = AppPaths.Config;
         static int pillHeight { get { return BasePx + 2 * PadY; } }
@@ -682,7 +728,7 @@ namespace MacDock
         // A switch changed (Settings, the top bar menu or an edit of dock.txt): apply it now.
         internal void ApplyDockMode()
         {
-            ReadDockSwitches();
+            ReadDockSwitches(); Program.T("switches");
             animTimer.Interval = 50;
             if (!animTimer.Enabled) animTimer.Start();
             UpdateReservation();
@@ -780,7 +826,7 @@ namespace MacDock
             BaseSize = Math.Max(28, Math.Min(88, size));
             MaxScale = Math.Max(1.0, Math.Min(2.2, magnify));
             try { File.WriteAllText(SizeFile, "size=" + BaseSize + "\nmagnify=" + MaxScale.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n"); } catch { }
-            if (preview != null) preview.Close();
+            Program.Mark = "Activate:closing-preview"; if (preview != null) preview.Close(); Program.Mark = "Activate:preview-closed";
             bool bigger = FitIconSource();
             FitCanvas();
             if (ShowDockOn && !AutoHideOn && IsHandleCreated) ReserveBottom();
@@ -790,10 +836,10 @@ namespace MacDock
 
         public DockForm()
         {
-            Instance = this;
-            LoadSize();
-            ReadDockSwitches();
-            Genie.Install(); // the minimize / restore effect watches for windows being minimized and restored
+            Program.T("ctor-enter"); Instance = this;
+            LoadSize(); Program.T("loadsize");
+            ReadDockSwitches(); Program.T("switches");
+            Genie.Install(); Program.T("genie"); // the minimize / restore effect watches for windows being minimized and restored
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
@@ -803,14 +849,14 @@ namespace MacDock
             // Polls the cursor; idles at 50 ms and speeds up to ~60 fps only while animating.
             animTimer.Interval = 50;
             animTimer.Tick += (s, e) => Step();
-            vsync = new VsyncDriver(this, Step);
+            vsync = new VsyncDriver(this, Step); Program.T("vsync");
 
             refreshTimer.Interval = 2000;
             refreshTimer.Tick += (s, e) => RebuildItems();
 
-            LoadConfig();
-            ApplyTaskbarSetting();
-            RebuildItems();
+            Program.T("ctor-a"); LoadConfig(); Program.T("ctor-config");
+            ApplyTaskbarSetting(); Program.T("ctor-taskbar");
+            RebuildItems(); Program.T("ctor-rebuild");
             animTimer.Start();
             refreshTimer.Start();
         }
@@ -871,7 +917,7 @@ namespace MacDock
         void OnSystemSettingChanged()
         {
             bool wasLight = Theme.Light;
-            Theme.Refresh();
+Theme.Refresh();
             Motion.Refresh();
             if (wasLight != Theme.Light)
                 foreach (Form f in Application.OpenForms) try { f.Invalidate(true); } catch { }
@@ -1603,9 +1649,10 @@ namespace MacDock
 
         // ---------- items ----------
 
-        void RebuildItems()
+        void RebuildItems() { var sw = Stopwatch.StartNew(); try { RebuildItems0(); } finally { Program.Slow("RebuildItems", sw); } }
+        void RebuildItems0()
         {
-            if (dragItem != null) return; // the order on screen is mid-change; it is saved when the icon is dropped
+            Program.Mark = "RebuildItems";             if (dragItem != null) return; // the order on screen is mid-change; it is saved when the icon is dropped
 
             if (File.Exists(configPath) && File.GetLastWriteTime(configPath) != configStamp)
             {
@@ -1615,7 +1662,8 @@ namespace MacDock
             }
             if (hideTaskbar) TaskbarControl.EnsureHidden();
 
-            Dictionary<string, List<IntPtr>> running = EnumerateRunningWindows();
+            Program.Mark = "RebuildItems:enum"; var swp = Stopwatch.StartNew(); Dictionary<string, List<IntPtr>> running = EnumerateRunningWindows(); Program.Slow("RebuildItems.EnumerateRunningWindows", swp); swp.Restart();
+            SurfaceUac(running);
             var previous = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
             foreach (Item old in items) previous[old.Key] = old;
             prevKeys = new HashSet<string>(previous.Keys, StringComparer.OrdinalIgnoreCase);
@@ -1640,6 +1688,28 @@ namespace MacDock
                 if (!pinnedApps.Add(path)) continue;
                 list.Add(NewItem(Kind.App, path, null, null, 1, running));
             }
+            // Windows tiled with Windows 11 snap layouts get one combined item (the apps keep their own icons too).
+            try
+            {
+                var allHandles = new HashSet<IntPtr>();
+                foreach (var kv in running) foreach (IntPtr h in kv.Value) allHandles.Add(h);
+                foreach (List<IntPtr> grp in SnapGroups.FindAmong(allHandles))
+                {
+                    var icons = new List<Bitmap>(); var names = new List<string>(); var mem = new List<Item>();
+                    foreach (IntPtr h in grp)
+                    {
+                        Item m = list.FirstOrDefault(x => x.Handles.Contains(h)) ?? rightItems.FirstOrDefault(x => x.Handles.Contains(h));
+                        if (m == null || m.Icon == null) { icons.Clear(); break; }
+                        icons.Add(m.Icon); names.Add(m.Label); if (!mem.Contains(m)) mem.Add(m);
+                    }
+                    if (icons.Count < 2) continue;
+                    var si = new Item { Kind = Kind.Split, Section = 1, Members = mem, Label = string.Join(" + ", names.ToArray()), Handles = grp,
+                        Target = "split|" + string.Join("|", grp.Select(x => x.ToInt64().ToString()).ToArray()) };
+                    si.Icon = SnapGroups.Compose(icons);
+                    list.Add(si);
+                }
+            }
+            catch (Exception ex) { Program.Log(ex); }
             list.AddRange(rightItems);
 
             // The Recycle Bin always sits at the far right (like the macOS Trash), unless the user already pinned one.
@@ -1669,7 +1739,7 @@ namespace MacDock
             var oldX = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             foreach (Item old in items) oldX[old.Key] = Left + old.Rect.Left; // on-screen position before the change
 
- items = list;
+Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.AddEntryItems", swp);
             foreach (Item fi in list) if (fi.Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(fi.Target)); // warm the fan caches
             if (hoverIndex >= items.Count) hoverIndex = -1;
             refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue || i.FocusUntil != DateTime.MinValue) ? 500 : 2000;
@@ -1738,6 +1808,11 @@ namespace MacDock
 
             List<IntPtr> handles;
             if (runKey != null && running.TryGetValue(runKey, out handles)) it.Handles = handles;
+            else if (kind == Kind.App && Pwa.IdOfTarget(target) != null)
+            {
+                List<IntPtr> web = MatchWebShortcut(running, Pwa.IdOfTarget(target));
+                if (web != null) it.Handles = web;
+            }
             return it;
         }
 
@@ -1746,6 +1821,73 @@ namespace MacDock
 
         // Store packages carry their version in the folder name, which changes on update; ignore it when comparing.
         static string NormPath(string p) { return PkgVersion.Replace(p, "$1_*_"); }
+
+        // A Start-menu web app shortcut ("Microsoft.AutoGenerated.{guid}", target = a browser exe with --app=URL): its windows carry
+        // no AppUserModelID and share the browser's exe, so they are found by the URL on their process command line.
+        static readonly Dictionary<uint, string> CmdCache = new Dictionary<uint, string>();
+        static readonly Dictionary<string, string[]> AppLnkCache = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<uint> CmdPending = new HashSet<uint>();
+        // WMI can take seconds; never block the UI thread on it. Unknown pids return "" now and are filled in the background (the 2 s refresh picks them up).
+        static string CmdLineOf(uint pid)
+        {
+            string c;
+            lock (CmdCache) { if (CmdCache.TryGetValue(pid, out c)) return c; if (!CmdPending.Add(pid)) return ""; }
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                string r = "";
+                try
+                {
+                    using (var s = new System.Management.ManagementObjectSearcher("SELECT CommandLine FROM Win32_Process WHERE ProcessId=" + pid))
+                        foreach (System.Management.ManagementObject o in s.Get()) { r = (o["CommandLine"] as string) ?? ""; break; }
+                }
+                catch { }
+                lock (CmdCache) { CmdCache[pid] = r; CmdPending.Remove(pid); }
+            });
+            return "";
+        }
+
+        static List<IntPtr> MatchWebShortcut(Dictionary<string, List<IntPtr>> running, string id)
+        {
+            string name;
+            lock (AppDirectory.Names) { if (!AppDirectory.Names.TryGetValue(id, out name)) return null; }
+            string[] info;
+            if (!AppLnkCache.TryGetValue(name, out info))
+            {
+                info = null;
+                try
+                {
+                    dynamic sh = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
+                    foreach (string dir in new[] { Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData) })
+                    {
+                        string root = Path.Combine(dir, @"Microsoft\Windows\Start Menu\Programs");
+                        if (!Directory.Exists(root)) continue;
+                        foreach (string f in Directory.GetFiles(root, name + ".lnk", SearchOption.AllDirectories))
+                        {
+                            dynamic sc = sh.CreateShortcut(f);
+                            string args = (string)sc.Arguments ?? "", exe = (string)sc.TargetPath;
+                            int i = args.IndexOf("--app=", StringComparison.OrdinalIgnoreCase);
+                            if (i < 0 || string.IsNullOrEmpty(exe)) continue;
+                            string url = args.Substring(i + 6).Trim().Trim('"');
+                            int sp = url.IndexOf('"'); if (sp >= 0) url = url.Substring(0, sp);
+                            if (url.Length > 0) { info = new[] { Environment.ExpandEnvironmentVariables(exe), url }; break; }
+                        }
+                        if (info != null) break;
+                    }
+                }
+                catch { }
+                AppLnkCache[name] = info;
+            }
+            if (info == null) return null;
+            string key = running.Keys.FirstOrDefault(k => string.Equals(k, info[0], StringComparison.OrdinalIgnoreCase));
+            if (key == null) return null;
+            var found = new List<IntPtr>();
+            foreach (IntPtr h in running[key])
+            {
+                uint pid; NativeMethods.GetWindowThreadProcessId(h, out pid);
+                if (CmdLineOf(pid).IndexOf(info[1], StringComparison.OrdinalIgnoreCase) >= 0) found.Add(h);
+            }
+            return found.Count > 0 ? found : null;
+        }
 
         static string ResolveLnk(string path)
         {
@@ -1772,6 +1914,9 @@ namespace MacDock
             if (running.ContainsKey(target)) return target;
 
             string id = Pwa.IdOfTarget(target);
+            if (id != null && Pwa.IsWebAppId(id))
+                foreach (string k in running.Keys) // a web app whose window id carries a profile suffix still counts as running
+                    if (k.StartsWith(Pwa.AppsFolder, StringComparison.OrdinalIgnoreCase) && Pwa.SameApp(Pwa.IdOfTarget(k), id)) return k;
             if (id == null)
             {
                 string exe = target;
@@ -1814,6 +1959,7 @@ namespace MacDock
 
         static string DefaultLabel(Kind kind, string target)
         {
+            if (target == UacTarget) return "User Account Control";
             switch (kind)
             {
                 case Kind.Start: return "Start";
@@ -1881,7 +2027,7 @@ namespace MacDock
             {
                 Item dt = it;
                 DownloadsFan fan = null;
-                fan = new DownloadsFan(Environment.ExpandEnvironmentVariables(it.Target), PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), CardAnchorY(it))), sp =>
+                Program.Mark = "ShowPreview:new-fan"; fan = new DownloadsFan(Environment.ExpandEnvironmentVariables(it.Target), PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), CardAnchorY(it))), sp =>
                 {
                     // The whole column from the icon down to the screen edge counts, so resting on the icon never closes the fan.
                     Item cur = items.FirstOrDefault(x => x.Key == dt.Key) ?? dt; Rectangle r = RectangleToScreen(Rectangle.Round(cur.Rect));
@@ -1891,7 +2037,7 @@ namespace MacDock
                 }, () => { if (preview == fan) { preview = null; lastPreviewClose = DateTime.UtcNow; } });
                 preview = fan;
                 previewItem = it;
-                fan.Show();
+                Program.Mark = "ShowPreview:fan.Show"; fan.Show(); Program.Mark = "ShowPreview:fan-shown";
                 return;
             }
             var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
@@ -1914,15 +2060,16 @@ namespace MacDock
 
         void Activate(Item it)
         {
+            Program.Mark = "Activate";
             if (it.Kind == Kind.Folder)
             {
                 // Clicking a folder stack opens its fan (or folds it back when it is already open); "Open in Explorer" sits at the fan's top.
                 bool wasOpen = preview is DownloadsFan && previewItem != null && previewItem.Key == it.Key;
-                if (preview != null) preview.Close();
+                Program.Mark = "Activate:closing-preview"; if (preview != null) preview.Close(); Program.Mark = "Activate:preview-closed";
                 if (!wasOpen) { ShowPreview(it); if (preview is DownloadsFan) ((DownloadsFan)preview).Pinned = true; }
                 return;
             }
-            if (preview != null) preview.Close();
+            Program.Mark = "Activate:closing-preview"; if (preview != null) preview.Close(); Program.Mark = "Activate:preview-closed";
             // Clicking a dock item while Launchpad or Mission Control is open closes it, then the item opens as usual.
             if (it.Kind != Kind.Mission && it.Kind != Kind.Launchpad) MissionControl.DismissForLaunch();
 
@@ -1934,12 +2081,22 @@ namespace MacDock
             }
             if (it.Kind == Kind.Launchpad) { MissionControl.Toggle(true); return; }
             if (it.Kind == Kind.Trash) { RecycleBin.Open(); it.BounceVelocity = LaunchSpeed * 0.7; return; }
+            if (it.Kind == Kind.Split)
+            {
+                // Bring the whole split-view forward together; clicking it again while it is in front minimizes it.
+                var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
+                bool showing = live.Any(h => !NativeMethods.IsIconic(h));
+                if (showing) { foreach (IntPtr h in live) NativeMethods.ShowWindow(h, SW_MINIMIZE); }
+                else { for (int k = live.Count - 1; k >= 0; k--) WinUtil.Focus(live[k]); } // restores each to its snapped slot
+                return;
+            }
 
             // Clicking the icon of the app that is in front minimizes its front window (the genie effect plays); otherwise the
             // app's window is restored if needed and brought forward. The dock never takes focus, so the first click while
             // another app is in front always lands on the "bring forward" branch.
             IntPtr front = Win32.GetForegroundWindow();
             IntPtr frontOwner = front == IntPtr.Zero ? IntPtr.Zero : GetAncestor(front, 3); // GA_ROOTOWNER
+            try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scratch", "click.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " target=" + it.Target + " front=" + front + " owner=" + frontOwner + " handles=" + string.Join(",", it.Handles.Select(x => x.ToString())) + "\r\n"); } catch { } // DIAG
             foreach (IntPtr h in it.Handles)
             {
                 if (!NativeMethods.IsWindow(h) || (h != front && h != frontOwner)) continue;
@@ -1951,6 +2108,17 @@ namespace MacDock
             foreach (IntPtr h in it.Handles)
             {
                 if (NativeMethods.IsWindow(h)) { target = h; break; }
+            }
+
+            // A web app whose window was not matched to this icon: find it by id so a second click still minimizes.
+            if (target == IntPtr.Zero && it.Kind == Kind.App && Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target)))
+            {
+                IntPtr w = Pwa.FindWindow(Pwa.IdOfTarget(it.Target));
+                if (w != IntPtr.Zero)
+                {
+                    if ((w == front || w == frontOwner) && !NativeMethods.IsIconic(w)) { NativeMethods.ShowWindow(w, SW_MINIMIZE); return; }
+                    target = w;
+                }
             }
 
             if (target != IntPtr.Zero)
@@ -2184,7 +2352,7 @@ namespace MacDock
         void ShowMenu(Item it, Point at)
         {
             if (popup != null) popup.Close();
-            if (preview != null) preview.Close();
+            Program.Mark = "Activate:closing-preview"; if (preview != null) preview.Close(); Program.Mark = "Activate:preview-closed";
             var list = new List<MenuEntry>();
 
             if (it != null && it.Kind == Kind.Trash)
@@ -2207,12 +2375,18 @@ namespace MacDock
                     Item targetItem = it;
                     list.Add(MenuEntry.Item("Close", null, () => CloseItem(targetItem)));
                     if (it.Handles.Count >= 2) list.Add(MenuEntry.Item("Close all windows", null, () => CloseItem(targetItem))); // WM_CLOSE to each window only; never touches MacDock
-                    list.Add(MenuEntry.Item("Force Close", null, () => ForceCloseItem(targetItem)));
+                    if (it.Kind != Kind.Split) list.Add(MenuEntry.Item("Force Close", null, () => ForceCloseItem(targetItem)));
                     list.Add(MenuEntry.Sep());
                 }
 
                 if (it.Kind == Kind.Start)
                     list.Add(MenuEntry.Item("Hide Start Icon", null, () => SetStartIcon(false)));
+                if (it.Kind == Kind.Split && it.Members != null)
+                {
+                    var toPin = it.Members.Where(m => m.Entry == null && m.Kind == Kind.App).Select(m => m.Target).ToList();
+                    if (toPin.Count > 0) list.Add(MenuEntry.Item("Keep Group Apps in Dock", null, () => { foreach (string p in toPin) AddPin(p, p, 0); }));
+                    else list.Add(MenuEntry.Item("Group Apps Are in Dock", null, null)); // greyed: every app in the group is already pinned
+                }
                 if (it.Entry != null && it.Kind != Kind.Start)
                 {
                     Entry entry = it.Entry;
@@ -2457,7 +2631,7 @@ namespace MacDock
                 if (target.Kind == Kind.App && DockDrop.CanOpenWith(target.Target))
                 {
                     string[] files = (string[])dropped.Clone();
-                    if (preview != null) preview.Close();
+                    Program.Mark = "Activate:closing-preview"; if (preview != null) preview.Close(); Program.Mark = "Activate:preview-closed";
                     if (DockDrop.OpenWith(target.Target, files) && target.Handles.Count == 0)
                     {
                         target.LaunchStart = DateTime.Now;
@@ -2540,7 +2714,9 @@ namespace MacDock
                 if (bmp == null)
                 {
                     bmp = BuildIcon(it);
-                    if (disk) IconDisk.Save(key, it.Target, bmp);
+                    // A web app with no icon found yet shows the logo for now: don't let that stick on disk.
+                    bool webFallback = it.Kind == Kind.App && it.WinIcon == null && Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target)) && Pwa.IconForId(Pwa.IdOfTarget(it.Target), it.Label) == null;
+                    if (disk && !webFallback) IconDisk.Save(key, it.Target, bmp);
                 }
                 iconCache[key] = bmp;
                 iconStamp[key] = new KeyValuePair<long, DateTime>(FileStamp(it.Target), DateTime.UtcNow);
@@ -2550,6 +2726,7 @@ namespace MacDock
 
         static Bitmap BuildIcon(Item it)
         {
+            if (it.Target == UacTarget) { try { return Tile(SystemIcons.Shield.ToBitmap()); } catch { } }
             if (it.Kind == Kind.App)
             {
                 Bitmap cust = IconChoice.Custom(it.Target, it.Label);
@@ -2582,7 +2759,7 @@ namespace MacDock
                     if (ShellIcons.IsAppsFolderItem(it.Target))
                     {
                         bool isWeb = Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target));
-                        Bitmap webIcon = isWeb ? Pwa.IconFor(it.Label) : null; // web apps keep their own icon
+                        Bitmap webIcon = isWeb ? Pwa.IconForId(Pwa.IdOfTarget(it.Target), it.Label) : null; // web apps keep their own icon
                         if (webIcon == null && it.WinIcon != null) webIcon = it.WinIcon; // else the icon the app's own window carries
                         if (isWeb && webIcon == null) return Tile(Logo()); // never fall back to the browser's icon
                         return Tile(webIcon ?? ShellIcons.Load(it.Target, IconSource) ?? Logo());
@@ -2745,7 +2922,14 @@ namespace MacDock
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                     g.Clear(Color.Transparent);
-                    g.DrawImage(icon, new Rectangle(1, 1, S - 2, S - 2), full, GraphicsUnit.Pixel);
+                    // Bounds were sampled on a coarse grid with A>100, which clips the soft anti-aliased rim: grow the crop so the edge stays smooth.
+                    int pad = Math.Max(2, full.Width / 40);
+                    var crop = Rectangle.Intersect(new Rectangle(full.X - pad, full.Y - pad, full.Width + 2 * pad, full.Height + 2 * pad), new Rectangle(0, 0, icon.Width, icon.Height));
+                    using (var ia = new System.Drawing.Imaging.ImageAttributes())
+                    {
+                        ia.SetWrapMode(WrapMode.TileFlipXY);
+                        g.DrawImage(icon, new Rectangle(1, 1, S - 2, S - 2), crop.X, crop.Y, crop.Width, crop.Height, GraphicsUnit.Pixel, ia);
+                    }
                 }
                 icon.Dispose();
                 return bare;
@@ -2815,13 +2999,32 @@ namespace MacDock
         }
 
         // The MacDock logo (embedded exe icon): used for every window and as the fallback so no icon is ever empty.
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern uint PrivateExtractIcons(string file, int index, int cx, int cy, IntPtr[] icons, uint[] ids, uint n, uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
+
+        // The embedded logo at an exact size (crisp: picks the matching frame from the exe's icon group instead of upscaling 32 px).
+        static Icon LogoSized(int px)
+        {
+            try
+            {
+                var h = new IntPtr[1]; var id = new uint[1];
+                if (PrivateExtractIcons(Application.ExecutablePath, 0, px, px, h, id, 1, 0) == 1 && h[0] != IntPtr.Zero)
+                    using (Icon tmp = Icon.FromHandle(h[0])) { Icon c = (Icon)tmp.Clone(); DestroyIcon(h[0]); return c; }
+            }
+            catch { }
+            return null;
+        }
         internal static Icon LogoIcon()
         {
-            try { var i = Icon.ExtractAssociatedIcon(Application.ExecutablePath); if (i != null) return i; } catch { }
+            Icon i = LogoSized(48); if (i != null) return i;
+            try { i = Icon.ExtractAssociatedIcon(Application.ExecutablePath); if (i != null) return i; } catch { }
             return SystemIcons.Application;
         }
-        internal static Bitmap Logo() { using (Icon i = LogoIcon()) return ScaleIcon(i.ToBitmap()); }
-
+        internal static Bitmap Logo()
+        {
+            using (Icon i = LogoSized(256) ?? LogoIcon()) return ScaleIcon(i.ToBitmap());
+        }
         // True when (nearly) every pixel is transparent: the shell returns that for some Store exes.
         static bool IsBlank(Bitmap icon)
         {
@@ -3029,6 +3232,7 @@ namespace MacDock
         // ---------- running windows ----------
 
         static readonly Dictionary<uint, string> PathCache = new Dictionary<uint, string>();
+        static readonly Dictionary<IntPtr, uint> FramePid = new Dictionary<IntPtr, uint>(); // UWP frame window -> real app pid
 
         // Returns visible, titled app windows grouped by their exe path.
         internal static Dictionary<string, List<IntPtr>> EnumerateRunningWindows()
@@ -3078,6 +3282,13 @@ namespace MacDock
                         if (cp != 0 && cp != hostPid) { childPid = cp; return false; }
                         return true;
                     }, IntPtr.Zero);
+                    // A minimized / suspended UWP window drops its CoreWindow child: reuse the pid seen while it was open,
+                    // otherwise the window groups under ApplicationFrameHost and the dock shows the fallback logo.
+                    lock (FramePid)
+                    {
+                        if (childPid != 0) FramePid[hWnd] = childPid;
+                        else if (FramePid.TryGetValue(hWnd, out childPid)) { }
+                    }
                     if (childPid != 0) pid = childPid;
                 }
                 if (!pathByPid.TryGetValue(pid, out exe) || exe == null)
@@ -3086,6 +3297,9 @@ namespace MacDock
                     if (exe != null) pathByPid[pid] = exe; // a failed lookup (elevated / protected process) is retried next refresh
                 }
                 if (exe == null) exe = "elevated:" + cls; // access denied: still list the window, grouped by class
+                // A pending UAC prompt waits as this minimized window until its taskbar button is clicked. The dock hides the
+                // taskbar, so it must surface (and show) it itself, or the prompt stays invisible.
+                if (cls.StartsWith("$$$Secure UAP Dummy Window", StringComparison.Ordinal)) exe = UacTarget;
 
                 // A Brave / Edge / Chrome web app is its own app: group its windows under its AppsFolder id, not under
                 // the browser's exe, so it neither merges into the browser nor into other web apps.
@@ -3093,6 +3307,21 @@ namespace MacDock
                 {
                     string aumid = Pwa.AumidOfWindow(hWnd);
                     if (Pwa.IsWebAppId(aumid)) exe = Pwa.TargetFor(aumid);
+                }
+
+                // Safari (Aero Browser): a web app ("--app=URL" process) is its own app, not part of the browser's windows.
+                if (exe.EndsWith("AeroBrowser.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    string cmd = CmdLineOf(pid);
+                    int ai = cmd.IndexOf("--app=", StringComparison.OrdinalIgnoreCase);
+                    if (ai >= 0)
+                    {
+                        string url = cmd.Substring(ai + 6).TrimStart('"');
+                        int e1 = url.IndexOfAny(new[] { '"', ' ' }); if (e1 >= 0) url = url.Substring(0, e1);
+                        int sc = url.IndexOf("://", StringComparison.Ordinal); if (sc >= 0) url = url.Substring(sc + 3);
+                        int sl = url.IndexOf('/'); if (sl >= 0) url = url.Substring(0, sl);
+                        if (url.Length > 0) exe = Pwa.TargetFor("Safari._app_" + url);
+                    }
                 }
 
                 List<IntPtr> handles;
@@ -3106,6 +3335,18 @@ namespace MacDock
             }, IntPtr.Zero);
 
             return result;
+        }
+
+        internal const string UacTarget = "uac:pending";
+        static readonly HashSet<IntPtr> UacSurfaced = new HashSet<IntPtr>();
+
+        // Restores each pending UAC prompt once, which makes Windows switch to the secure desktop (what a taskbar click does).
+        static void SurfaceUac(Dictionary<string, List<IntPtr>> running)
+        {
+            List<IntPtr> w;
+            if (!running.TryGetValue(UacTarget, out w)) { UacSurfaced.Clear(); return; }
+            foreach (IntPtr h in w)
+                if (UacSurfaced.Add(h)) { try { WinUtil.Focus(h); } catch (Exception ex) { Program.Log(ex); } }
         }
 
         internal static string ProcessPath(uint pid)

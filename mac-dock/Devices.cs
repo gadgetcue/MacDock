@@ -223,9 +223,10 @@ namespace MacDock
             };
             using (Process p = Process.Start(psi))
             {
-                string output = p.StandardOutput.ReadToEnd();
+                var rd = System.Threading.Tasks.Task.Run(() => p.StandardOutput.ReadToEnd());
+                if (!rd.Wait(6000)) { try { p.Kill(); } catch { } return ""; } // a hung netsh must not hang the caller
                 p.WaitForExit(4000);
-                return output;
+                return rd.Result;
             }
         }
     }

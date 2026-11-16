@@ -237,6 +237,44 @@ namespace MacDock
         public static void Click(TrayItem t, bool right) { Click(t, right ? 1 : 0); }
         public static void Click(TrayItem t, int mode)
         {
+            // Left click / double click: bring the app's own window forward instead of opening the tray flyout.
+            if (mode != 1 && FindAppWindow(t) != IntPtr.Zero)
+            {
+                // Activate off the UI thread, after the bar's own mouse-up has finished, so the bar can't take the
+                // foreground back; then re-assert it once more.
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    Thread.Sleep(150);
+                    bool ok = ActivateApp(t);
+                    Thread.Sleep(250);
+                    IntPtr w = FindAppWindow(t);
+                    if (w != IntPtr.Zero && Win32.GetForegroundWindow() != w) { WinUtil.Focus(w); Thread.Sleep(150); }
+                    Log("click " + t.Key + " mode=" + mode + " activated=" + ok + " fg=" + WinUtil.TitleOf(Win32.GetForegroundWindow()));
+                });
+                return;
+            }
+            Log("click " + t.Key + " mode=" + mode + " windowless");
+            if (mode == 0)
+            {
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    lock (busy)
+                    {
+                        var before = new HashSet<IntPtr>(TopWindows());
+                        bool ok = InvokeHidden(t);
+                        Log("invoke " + t.Key + " ok=" + ok);
+                        // bring whatever window the app opened in response to its tray click to the front
+                        for (int i = 0; i < 30; i++)
+                        {
+                            Thread.Sleep(100);
+                            IntPtr nw = TopWindows().FirstOrDefault(h => !before.Contains(h));
+                            if (nw != IntPtr.Zero) { WinUtil.Focus(nw); Thread.Sleep(150); WinUtil.Focus(nw); Log("front new window of " + t.Key); return; }
+                            if (i == 12 && ActivateApp(t)) { Log("front by name " + t.Key); return; }
+                        }
+                    }
+                });
+                return;
+            }
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 lock (busy)
@@ -287,6 +325,138 @@ namespace MacDock
                     catch { }
                 }
             });
+        }
+
+        [DllImport("user32")] static extern int GetWindowLong(IntPtr h, int i);
+        [DllImport("user32")] static extern int SetWindowLong(IntPtr h, int i, int v);
+        [DllImport("user32")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint k, byte a, uint f);
+
+        // Left click for apps without a window: the button is invoked through UI Automation while the flyout is
+        // made fully transparent, so the app gets its tray click and the Windows flyout never shows.
+        static bool InvokeHidden(TrayItem t)
+        {
+            bool flyout = false;
+            try
+            {
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    AutomationElement host = Top("Shell_TrayWnd"), button = Find(host, t.Key);
+                    if (button == null)
+                    {
+                        AutomationElement fly = OpenFlyout();
+                        if (fly == null) { Thread.Sleep(200); continue; }
+                        flyout = true;
+                        try
+                        {
+                            IntPtr h = new IntPtr(fly.Current.NativeWindowHandle);
+                            SetWindowLong(h, -20, GetWindowLong(h, -20) | 0x80000);
+                            SetLayeredWindowAttributes(h, 0, 0, 2);
+                        }
+                        catch { }
+                        button = Find(fly, t.Key);
+                    }
+                    if (button == null) { Thread.Sleep(200); continue; }
+                    ((InvokePattern)button.GetCurrentPattern(InvokePattern.Pattern)).Invoke();
+                    Thread.Sleep(400);
+                    if (flyout)
+                    {
+                        // dismiss the (invisible) flyout so it doesn't keep focus and swallow the next click
+                        // Esc only while the flyout itself holds the foreground; once the app's window has focus an Esc
+                        // would close that window ("shows for a sec then hides").
+                        for (int k = 0; k < 4 && FlyoutFocused(); k++) { Press(0x1B); Thread.Sleep(150); }
+                    }
+                    return true;
+                }
+                if (flyout && FlyoutFocused()) Press(0x1B);
+            }
+            catch { if (flyout && FlyoutFocused()) Press(0x1B); }
+            return false;
+        }
+
+        static bool FlyoutFocused()
+        {
+            try
+            {
+                AutomationElement f = Top("TopLevelWindowForOverflowXamlIsland");
+                if (f == null) return false;
+                IntPtr fg = Win32.GetForegroundWindow(), h = new IntPtr(f.Current.NativeWindowHandle);
+                if (fg == h || fg == IntPtr.Zero) return fg == h;
+                uint p1, p2; GetWindowThreadProcessId(fg, out p1); GetWindowThreadProcessId(h, out p2);
+                return p1 == p2;
+            }
+            catch { return false; }
+        }
+
+        [DllImport("user32")] static extern bool EnumWindows(EnumProcCb p, IntPtr l);
+        [DllImport("user32")] static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32")] static extern int GetWindowTextLength(IntPtr h);
+        [DllImport("user32", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder sb, int n);
+        [DllImport("user32")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("user32")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+        delegate bool EnumProcCb(IntPtr h, IntPtr l);
+
+        static void Log(string s) { try { File.AppendAllText(Path.Combine(Dir, "click.log"), DateTime.Now.ToString("HH:mm:ss ") + s + "\r\n"); } catch { } }
+
+        // Visible, titled, non-tool top-level windows of other processes.
+        static List<IntPtr> TopWindows()
+        {
+            var list = new List<IntPtr>();
+            uint me = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+            EnumWindows((h, l) =>
+            {
+                if (!IsWindowVisible(h) || GetWindow(h, 4) != IntPtr.Zero) return true;
+                if ((GetWindowLong(h, -20) & 0x80) != 0) return true;
+                if (GetWindowTextLength(h) == 0) return true;
+                uint pid; GetWindowThreadProcessId(h, out pid); if (pid == me) return true;
+                list.Add(h); return true;
+            }, IntPtr.Zero);
+            return list;
+        }
+
+        static string Norm(string s) { return new string((s ?? "").Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant(); }
+
+        // Finds the app's main window (by process name or window title matching the tray name) and focuses it.
+        static bool ActivateApp(TrayItem t)
+        {
+            IntPtr w = FindAppWindow(t); if (w == IntPtr.Zero) return false;
+            WinUtil.Focus(w); Thread.Sleep(120);
+            if (Win32.GetForegroundWindow() != w) WinUtil.Focus(w);
+            return true;
+        }
+
+        static IntPtr FindAppWindow(TrayItem t)
+        {
+            try
+            {
+                string key = Norm(t.Key), first = Norm(t.Key.Split(' ')[0]);
+                if (key.Length < 3) return IntPtr.Zero;
+                uint me = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                IntPtr best = IntPtr.Zero; int bestScore = 0;
+                var names = new Dictionary<uint, string>();
+                EnumWindows((h, l) =>
+                {
+                    if (!IsWindowVisible(h) || GetWindow(h, 4) != IntPtr.Zero) return true; // owned popups
+                    if ((GetWindowLong(h, -20) & 0x80) != 0) return true;                   // tool windows
+                    int n = GetWindowTextLength(h); if (n == 0) return true;
+                    uint pid; GetWindowThreadProcessId(h, out pid); if (pid == me) return true;
+                    var sb = new System.Text.StringBuilder(n + 1); GetWindowText(h, sb, n + 1);
+                    string title = Norm(sb.ToString()), pn;
+                    if (!names.TryGetValue(pid, out pn))
+                    {
+                        try { pn = Norm(System.Diagnostics.Process.GetProcessById((int)pid).ProcessName); } catch { pn = ""; }
+                        names[pid] = pn;
+                    }
+                    if (pn == "explorer" || pn == "applicationframehost" || pn == "textinputhost") return true;
+                    int sc = 0;
+                    if (pn == key || pn == first) sc = 3;
+                    else if (pn.Length >= 4 && (key.StartsWith(pn) || pn.StartsWith(first))) sc = 2;
+                    else if (title.Contains(key)) sc = 1;
+                    if (sc > bestScore) { bestScore = sc; best = h; }
+                    return true;
+                }, IntPtr.Zero);
+                return best;
+            }
+            catch { return IntPtr.Zero; }
         }
 
         // Centre of the button. Some buttons report an oversized rectangle (Monitorian: 222x172) overlapping the

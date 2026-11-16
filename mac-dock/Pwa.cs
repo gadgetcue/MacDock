@@ -22,13 +22,15 @@ namespace MacDock
             if (id == null) return false;
             if (id.IndexOf("._crx_", StringComparison.OrdinalIgnoreCase) > 0) return true;
             // Chromium --app=URL windows and other web-app flavours: "<Browser>._<app name>" (e.g. "Chrome._https_www.youtube.com")
-            int dot = id.IndexOf("._", StringComparison.Ordinal);
-            if (dot <= 0 || id.IndexOfAny(new[] { '!', '\\', '/' }) >= 0) return false;
+            // Also "<Browser>.<host>_<path>" (e.g. "Brave.www.youtube.com_/"): the browser's own window id is just "<Browser>".
+            if (id.IndexOfAny(new[] { '!', '\\' }) >= 0) return false;
+            int dot = id.IndexOf('.');
+            if (dot <= 0 || dot >= id.Length - 1) return false;
+            if (id.StartsWith("Microsoft.Edge.", StringComparison.OrdinalIgnoreCase)) return true;
             string b = id.Substring(0, dot);
             return b.StartsWith("Brave", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Chrome", StringComparison.OrdinalIgnoreCase)
-                || b.StartsWith("MSEdge", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Microsoft.Edge", StringComparison.OrdinalIgnoreCase)
-                || b.StartsWith("Chromium", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Vivaldi", StringComparison.OrdinalIgnoreCase)
-                || b.StartsWith("Opera", StringComparison.OrdinalIgnoreCase);
+                || b.StartsWith("MSEdge", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Chromium", StringComparison.OrdinalIgnoreCase) || b.Equals("Safari", StringComparison.OrdinalIgnoreCase)
+                || b.StartsWith("Vivaldi", StringComparison.OrdinalIgnoreCase) || b.StartsWith("Opera", StringComparison.OrdinalIgnoreCase);
         }
 
         [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
@@ -53,6 +55,14 @@ namespace MacDock
         }
 
         public static string TargetFor(string aumid) { return AppsFolder + aumid; }
+
+        // The same web app: equal ids, or one is the other plus a ".<profile>" style suffix.
+        public static bool SameApp(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) return true;
+            return a.StartsWith(b + ".", StringComparison.OrdinalIgnoreCase) || b.StartsWith(a + ".", StringComparison.OrdinalIgnoreCase);
+        }
 
         // The id inside "shell:AppsFolder\<id>", or null for any other target.
         public static string IdOfTarget(string target)
@@ -135,7 +145,7 @@ namespace MacDock
                 cls.Clear();
                 GetClassName(h, cls, cls.Capacity);
                 if (!anyWindow && cls.ToString() != "Chrome_WidgetWin_1") return true; // Brave, Edge and Chrome windows
-                if (!string.Equals(AumidOfWindow(h), aumid, StringComparison.OrdinalIgnoreCase)) return true;
+                if (!SameApp(AumidOfWindow(h), aumid)) return true;
                 found = h;
                 return false;
             }, IntPtr.Zero);
@@ -152,8 +162,11 @@ namespace MacDock
                 IntPtr w = FindWindow(id);
                 if (w != IntPtr.Zero) { WinUtil.Focus(w); return true; }
             }
-            try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); return true; }
-            catch { return false; }
+            // ShellExecute can block the calling thread for a second or more (folder handlers, shell extensions), so it never runs on the UI thread.
+            var th = new System.Threading.Thread(() => { try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); } catch { } }) { IsBackground = true };
+            th.SetApartmentState(System.Threading.ApartmentState.STA);
+            th.Start();
+            return true;
         }
 
         // ---------- opening what a notification points at ----------
@@ -203,7 +216,17 @@ namespace MacDock
         // ---------- the web app's own icon ----------
 
         // The icon of a web app's Start-menu shortcut (it points at the .ico Chromium wrote for the app), looked up by name.
-        public static Bitmap IconFor(string name)
+        // Aero Browser ("Safari") shortcuts launch with --app=URL (no --app-id) and are named "<n> <Site>"; its running ids are
+        // "Safari._app_<host>", so those are matched by the host inside the shortcut's URL.
+        public static Bitmap IconForId(string id, string name)
+        {
+            string host = null;
+            int i = id == null ? -1 : id.IndexOf("._app_", StringComparison.OrdinalIgnoreCase);
+            if (i > 0) host = id.Substring(i + 6);
+            return IconFor(name, host);
+        }
+
+        public static Bitmap IconFor(string name, string host = null)
         {
             try
             {
@@ -221,11 +244,15 @@ namespace MacDock
                     if (!Directory.Exists(root)) continue;
                     foreach (string lnk in Directory.GetFiles(root, "*.lnk", SearchOption.AllDirectories))
                     {
-                        if (Normalize(Path.GetFileNameWithoutExtension(lnk)) != wanted) continue;
+                        bool byName = Normalize(Path.GetFileNameWithoutExtension(lnk)) == wanted;
+                        if (!byName && host == null) continue;
                         object link = shellType.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { lnk });
                         string args = (string)link.GetType().InvokeMember("Arguments", System.Reflection.BindingFlags.GetProperty, null, link, null);
                         string icon = (string)link.GetType().InvokeMember("IconLocation", System.Reflection.BindingFlags.GetProperty, null, link, null);
-                        if (args == null || args.IndexOf("--app-id", StringComparison.OrdinalIgnoreCase) < 0 || string.IsNullOrEmpty(icon)) continue;
+                        if (args == null || string.IsNullOrEmpty(icon)) continue;
+                        bool appUrl = args.IndexOf("--app=", StringComparison.OrdinalIgnoreCase) >= 0;
+                        if (args.IndexOf("--app-id", StringComparison.OrdinalIgnoreCase) < 0 && !appUrl) continue;
+                        if (!byName && args.IndexOf(host, StringComparison.OrdinalIgnoreCase) < 0) continue;
                         string file = icon;
                         int comma = file.LastIndexOf(',');
                         if (comma > 0) file = file.Substring(0, comma);

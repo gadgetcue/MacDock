@@ -119,6 +119,14 @@ namespace MacDock
             hover = -1; xHot = false;
             if (tiles.Count == 0) { Close(); return; }
             Layout(true);
+            // Re-pick the hovered tile at the new layout so its X is drawn straight away (no stale/-1 hover).
+            try
+            {
+                NativeMethods.POINT cp; NativeMethods.GetCursorPos(out cp);
+                Point c = new Point(cp.X - Bounds.Left, cp.Y - Bounds.Top);
+                for (int k = 0; k < tiles.Count; k++) if (tiles[k].Cell.Contains(c)) { hover = k; break; }
+            }
+            catch { }
             if (backdrop != null)
             {
                 try
@@ -209,6 +217,7 @@ namespace MacDock
             return new Rectangle(t.Cell.Left + (TileW - w) / 2, t.Cell.Top + 6 + (areaH - h) / 2, w, h);
         }
 
+        DateTime lastX = DateTime.MinValue;
         void Poll()
         {
             NativeMethods.POINT p; NativeMethods.GetCursorPos(out p);
@@ -239,6 +248,7 @@ namespace MacDock
             if (idx != hover) { hover = idx; xHot = onX; SetupThumbs(); Redraw(); }
             else if (onX != xHot) { xHot = onX; Redraw(); }
 
+            if (hover >= 0 && (DateTime.UtcNow - lastX).TotalMilliseconds >= 120) { lastX = DateTime.UtcNow; DrawX(); } // re-assert the X; closing a window can push it behind the thumbnails
             bool down = (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0;
             if (dragMode)
             {
@@ -318,7 +328,10 @@ namespace MacDock
                 }
             }
             xs.Present(xo.Handle, Left + x.Left - 1, Top + x.Top - 1, 255);
+            // Keep the X above the thumbnail host, which can be re-raised after a relayout.
+            SetWindowPos(xo.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
         }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {

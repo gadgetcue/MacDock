@@ -24,7 +24,7 @@ namespace MacDock
             try { sb.Append(IconPack.Enabled).Append('|'); } catch { }
             try
             {
-                foreach (string d in new[] { AppPaths.IconsDir, Path.Combine(AppPaths.IconsDir, "dark"), Path.GetFullPath(Path.Combine(AppPaths.ExeDir, "..", "icons")), Path.GetFullPath(Path.Combine(AppPaths.ExeDir, "..", "dark-icons")), Path.Combine(AppPaths.ExeDir, "icons-theme") })
+                foreach (string d in new[] { AppPaths.IconsDir, IconPack.CustomDir, Path.Combine(AppPaths.IconsDir, "dark"), Path.GetFullPath(Path.Combine(AppPaths.ExeDir, "..", "icons")), Path.GetFullPath(Path.Combine(AppPaths.ExeDir, "..", "dark-icons")), Path.Combine(AppPaths.ExeDir, "icons-theme") })
                     if (Directory.Exists(d)) sb.Append(d).Append(Directory.GetLastWriteTimeUtc(d).Ticks).Append('|');
                 if (File.Exists(AppPaths.IconMap)) sb.Append(File.GetLastWriteTimeUtc(AppPaths.IconMap).Ticks);
             }

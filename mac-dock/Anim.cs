@@ -39,7 +39,7 @@ namespace MacDock
         readonly Action step;
         readonly System.Threading.ManualResetEventSlim gate = new System.Threading.ManualResetEventSlim(false);
         volatile bool active, closing;
-        volatile float dt = DisplayDt();
+        volatile float dt = DisplayDt(null);
         int pending;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
@@ -55,17 +55,84 @@ namespace MacDock
         }
         [DllImport("user32.dll", CharSet = CharSet.Ansi)] static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
 
-        // Initial frame interval from the primary display's refresh rate; measured vsyncs refine it.
-        static float DisplayDt()
+        // Per-monitor vblank wait (D3DKMT): ticks exactly at the refresh rate of the monitor the window is on, even with
+        // mixed-rate monitors, where DwmFlush beats between both. Falls back to DwmFlush when unavailable.
+        [StructLayout(LayoutKind.Sequential)] struct OpenAdapter { public IntPtr hdc; public uint hAdapter, luidLo; public int luidHi; public uint src; }
+        [StructLayout(LayoutKind.Sequential)] struct WaitVblank { public uint hAdapter, hDevice, src; }
+        [StructLayout(LayoutKind.Sequential)] struct CloseAdapter { public uint hAdapter; }
+        [DllImport("gdi32.dll")] static extern int D3DKMTOpenAdapterFromHdc(ref OpenAdapter a);
+        [DllImport("gdi32.dll")] static extern int D3DKMTCloseAdapter(ref CloseAdapter a);
+        [DllImport("gdi32.dll")] static extern int D3DKMTWaitForVerticalBlankEvent(ref WaitVblank w);
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateDC(string drv, string dev, string port, IntPtr init);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr mon, ref MONITORINFOEX mi);
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct MONITORINFOEX { public int cbSize; public int l, t, r, b, wl, wt, wr, wb, flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dev; }
+
+        // Off: waiting on raw vblank events made the user's monitor glitch while scrolling/hovering. Back to the compositor tick.
+        const bool UseVblankWait = false; // per-monitor vblank, self-checking: drops to the compositor tick (DwmFlush) for good if its timing is off
+        bool vblankBad; int offRate;
+        IntPtr curMon; WaitVblank wait; bool haveWait; volatile bool recheck = true; volatile string devName;
+        static float DisplayDt(string dev)
         {
             try
             {
                 DEVMODE dm = new DEVMODE(); dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
-                if (EnumDisplaySettings(null, -1, ref dm) && dm.dmDisplayFrequency > 1) return 1f / dm.dmDisplayFrequency;
+                if (EnumDisplaySettings(dev, -1, ref dm) && dm.dmDisplayFrequency > 1) return 1f / dm.dmDisplayFrequency;
             }
             catch { }
             return 1f / 60;
         }
+
+        // UI thread: which monitor is the window on now? Cheap; re-run on every wake and step so a moved window re-targets.
+        void CheckMonitor()
+        {
+            try
+            {
+                if (!owner.IsHandleCreated) return;
+                IntPtr m = MonitorFromWindow(owner.Handle, 2);
+                if (m == curMon) return;
+                MONITORINFOEX mi = new MONITORINFOEX(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+                if (!GetMonitorInfo(m, ref mi)) return;
+                curMon = m; devName = mi.dev; dt = DisplayDt(mi.dev); recheck = true; // refine from measured ticks if the vblank wait is unavailable
+            }
+            catch { }
+        }
+
+        // Worker thread: (re)open the output of the current monitor.
+        void OpenOutput()
+        {
+            recheck = false;
+            if (haveWait) { try { CloseAdapter c = new CloseAdapter { hAdapter = wait.hAdapter }; D3DKMTCloseAdapter(ref c); } catch { } haveWait = false; }
+            string dev = devName; if (dev == null || !UseVblankWait || vblankBad) return;
+            try
+            {
+                IntPtr dc = CreateDC(dev, null, null, IntPtr.Zero);
+                if (dc == IntPtr.Zero) return;
+                OpenAdapter oa = new OpenAdapter { hdc = dc };
+                int r = D3DKMTOpenAdapterFromHdc(ref oa);
+                DeleteDC(dc);
+                if (r == 0) { wait = new WaitVblank { hAdapter = oa.hAdapter, src = oa.src }; haveWait = true; }
+            }
+            catch { }
+        }
+
+        // Blocks until the next vblank of the window's monitor (or a compositor tick if that isn't available).
+        void WaitFrame()
+        {
+            if (recheck) OpenOutput();
+            if (haveWait) { try { if (D3DKMTWaitForVerticalBlankEvent(ref wait) == 0) return; } catch { } haveWait = false; }
+            // Compositor clock: steady at the DWM composition rate (the fastest monitor's), unlike DwmFlush which jittered here.
+            if (false && !dcompFailed) // off: with no handles this just sleeps the full 100 ms timeout (scroll ran at ~13 fps); DwmFlush ticks per refresh
+            {
+                try { DCompositionWaitForCompositorClock(0, IntPtr.Zero, 100); return; }
+                catch { dcompFailed = true; }
+            }
+            if (DwmFlush() != 0) System.Threading.Thread.Sleep(4); // DWM off: ~250 Hz polling
+        }
+        [DllImport("dcomp.dll")] static extern uint DCompositionWaitForCompositorClock(uint count, IntPtr handles, uint timeout);
+        bool dcompFailed;
 
         public VsyncDriver(System.Windows.Forms.Control owner, Action step)
         {
@@ -77,7 +144,7 @@ namespace MacDock
         public bool Active { get { return active; } }
         public double Dt { get { return dt; } }
 
-        public void Wake() { active = true; gate.Set(); }
+        public void Wake() { CheckMonitor(); active = true; gate.Set(); }
         public void Sleep() { active = false; gate.Reset(); }
 
         // The measured gap, unless it's about one refresh (then the steady refresh interval, so springs don't jitter).
@@ -90,24 +157,38 @@ namespace MacDock
             while (!closing)
             {
                 if (!active) { prev = 0; gate.Wait(250); continue; }
-                if (DwmFlush() != 0) System.Threading.Thread.Sleep(4); // DWM off: ~250 Hz polling
-                long t = Stopwatch.GetTimestamp();
+                WaitFrame();
+                long t =Stopwatch.GetTimestamp();
                 if (prev != 0)
                 {
                     double d = (t - prev) / (double)Stopwatch.Frequency;
-                    if (d > 1.0 / 300 && d < 1.0 / 30) dt = (float)(dt * 0.85 + d * 0.15);
+                    if (!haveWait && d > 1.0 / 300 && d < 1.0 / 30) dt = (float)(dt * 0.85 + d * 0.15);
+                    else if (haveWait) { if (d < dt * 0.5 || d > dt * 1.7) { if (++offRate > 12) { vblankBad = true; recheck = true; offRate = 0; } } else if (offRate > 0) offRate--; } // wait ticking off the monitor rate: give up on it
                 }
                 prev = t;
                 if (closing || !active || !owner.IsHandleCreated) continue;
                 if (System.Threading.Interlocked.Exchange(ref pending, 1) == 0)
                 {
-                    try { owner.BeginInvoke(new Action(() => { System.Threading.Interlocked.Exchange(ref pending, 0); if (active) step(); })); }
+                    try { owner.BeginInvoke(new Action(() => { System.Threading.Interlocked.Exchange(ref pending, 0); CheckMonitor(); if (active) step(); })); }
                     catch { }
                 }
             }
         }
 
         public void Dispose() { closing = true; gate.Set(); }
+    }
+
+    // Drop-in for a short WinForms Timer used for fades: Tick fires once per display refresh instead of every ~15.6 ms.
+    sealed class FrameTimer : IDisposable
+    {
+        readonly VsyncDriver drv;
+        bool disposed;
+        public event EventHandler Tick;
+        public int Interval { get; set; }
+        public FrameTimer(System.Windows.Forms.Control owner) { drv = new VsyncDriver(owner, () => { if (!disposed && Tick != null) Tick(this, EventArgs.Empty); }); }
+        public void Start() { if (!disposed) drv.Wake(); }
+        public void Stop() { drv.Sleep(); }
+        public void Dispose() { if (disposed) return; disposed = true; drv.Dispose(); }
     }
 
     // Damped spring. omega is the natural frequency (rad/s, higher = snappier); zeta is the damping ratio

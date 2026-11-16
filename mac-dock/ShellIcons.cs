@@ -195,6 +195,7 @@ namespace MacDock
             return bmp;
         }
 
+        public static Bitmap LoadThumb(string path, int size) { return LoadFlags(path, size, 1); } // SIIGBF_BIGGERSIZEOK: the shell's cached thumbnail, decoded outside GDI+
         static Bitmap LoadFlags(string parsingName, int size, int flags)
         {
             // Internet shortcuts (.url / web links in the Start menu): the shell's icon handler for them runs the

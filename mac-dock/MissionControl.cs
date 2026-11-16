@@ -207,9 +207,10 @@ namespace MacDock
         {
         }
 
+        bool prewarmCtor; Thread pendingLoader;
         MissionControl(Page startPage, bool prewarm = false)
         {
-            page = startPage; hold = prewarm;
+            page = startPage; hold = prewarm; prewarmCtor = prewarm;
             previousForeground = prewarm ? IntPtr.Zero : Win32.GetForegroundWindow();
             // Topmost, so no other window can cover it (e.g. after a menu popup closes and focus moves on); its blur
             // sits in the same layer, just below it. The dock and bars are raised back above it by RaiseChrome.
@@ -232,8 +233,8 @@ namespace MacDock
             catch { blurTask = null; }
 
             tShot = System.Diagnostics.Stopwatch.GetTimestamp();
-            BuildTiles(); tTiles = System.Diagnostics.Stopwatch.GetTimestamp();
-            LayoutAll(); tLay = System.Diagnostics.Stopwatch.GetTimestamp();
+            var swB = System.Diagnostics.Stopwatch.StartNew(); BuildTiles(); Program.Slow("MC BuildTiles", swB); tTiles = System.Diagnostics.Stopwatch.GetTimestamp();
+            swB.Restart(); LayoutAll(); Program.Slow("MC LayoutAll", swB); tLay = System.Diagnostics.Stopwatch.GetTimestamp();
             deskBlur = null; // first frame is tint-only; the real blur is swapped in from Step() when the worker finishes
             if (glassComp != null) { glassComp.Dispose(); glassComp = null; }
             tBuilt = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -247,17 +248,17 @@ namespace MacDock
             timer.Interval = 16;
             timer.Tick += (s, e) => { if (!hold) Step(); };
             clock.Reset();
-            if (prewarm) { spareBorn = Environment.TickCount; var hh = Handle; dirty = false; } else timer.Start(); // prewarm: create the window and render it once, hidden
+            if (prewarm) { spareBorn = Environment.TickCount; swB.Restart(); var hh = Handle; Program.Slow("MC Handle", swB); dirty = false; prewarmCtor = false; if (pendingLoader != null) { pendingLoader.Start(); pendingLoader = null; } } else timer.Start(); // prewarm: create the window and render it once, hidden
         }
 
         // A hidden, rendered copy is kept ready so opening only has to show it.
         public static void Prewarm()
         {
-            if (spare != null || current != null) return;
-            try { spare = new MissionControl(Page.Apps, true); } catch { spare = null; return; }
+            if (spare != null || current != null) return; var swP = System.Diagnostics.Stopwatch.StartNew();
+            try { spare = new MissionControl(Page.Apps, true); } catch { spare = null; return; } Program.Slow("MC prewarm ctor", swP);
             // Let the icons arrive, redraw the hidden frame once with them, then hand its memory back to Windows.
             var rt = new System.Windows.Forms.Timer { Interval = 2500 };
-            rt.Tick += (s, e) => { rt.Stop(); rt.Dispose(); MissionControl sp = spare; if (sp == null || sp.IsDisposed || sp.disposedFlag || current != null) return; try { sp.lastStaticKey = int.MinValue; sp.Render(); } catch { } MemTrim.Soon(500); };
+            rt.Tick += (s, e) => { rt.Stop(); rt.Dispose(); MissionControl sp = spare; if (sp == null || sp.IsDisposed || sp.disposedFlag || current != null) return; var swR = System.Diagnostics.Stopwatch.StartNew(); try { sp.lastStaticKey = int.MinValue; sp.Render(); } catch { } Program.Slow("MC prewarm render", swR); MemTrim.Soon(500); };
             rt.Start();
         }
         public static void PrewarmSoon(int ms)
@@ -281,7 +282,7 @@ namespace MacDock
             previousForeground = Win32.GetForegroundWindow();
             try { Bitmap shot = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb); using (Graphics sg = Graphics.FromImage(shot)) sg.CopyFromScreen(Bounds.Location, Point.Empty, Bounds.Size); pendingShot = shot; } catch { }
             tShot = tTiles = tLay = tBuilt = System.Diagnostics.Stopwatch.GetTimestamp();
-            hold = false; prog = 0; fadeGoal = 1; tTrig = tt; caretOn = true;
+            hold = false; closing = false; suppressRestore = false; prog = 0; fadeGoal = 1; tTrig = tt; caretOn = true; // a stray BeginClose on the hidden spare must not leave the opened page stuck "closing" (no partial redraw, Toggle ignored)
             clock.Reset(); caretTimer.Start(); timer.Start();
         }
 
@@ -303,7 +304,7 @@ namespace MacDock
 
         void BeginClose()
         {
-            if (closing) return;
+            if (closing || hold) return; // a hidden pre-warmed spare ignores close requests
             closing = true;
             fadeGoal = 0;
             clock.Reset();
@@ -376,6 +377,7 @@ namespace MacDock
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
                     AppDirectory.Build();
+                    for (int w = 0; w < 200 && !IsHandleCreated && !disposedFlag; w++) Thread.Sleep(50); // the page may still be constructing; BeginInvoke needs a handle
                     try { BeginInvoke(new Action(() => { allTiles.Clear(); BuildTiles(); LayoutAll(); dirty = true; })); }
                     catch { }
                 });
@@ -416,7 +418,7 @@ namespace MacDock
                     Bitmap packed = webApp ? null : IconPack.ForName(t.Name); // macOS icon, if the pack has one for this app
                     if (packed != null) { lock (tileIconCache) tileIconCache[t.Target] = packed; t.Icon = packed; dirty = true; continue; }
 
-                    Bitmap raw = (webApp ? Pwa.IconFor(t.Name) : null) ?? ShellIcons.Load(t.Target, 96); if (raw == null) raw = ShellIcons.Generic(t.Name, 96);
+                    Bitmap raw = (webApp ? Pwa.IconForId(Pwa.IdOfTarget(t.Target), t.Name) : null) ?? ShellIcons.Load(t.Target, 96); if (raw == null) raw = ShellIcons.Generic(t.Name, 96);
                     if (raw == null) { lock (tileIconCache) iconsFailed.Add(t.Target); continue; }
                     Bitmap tiled = DockForm.Tile(raw);
                     lock (tileIconCache) tileIconCache[t.Target] = tiled;
@@ -424,8 +426,8 @@ namespace MacDock
                     dirty = true;
                 }
             }) { IsBackground = true, Name = "MissionControl icons" };
-            loader.SetApartmentState(ApartmentState.STA);
-            loader.Start();
+            loader.SetApartmentState(ApartmentState.STA); loader.Priority = ThreadPriority.BelowNormal;
+            if (prewarmCtor) pendingLoader = loader; else loader.Start(); // a hidden pre-warm starts it after its first frame: icon loading and drawing fight over GDI+ and froze the UI for seconds
         }
 
         // Loads every app icon into the session cache at startup, so All Apps never has to load them when opened.
@@ -464,7 +466,7 @@ namespace MacDock
                     Bitmap bmp = webApp ? null : IconPack.ForName(app.Key);
                     if (bmp == null)
                     {
-                        Bitmap raw = (webApp ? Pwa.IconFor(app.Key) : null) ?? ShellIcons.Load(target, 96); if (raw == null) raw = ShellIcons.Generic(app.Key, 96);
+                        Bitmap raw = (webApp ? Pwa.IconForId(app.Value, app.Key) : null) ?? ShellIcons.Load(target, 96); if (raw == null) raw = ShellIcons.Generic(app.Key, 96);
                         if (raw != null) bmp = DockForm.Tile(raw);
                     }
                     lock (tileIconCache) { if (bmp != null) tileIconCache[target] = bmp; else iconsFailed.Add(target); }
@@ -913,7 +915,7 @@ namespace MacDock
         {
             if (!IsHandleCreated || disposedFlag) return;
             if (tRend == 0) tRend = System.Diagnostics.Stopwatch.GetTimestamp(); nRender++;
-            if (surface == null) surface = new Surface(Width, Height);
+            var swS = System.Diagnostics.Stopwatch.StartNew(); if (surface == null) surface = new Surface(Width, Height); Program.Slow("MC Surface", swS);
 
             // While only the tile grid moves (scrolling, hover, icons arriving) the header, search box and background
             // are already on the surface: redraw just the content band and tell Windows only that band changed.
@@ -966,10 +968,10 @@ namespace MacDock
                 else DrawTiles(g);
                 long r3 = System.Diagnostics.Stopwatch.GetTimestamp();
                 DrawFooter(g);
-                if (rdbg == null) { double Fq = System.Diagnostics.Stopwatch.Frequency / 1000.0; rdbg = string.Format(" pre {0:0.0} header {1:0.0} tiles {2:0.0} footer {3:0.0}", (r1 - tRend) / Fq, (r2 - r1) / Fq, (r3 - r2) / Fq, (System.Diagnostics.Stopwatch.GetTimestamp() - r3) / Fq); }
+                if (rdbg == null) { double Fq = System.Diagnostics.Stopwatch.Frequency / 1000.0; rdbg = string.Format(" pre {0:0.0} header {1:0.0} tiles {2:0.0} footer {3:0.0}", (r1 - tRend) / Fq, (r2 - r1) / Fq, (r3 - r2) / Fq, (System.Diagnostics.Stopwatch.GetTimestamp() - r3) / Fq); Program.Log("MC first render:" + rdbg); }
             }
 
-            PresentFrame(Rectangle.Empty);
+            var swPf = System.Diagnostics.Stopwatch.StartNew(); PresentFrame(Rectangle.Empty); Program.Slow("MC PresentFrame", swPf);
             bool appsBlur = page == Page.Apps;
             if (appsBlur != backdropForApps) { backdrop.HideBackdrop(); backdropForApps = appsBlur; }
             if (hold || (appsBlur && (deskBlur != null || pendingShot != null || blurTask != null))) { }
@@ -1141,6 +1143,7 @@ namespace MacDock
 
         void DrawHeader(Graphics g)
         {
+            var swH = System.Diagnostics.Stopwatch.StartNew();
             if (page == Page.Apps)
             {
                 Rectangle pn = PanelRect;
@@ -1150,8 +1153,8 @@ namespace MacDock
                     using (GraphicsPath sp = Layered.RoundedRect(sr, 28 + k * 3))
                     using (var sb = new SolidBrush(Color.FromArgb(9, 0, 0, 0)))
                         g.FillPath(sb, sp);
-                }
-                GlassPanel.DrawLaunchpadGlass(g, pn, 28, deskBlur, Point.Empty);
+                } Program.Slow("MC shadow", swH); swH.Restart();
+                GlassPanel.DrawLaunchpadGlass(g, pn, 28, deskBlur, Point.Empty); Program.Slow("MC glass", swH); swH.Restart();
             }
 
             if (page == Page.Apps && openFolder == null)
@@ -1173,7 +1176,7 @@ namespace MacDock
                         g.DrawString(Categories[i], titleFont, text, r, Typography.Format(StringAlignment.Center));
                     }
                 }
-                g.Restore(st);
+                g.Restore(st); Program.Slow("MC chips", swH); swH.Restart();
 
                 // Floating search pill: wide dark glass, "A" glyph, large light placeholder, blinking caret, "..." button.
                 Rectangle box = PillRect;

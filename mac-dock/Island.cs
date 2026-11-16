@@ -128,7 +128,7 @@ namespace MacDock
             }
             else
             {
-                mode = Mode.Idle; animating = false; timer.Stop();
+                mode = Mode.Idle; animating = false; if (vd != null) vd.Sleep(); timer.Stop();
                 if (Visible) Hide();
             }
         }
@@ -150,8 +150,7 @@ namespace MacDock
             timer.Tick += (s, e) => Step();
             timer.Start();
 
-            var vsync = new System.Threading.Thread(VsyncLoop) { IsBackground = true, Name = "island-vsync", Priority = System.Threading.ThreadPriority.AboveNormal };
-            vsync.Start();
+            vd = new VsyncDriver(this, Step); // per-monitor vblank pacing (follows the monitor the island is on)
         }
 
         protected override CreateParams CreateParams
@@ -184,46 +183,21 @@ namespace MacDock
             Raise();
         }
 
-        [System.Runtime.InteropServices.DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);
-        volatile float vsyncDtF = 1f / 60;
-        double vsyncDt { get { return vsyncDtF; } }
-
-        void VsyncLoop()
-        {
-            timeBeginPeriod(1);
-            long prev = 0;
-            while (!closing)
-            {
-                if (!animating) { prev = 0; gate.Wait(250); continue; }
-                if (DwmFlush() != 0) System.Threading.Thread.Sleep(4); // DWM off: fall back to ~250 Hz polling
-                long t = System.Diagnostics.Stopwatch.GetTimestamp();
-                if (prev != 0)
-                {
-                    double d = (t - prev) / (double)System.Diagnostics.Stopwatch.Frequency;
-                    if (d > 1.0 / 300 && d < 1.0 / 30) vsyncDtF = (float)(vsyncDtF * 0.85 + d * 0.15); // smoothed refresh interval
-                }
-                prev = t;
-                if (closing || !IsHandleCreated) continue;
-                if (System.Threading.Interlocked.Exchange(ref pendingFrame, 1) == 0)
-                {
-                    try { BeginInvoke(new Action(() => { System.Threading.Interlocked.Exchange(ref pendingFrame, 0); Step(); })); }
-                    catch { }
-                }
-            }
-        }
+        VsyncDriver vd;
+        double vsyncDt { get { return vd == null ? 1.0 / 60 : vd.Dt; } }
 
         // Switches to vsync-driven frames until the motion settles.
         void Wake()
         {
             animating = true;
             timer.Stop();
-            gate.Set();
+            if (vd != null) vd.Wake();
         }
 
         protected override void Dispose(bool disposing)
         {
             closing = true;
-            gate.Set();
+            if (vd != null) vd.Dispose();
             if (disposing)
             {
                 timer.Dispose();
@@ -327,7 +301,7 @@ namespace MacDock
             if (Fullscreen.Active)
             {
                 if (Visible) Hide(); // step aside for the fullscreen app; the slow timer keeps polling
-                animating = false;
+                animating = false; if (vd != null) vd.Sleep();
                 timer.Interval = 250;
                 timer.Start();
                 return;
@@ -407,7 +381,7 @@ namespace MacDock
                 if (!animating) Wake(); // hover/notification started motion from the slow timer: hand over to vsync
                 return;
             }
-            animating = false;
+            animating = false; if (vd != null) vd.Sleep();
             // Resolve icons for the rows the panel will show while nothing is moving, so opening never stalls on a shell lookup.
             if (mode == Mode.Idle)
                 for (int i = 0, n = Math.Min(3, Feed.History.Count); i < n; i++)

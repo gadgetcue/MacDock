@@ -34,9 +34,10 @@ namespace MacDock
 
         public static Size MeasureText(Graphics g, string text, Font font, Size box, TextFormatFlags f)
         {
+            if (string.IsNullOrEmpty(text) || font == null) return Size.Empty;
             using (var sf = Fmt(f))
             {
-                SizeF s = g.MeasureString(text, font, new SizeF(box.Width == int.MaxValue ? 100000 : box.Width, box.Height <= 0 ? 100000 : box.Height), sf);
+                SizeF s = g.MeasureString(text, font, new SizeF(box.Width == int.MaxValue ? 100000 : Math.Max(1, box.Width), box.Height <= 0 ? 100000 : box.Height), sf);
                 return new Size((int)Math.Ceiling(s.Width), (int)Math.Ceiling(s.Height));
             }
         }

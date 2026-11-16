@@ -49,28 +49,32 @@ You do not have to take our word for it:
 - **Touchpad gestures**: 4- or 5-finger swipe up/down on a Precision Touchpad opens and closes Mission Control.
 - **Spotlight**: global hotkey search.
 - **Settings app**: dock, theme and icon options.
-- **Icon packs**: `.icns` icon packs in `icons/` and `dark-icons/`, with optional macosicons.com lookup.
+- **Icon packs**: `.icns` icon packs in `icons/` and `dark-icons/`, with optional macosicons.com lookup, a "Use original app icons" master switch and your own custom pack (folder or .zip).
 - **Web apps**: Brave, Edge and Chrome "Install as app" windows are treated as their own apps.
-- **LocalSend**: AirDrop-style file sharing with nearby devices.
+- **LocalSend**: AirDrop-style file sharing with nearby devices, with a device-picker popup, an Explorer "Send with LocalSend" right-click entry, and automatic port fallback.
 - **Downloads and folder fan**: dock folders open as a Fan, Grid or List, with folder colors, rename and drag to the Recycle Bin.
 - **Media tile and more Control Center tiles**: now-playing artwork and title, Night light, Project, Battery saver, Airplane mode.
 - **Fullscreen aware**: the dock, bar and island hide for fullscreen apps.
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
-## Screenshots (v1.5)
-![Desktop with dock and menu bar](screenshots/v1.5/desktop.jpg)
+## Screenshots (v2.1)
+![Desktop with dock and menu bar](screenshots/v2.1/desktop.jpg)
 
-![Dock magnification](screenshots/v1.5/dock-magnify.jpg)
+![Dock magnification](screenshots/v2.1/dock-magnify.jpg)
 
-![Launchpad with the search pill](screenshots/v1.5/launchpad.jpg)
+![Launchpad](screenshots/v2.1/launchpad.jpg)
 
-![Control Center](screenshots/v1.5/control-center.jpg)
+![Folder fan with menus on top](screenshots/v2.1/folder-fan.jpg)
 
-![MacDock Settings](screenshots/v1.5/settings.jpg)
+![Control Center](screenshots/v2.1/control-center.jpg)
 
-![Apple menu](screenshots/v1.5/apple-menu.jpg)
+![Apple menu](screenshots/v2.1/apple-menu.jpg)
 
-Screenshots were taken on dark mode only; light mode was not captured for this release.
+![Icon master switch and custom icon packs](screenshots/v2.1/settings-icons.jpg)
+
+Screenshots were taken on dark mode only.
+
+![MacDock v2.1 mockup](instagram-v2.1/send/macdock-v2.1-light-1.png)
 
 ## Memory use
 Measured on the v1.5 build on Windows 11 (1920x1080) with the dock idle: **~7-43 MB working set** (about 24 MB average over a minute; Windows trims it), **~92-103 MB private bytes**, and a **peak working set of ~140 MB** since launch (start-up and opening Launchpad). Numbers vary with how many apps you pin and which icon packs you load.

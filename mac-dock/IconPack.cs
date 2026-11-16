@@ -36,8 +36,6 @@ namespace MacDock
             "# Maps Windows apps to icon files in the icons folder (no .png). Left: exe name without .exe, or the app's name.",
             "explorer = Finder",
             "file explorer = Finder",
-            "msedge = Safari",
-            "microsoft edge = Safari",
             "notepad = TextEdit",
             "calc = Calculator",
             "calculator = Calculator",
@@ -105,7 +103,7 @@ namespace MacDock
                             l.Trim().ToLowerInvariant().Replace(" ", "").StartsWith("@icons") && l.ToLowerInvariant().Contains("off"));
                     }
                     catch { }
-                    enabled = !off && Directory.Exists(Folder) && Directory.EnumerateFiles(Folder, "*.png").Any();
+                    enabled = !off && ((Directory.Exists(Folder) && Directory.EnumerateFiles(Folder, "*.png").Any()) || CustomPackCount() > 0);
                 }
                 return enabled.Value;
             }
@@ -165,6 +163,83 @@ namespace MacDock
             return ForKeys(new[] { appName });
         }
 
+        // ---- Custom icon pack: user-installed folder/zip of icons named after apps, e.g. "Chrome.png", "Visual Studio Code.png".
+        // Lives in %APPDATA%\MacDock\custom-pack. Wins over the built-in pack; the "Original icons" master switch turns it off too.
+        public static readonly string CustomDir = Path.Combine(AppPaths.DataDir, "custom-pack");
+        static readonly string[] PackExt = { ".png", ".ico", ".icns", ".jpg", ".jpeg", ".bmp" };
+
+        static bool IsPackFile(string f) { return Array.IndexOf(PackExt, Path.GetExtension(f).ToLowerInvariant()) >= 0; }
+
+        public static int CustomPackCount()
+        {
+            try { return Directory.Exists(CustomDir) ? Directory.EnumerateFiles(CustomDir).Count(IsPackFile) : 0; } catch { return 0; }
+        }
+
+        static Bitmap LoadCustomPack(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name) || !Directory.Exists(CustomDir)) return null;
+            foreach (string ext in PackExt)
+            {
+                string p = Path.Combine(CustomDir, name + ext);
+                if (!File.Exists(p)) continue;
+                Bitmap b = LoadFile("cp|" + name + ext, p);
+                if (b != null) return b;
+            }
+            return null;
+        }
+
+        // Installs a pack from a folder or .zip (icons are flattened into custom-pack; existing pack is replaced).
+        // Returns the number of icons installed, or -1 with an error message.
+        public static int InstallPack(string source, out string error)
+        {
+            error = null;
+            try
+            {
+                var staged = new List<KeyValuePair<string, Action<string>>>();
+                System.IO.Compression.ZipArchive zip = null;
+                try
+                {
+                    if (Directory.Exists(source))
+                    {
+                        foreach (string f in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+                        {
+                            if (!IsPackFile(f)) continue;
+                            string src = f;
+                            staged.Add(new KeyValuePair<string, Action<string>>(Path.GetFileName(f), dest => File.Copy(src, dest, true)));
+                        }
+                    }
+                    else if (File.Exists(source) && source.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                    {
+                        zip = System.IO.Compression.ZipFile.OpenRead(source);
+                        foreach (var en in zip.Entries)
+                        {
+                            if (en.Name.Length == 0 || !IsPackFile(en.Name) || en.Length > 20 * 1024 * 1024) continue;
+                            var e = en;
+                            staged.Add(new KeyValuePair<string, Action<string>>(Path.GetFileName(en.Name), dest => System.IO.Compression.ZipFileExtensions.ExtractToFile(e, dest, true)));
+                        }
+                    }
+                    else { error = "Choose a folder or a .zip file."; return -1; }
+
+                    if (staged.Count == 0) { error = "No icon files (.png, .ico, .icns, .jpg) found."; return -1; }
+                    if (Directory.Exists(CustomDir)) foreach (string old in Directory.GetFiles(CustomDir)) { try { File.Delete(old); } catch { } }
+                    Directory.CreateDirectory(CustomDir);
+                    int n = 0;
+                    foreach (var s in staged)
+                    {
+                        try { s.Value(Path.Combine(CustomDir, s.Key)); n++; } catch { }
+                    }
+                    return n;
+                }
+                finally { if (zip != null) zip.Dispose(); }
+            }
+            catch (Exception ex) { error = ex.Message; return -1; }
+        }
+
+        public static void RemovePack()
+        {
+            try { if (Directory.Exists(CustomDir)) foreach (string f in Directory.GetFiles(CustomDir)) { try { File.Delete(f); } catch { } } } catch { }
+        }
+
         // Turns an app name into a safe file name ("Visual Studio Code" stays as is; "a/b:c" becomes "a_b_c").
         public static string FileName(string name)
         {
@@ -211,6 +286,8 @@ namespace MacDock
         // In dark mode icons\dark\<name>.png wins when it exists; apps without a dark version keep their normal icon.
         static Bitmap Load(string name)
         {
+            Bitmap cp = LoadCustomPack(name);
+            if (cp != null) return cp;
             if (!Theme.Light) { Bitmap dk = LoadFile("darkp|" + name, Path.Combine(AppPaths.ExeDir, "icons-dark", name + ".png")); if (dk != null) return dk; }
             Bitmap themed = LoadThemed(name);
             if (themed != null) return themed;
