@@ -121,6 +121,8 @@ namespace MacDock
                 return;
             }
 
+            if (args.Any(a => a == "--typo-bench")) { var sw0 = Stopwatch.StartNew(); var lines = new List<string>(); Typography.Configure(AppPaths.Config); lines.Add("configure " + sw0.ElapsedMilliseconds); sw0.Restart(); Typography.Text(10f); lines.Add("text " + sw0.ElapsedMilliseconds); sw0.Restart(); Typography.Text(10f, Weight.Semibold); lines.Add("semibold " + sw0.ElapsedMilliseconds); sw0.Restart(); Typography.Text(10f, Weight.Medium); lines.Add("medium " + sw0.ElapsedMilliseconds); sw0.Restart(); var dd = new DockForm(); lines.Add("dockctor " + sw0.ElapsedMilliseconds); File.WriteAllLines(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scratch", "typobench.txt"), lines); return; }
+            { int fb = Array.FindIndex(args, a => a.Equals("--fan-bench", StringComparison.OrdinalIgnoreCase)); if (fb >= 0 && fb + 1 < args.Length) { Environment.ExitCode = DownloadsFan.Bench(args[fb + 1]); return; } }
             if (args.Any(a => a.Equals("--ls-selftest", StringComparison.OrdinalIgnoreCase))) { Environment.ExitCode = LocalSendTest.Run(args); return; }
             if (args.Any(a => a.Equals("--airdrop-probe", StringComparison.OrdinalIgnoreCase))) { Environment.ExitCode = AirDropProbe.Run(); return; }
 
@@ -303,6 +305,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
             var t = new System.Threading.Thread(() =>
             {
                 long lastPong = Environment.TickCount; bool logged = false; long stallStart = 0;
+                var seen = new Dictionary<string, int>(); // breadcrumbs sampled every 500 ms while the UI thread is stuck
                 while (true)
                 {
                     System.Threading.Thread.Sleep(500);
@@ -313,9 +316,10 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                         long pong = lastPong;
                         if (sent - pong > 1200)
                         {
-                            if (!logged) { logged = true; stallStart = pong; cpu0 = ThreadCpu(); Log("UI STALL begin (no response for " + (sent - pong) + " ms) mark=" + Mark); }
+                            if (!logged) { logged = true; stallStart = pong; cpu0 = ThreadCpu(); seen.Clear(); Log("UI STALL begin (no response for " + (sent - pong) + " ms) mark=" + Mark); }
+                            string mk = Mark ?? ""; int c; seen.TryGetValue(mk, out c); seen[mk] = c + 1;
                         }
-                        else if (logged) { logged = false; Log("UI STALL end after ~" + (sent - stallStart) + " ms; cpu: " + ThreadDelta(cpu0, uiId)); }
+                        else if (logged) { logged = false; Log("UI STALL end after ~" + (sent - stallStart) + " ms; cpu: " + ThreadDelta(cpu0, uiId) + "; where: " + string.Join(", ", seen.OrderByDescending(k => k.Value).Take(4).Select(k => k.Key + " x" + k.Value).ToArray())); }
                         ui.BeginInvoke((Action)(() => { long now = Environment.TickCount; if (logged && now - lastPong > 0) { } lastPong = now; }));
                     }
                     catch { }
@@ -404,7 +408,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
             if (!hidden) return;
             hidden = false;
 
-            foreach (IntPtr h in TrayWindows()) NativeMethods.ShowWindow(h, SW_SHOWNA);
+            foreach (IntPtr h in TrayWindows()) NativeMethods.ShowWindowAsync(h, SW_SHOWNA);
 
             IntPtr tray = FindWindow("Shell_TrayWnd", null);
             if (tray != IntPtr.Zero)
@@ -441,7 +445,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         static void HideWindows()
         {
             foreach (IntPtr h in TrayWindows())
-                if (NativeMethods.IsWindowVisible(h)) NativeMethods.ShowWindow(h, SW_HIDE);
+                if (NativeMethods.IsWindowVisible(h)) NativeMethods.ShowWindowAsync(h, SW_HIDE);
         }
 
         static List<IntPtr> TrayWindows()
@@ -508,7 +512,11 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc p, IntPtr lp);
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-        [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int InternalGetWindowText(IntPtr h, StringBuilder s, int n);
+        // Reads the cached title without sending WM_GETTEXTLENGTH, so a frozen app can never freeze the dock. Callers only test for 0.
+        public static int GetWindowTextLength(IntPtr h) { var sb = new StringBuilder(2); return InternalGetWindowText(h, sb, 2); }
+        [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int cmd);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
         [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int index);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -656,6 +664,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         Form preview; // window thumbnails shown while hovering an app with several windows
         DateTime hoverSince = DateTime.UtcNow;
         Point speedPt; DateTime speedAt = DateTime.UtcNow; bool cursorSlow = true;
+        readonly bool tFields0 = TF0(); static bool TF0() { Program.T("fields-before-font"); return true; }
         Font labelFont = Typography.Text(9.5f, Weight.Medium);
         readonly bool tFields = TF();
         static bool TF() { Program.T("fields-after-font"); return true; }
@@ -853,10 +862,16 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
 
             refreshTimer.Interval = 2000;
             refreshTimer.Tick += (s, e) => RebuildItems();
+            { var warm = new Timer { Interval = 4000 }; warm.Tick += (s, e) => { warm.Stop(); warm.Dispose(); Item fo = items.FirstOrDefault(x => x.Kind == Kind.Folder); if (fo != null) DownloadsFan.Warm(Environment.ExpandEnvironmentVariables(fo.Target)); }; warm.Start(); } // first folder click opens without a cold start
+            // Test hook: a line in mac-dock\scratch\click.trigger names a dock item (part of its target); the dock clicks it, like the user would.
+            { var trig = new Timer { Interval = 400 }; trig.Tick += (s, e) => { try { string tf = @"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\scratch\click.trigger"; if (!File.Exists(tf)) return; string want = File.ReadAllText(tf).Trim(); File.Delete(tf); Item hit = items.FirstOrDefault(x => x.Target != null && x.Target.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0); Program.Log("TRIGGER click " + want + " -> " + (hit == null ? "none" : hit.Target)); if (hit != null) { var tsw = Stopwatch.StartNew(); Activate(hit); Program.Log("TRIGGER activate took " + tsw.ElapsedMilliseconds + " ms"); } } catch (Exception ex) { Program.Log(ex); } }; trig.Start(); }
 
             Program.T("ctor-a"); LoadConfig(); Program.T("ctor-config");
             ApplyTaskbarSetting(); Program.T("ctor-taskbar");
+            IconWorker.Build = BuildIcon; IconWorker.WebFallback = IsWebFallback; IconWorker.Ready = IconReady;
+            DockScan.Want(entries.Select(x => x.Target)); DockScan.ScanNow(configPath); Program.T("ctor-scan");
             RebuildItems(); Program.T("ctor-rebuild");
+            DockScan.Start(this, () => RebuildItems()); // later scans run in the background and rebuild only when something changed
             animTimer.Start();
             refreshTimer.Start();
         }
@@ -1095,7 +1110,7 @@ Theme.Refresh();
             {
                 Item it = items[hoverIndex];
                 string shown = ItemNames.Display(it.Target, it.Label);
-                SizeF size = g.MeasureString(shown, labelFont, 400, StringFormat.GenericTypographic);
+                SizeF size = g.MeasureString(Typography.Safe(shown), Typography.FontFor(labelFont, Typography.Safe(shown)), 400, StringFormat.GenericTypographic);
                 float cx = it.Rect.Left + it.Rect.Width / 2f;
                 float w = size.Width + Px(20), h = Px(24);
                 float x = Math.Max(4, Math.Min(Width - w - 4, cx - w / 2));
@@ -1108,7 +1123,7 @@ Theme.Refresh();
                     g.FillPolygon(b, new[] { new PointF(cx - Px(6), y + h - 0.5f), new PointF(cx + Px(6), y + h - 0.5f), new PointF(cx, y + h + Px(6)) });
                 }
                 using (var tb = new SolidBrush(Color.White))
-                    g.DrawString(shown, labelFont, tb, new RectangleF(x, y, w, h), Typography.Format(StringAlignment.Center));
+                    g.DrawString(Typography.Safe(shown), Typography.FontFor(labelFont, Typography.Safe(shown)), tb, new RectangleF(x, y, w, h), Typography.Format(StringAlignment.Center));
             }
         }
 
@@ -1654,16 +1669,20 @@ Theme.Refresh();
         {
             Program.Mark = "RebuildItems";             if (dragItem != null) return; // the order on screen is mid-change; it is saved when the icon is dropped
 
-            if (File.Exists(configPath) && File.GetLastWriteTime(configPath) != configStamp)
+            Program.Mark = "RebuildItems:config";
+            DockScan.Snap snap = DockScan.Latest;
+            if (snap != null && snap.ConfigStamp != DateTime.MinValue && snap.ConfigStamp != configStamp)
             {
                 LoadConfig();
                 ApplyTaskbarSetting();
                 ApplyDockMode();
             }
-            if (hideTaskbar) TaskbarControl.EnsureHidden();
+            Program.Mark = "RebuildItems:taskbar"; if (hideTaskbar) TaskbarControl.EnsureHidden();
 
-            Program.Mark = "RebuildItems:enum"; var swp = Stopwatch.StartNew(); Dictionary<string, List<IntPtr>> running = EnumerateRunningWindows(); Program.Slow("RebuildItems.EnumerateRunningWindows", swp); swp.Restart();
-            SurfaceUac(running);
+            // Open windows come from the background scan (DockScan): enumerating them here could block on a frozen app.
+            Program.Mark = "RebuildItems:enum"; var swp = Stopwatch.StartNew(); Dictionary<string, List<IntPtr>> running = DockScan.RunningCopy(); Program.Slow("RebuildItems.EnumerateRunningWindows", swp); swp.Restart();
+            DockScan.Want(entries.Select(x => x.Target));
+            Program.Mark = "RebuildItems:uac"; SurfaceUac(running);
             var previous = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
             foreach (Item old in items) previous[old.Key] = old;
             prevKeys = new HashSet<string>(previous.Keys, StringComparer.OrdinalIgnoreCase);
@@ -1686,9 +1705,11 @@ Theme.Refresh();
             foreach (string path in running.Keys.OrderBy(k => oldOrder.ContainsKey(k) ? oldOrder[k] : int.MaxValue).ThenBy(k => k))
             {
                 if (!pinnedApps.Add(path)) continue;
+                Program.Mark = "RebuildItems:running " + path;
                 list.Add(NewItem(Kind.App, path, null, null, 1, running));
             }
             // Windows tiled with Windows 11 snap layouts get one combined item (the apps keep their own icons too).
+            Program.Mark = "RebuildItems:snap";
             try
             {
                 var allHandles = new HashSet<IntPtr>();
@@ -1713,6 +1734,7 @@ Theme.Refresh();
             list.AddRange(rightItems);
 
             // The Recycle Bin always sits at the far right (like the macOS Trash), unless the user already pinned one.
+            Program.Mark = "RebuildItems:trash";
             if (!list.Any(x => x.Kind == Kind.Trash))
                 list.Add(NewItem(Kind.Trash, RecycleBin.Target, null, null, 3, running));
 
@@ -1740,7 +1762,8 @@ Theme.Refresh();
             foreach (Item old in items) oldX[old.Key] = Left + old.Rect.Left; // on-screen position before the change
 
 Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.AddEntryItems", swp);
-            foreach (Item fi in list) if (fi.Kind == Kind.Folder) DownloadsFan.Prefetch(Environment.ExpandEnvironmentVariables(fi.Target)); // warm the fan caches
+            var fans = list.Where(fi => fi.Kind == Kind.Folder).Select(fi => Environment.ExpandEnvironmentVariables(fi.Target)).ToList();
+            if (fans.Count > 0) System.Threading.ThreadPool.QueueUserWorkItem(_ => { foreach (string f in fans) try { DownloadsFan.Prefetch(f); } catch { } }); // warm the fan caches (its folder stamp check is disk I/O)
             if (hoverIndex >= items.Count) hoverIndex = -1;
             refreshTimer.Interval = items.Any(i => i.LaunchStart != DateTime.MinValue || i.FocusUntil != DateTime.MinValue) ? 500 : 2000;
             FitCanvas();
@@ -1757,13 +1780,15 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                     if (Math.Abs(d) > 0.5f) { it.Shift.Value += d; slid = true; }
                 }
             if (slid) { LayoutItems(); animTimer.Interval = 16; if (!animTimer.Enabled) animTimer.Start(); }
-            Redraw();
+            Program.Mark = "RebuildItems:redraw"; Redraw();
+            Program.Mark = "idle (after RebuildItems)";
         }
 
         void AddEntryItem(List<Item> list, Entry e, Dictionary<string, List<IntPtr>> running, HashSet<string> pinnedApps)
         {
             Kind kind;
-            if (!TryClassify(e.Target, out kind)) return;
+            Program.Mark = "RebuildItems:item " + e.Target;
+            if (!DockScan.Classify(e.Target, out kind)) return;
             if (kind == Kind.App && !pinnedApps.Add(e.Target)) return;
             if (kind == Kind.App)
             {
@@ -1789,6 +1814,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             string runKey = kind == Kind.App ? MatchRunning(running, target) : null;
             if (runKey != null && !ShellIcons.IsAppsFolderItem(target) && running.TryGetValue(runKey, out win))
             {
+                Program.Mark = "NewItem:aumid " + target;
                 foreach (IntPtr h in win.Take(3))
                 {
                     string id = Pwa.AumidOfWindow(h);
@@ -1803,13 +1829,14 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 }
             }
             if (kind == Kind.App && Pwa.IsWebAppId(Pwa.IdOfTarget(target)) && running.TryGetValue(target, out win))
-                foreach (IntPtr h in win.Take(3)) { it.WinIcon = Pwa.WindowIcon(h); if (it.WinIcon != null) break; }
+                { Program.Mark = "NewItem:winicon " + target; foreach (IntPtr h in win.Take(3)) { it.WinIcon = Pwa.WindowIcon(h); if (it.WinIcon != null) break; } }
             it.Icon = GetIcon(it, runKey != null && prevKeys.Count > 0 && !prevKeys.Contains(it.Key));
 
             List<IntPtr> handles;
             if (runKey != null && running.TryGetValue(runKey, out handles)) it.Handles = handles;
             else if (kind == Kind.App && Pwa.IdOfTarget(target) != null)
             {
+                Program.Mark = "NewItem:webshortcut " + target;
                 List<IntPtr> web = MatchWebShortcut(running, Pwa.IdOfTarget(target));
                 if (web != null) it.Handles = web;
             }
@@ -2005,7 +2032,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             return (ext == ".exe" || ext == ".lnk") && File.Exists(path);
         }
 
-        static bool TryClassify(string target, out Kind kind)
+        internal static bool TryClassify(string target, out Kind kind)
         {
             kind = Kind.File;
             if (target == "[start]") { kind = Kind.Start; return true; }
@@ -2086,7 +2113,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 // Bring the whole split-view forward together; clicking it again while it is in front minimizes it.
                 var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
                 bool showing = live.Any(h => !NativeMethods.IsIconic(h));
-                if (showing) { foreach (IntPtr h in live) NativeMethods.ShowWindow(h, SW_MINIMIZE); }
+                if (showing) { foreach (IntPtr h in live) NativeMethods.ShowWindowAsync(h, SW_MINIMIZE); }
                 else { for (int k = live.Count - 1; k >= 0; k--) WinUtil.Focus(live[k]); } // restores each to its snapped slot
                 return;
             }
@@ -2094,13 +2121,14 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             // Clicking the icon of the app that is in front minimizes its front window (the genie effect plays); otherwise the
             // app's window is restored if needed and brought forward. The dock never takes focus, so the first click while
             // another app is in front always lands on the "bring forward" branch.
+            Program.Mark = "Activate:minimize-check " + it.Target;
             IntPtr front = Win32.GetForegroundWindow();
             IntPtr frontOwner = front == IntPtr.Zero ? IntPtr.Zero : GetAncestor(front, 3); // GA_ROOTOWNER
             try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scratch", "click.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " target=" + it.Target + " front=" + front + " owner=" + frontOwner + " handles=" + string.Join(",", it.Handles.Select(x => x.ToString())) + "\r\n"); } catch { } // DIAG
             foreach (IntPtr h in it.Handles)
             {
                 if (!NativeMethods.IsWindow(h) || (h != front && h != frontOwner)) continue;
-                if (!NativeMethods.IsIconic(h)) { NativeMethods.ShowWindow(h, SW_MINIMIZE); return; }
+                if (!NativeMethods.IsIconic(h)) { NativeMethods.ShowWindowAsync(h, SW_MINIMIZE); return; }
                 break;
             }
 
@@ -2116,17 +2144,19 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 IntPtr w = Pwa.FindWindow(Pwa.IdOfTarget(it.Target));
                 if (w != IntPtr.Zero)
                 {
-                    if ((w == front || w == frontOwner) && !NativeMethods.IsIconic(w)) { NativeMethods.ShowWindow(w, SW_MINIMIZE); return; }
+                    if ((w == front || w == frontOwner) && !NativeMethods.IsIconic(w)) { NativeMethods.ShowWindowAsync(w, SW_MINIMIZE); return; }
                     target = w;
                 }
             }
 
             if (target != IntPtr.Zero)
             {
+                Program.Mark = "Activate:focus " + it.Target;
                 WinUtil.Focus(target);
             }
             else
             {
+                Program.Mark = "Activate:launch " + it.Target;
                 if (!Pwa.Launch(it.Target)) return; // a web app that is already open is raised, not started again
 
                 // Only apps get the launch bounce; folders and links just open.
@@ -2358,7 +2388,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             if (it != null && it.Kind == Kind.Trash)
             {
                 list.Add(MenuEntry.Item("Open", null, () => RecycleBin.Open()));
-                list.Add(MenuEntry.Item("Empty Recycle Bin", null, RecycleBin.IsFull() ? (Action)(() => RecycleBin.Empty()) : null));
+                list.Add(MenuEntry.Item("Empty Recycle Bin", null, DockScan.TrashFull() ? (Action)(() => RecycleBin.Empty()) : null));
                 list.Add(MenuEntry.Sep());
             }
             else if (it == null && !SetCfg.GetBool("show-start-icon", true))
@@ -2684,7 +2714,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
         readonly Dictionary<string, KeyValuePair<long, DateTime>> iconStamp = new Dictionary<string, KeyValuePair<long, DateTime>>(StringComparer.OrdinalIgnoreCase);
         HashSet<string> prevKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        static long FileStamp(string path)
+        internal static long FileStamp(string path)
         {
             try { if (!string.IsNullOrEmpty(path) && path.Length > 2 && path[1] == ':' && File.Exists(path)) return File.GetLastWriteTimeUtc(path).Ticks; } catch { }
             return 0;
@@ -2692,36 +2722,51 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
 
         Bitmap GetIcon(Item it, bool force = false)
         {
+            Program.Mark = "GetIcon " + it.Target;
             bool shared = (it.Kind == Kind.Url && !it.Target.StartsWith("http", StringComparison.OrdinalIgnoreCase)) || it.Kind == Kind.Start || it.Kind == Kind.Mission || it.Kind == Kind.Launchpad;
-            string key = shared ? "@" + it.Kind : it.Kind == Kind.Trash ? "@Trash" + RecycleBin.IsFull() : it.Target;
+            string key = shared ? "@" + it.Kind : it.Kind == Kind.Trash ? "@Trash" + DockScan.TrashFull() : it.Target;
+            // Disk cache for stable icons (not http site icons, which start as a globe, nor the changing Trash / coloured folders).
+            bool disk = it.Kind != Kind.Trash && it.Kind != Kind.Folder && !(it.Kind == Kind.Url && it.Target.StartsWith("http", StringComparison.OrdinalIgnoreCase));
             Bitmap bmp;
-            // Refresh: the exe changed on disk, the entry is 10 minutes old, or a new window just appeared.
-            if (iconCache.TryGetValue(key, out bmp) && !shared && it.Kind != Kind.Trash && it.Kind != Kind.Folder)
+            if (iconCache.TryGetValue(key, out bmp))
             {
-                KeyValuePair<long, DateTime> st;
-                if (force || !iconStamp.TryGetValue(key, out st) || st.Key != FileStamp(it.Target) || DateTime.UtcNow - st.Value > TimeSpan.FromMinutes(10))
+                // Refresh: the exe changed on disk, the entry is 10 minutes old, or a new window just appeared.
+                // The refresh runs in the background; the current icon keeps showing until the new one is ready.
+                if (!shared && it.Kind != Kind.Trash && it.Kind != Kind.Folder)
                 {
-                    iconCache.Remove(key); // the old bitmap is left to the GC: an item on screen may still draw it
-                    force = true;
-                    bmp = null;
+                    KeyValuePair<long, DateTime> st; long stamp = DockScan.Stamp(it.Target);
+                    if (force || !iconStamp.TryGetValue(key, out st) || st.Key != stamp || DateTime.UtcNow - st.Value > TimeSpan.FromMinutes(10))
+                    {
+                        iconStamp[key] = new KeyValuePair<long, DateTime>(stamp, DateTime.UtcNow);
+                        IconWorker.Request(this, key, it, disk, true, 0);
+                    }
                 }
+                return bmp;
             }
-            if (bmp == null)
+            // New icon: the worker loads it (disk cache first) or builds it. Wait a moment so it usually appears at once;
+            // otherwise a placeholder shows and the real icon is swapped in when ready (IconReady).
+            bmp = IconWorker.Request(this, key, it, disk, force, 150);
+            if (bmp != null)
             {
-                // Disk cache for stable icons (not http site icons, which start as a globe, nor the changing Trash / coloured folders).
-                bool disk = it.Kind != Kind.Trash && it.Kind != Kind.Folder && !(it.Kind == Kind.Url && it.Target.StartsWith("http", StringComparison.OrdinalIgnoreCase));
-                bmp = disk && !force ? IconDisk.TryLoad(key, it.Target) : null;
-                if (bmp == null)
-                {
-                    bmp = BuildIcon(it);
-                    // A web app with no icon found yet shows the logo for now: don't let that stick on disk.
-                    bool webFallback = it.Kind == Kind.App && it.WinIcon == null && Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target)) && Pwa.IconForId(Pwa.IdOfTarget(it.Target), it.Label) == null;
-                    if (disk && !webFallback) IconDisk.Save(key, it.Target, bmp);
-                }
                 iconCache[key] = bmp;
-                iconStamp[key] = new KeyValuePair<long, DateTime>(FileStamp(it.Target), DateTime.UtcNow);
+                iconStamp[key] = new KeyValuePair<long, DateTime>(DockScan.Stamp(it.Target), DateTime.UtcNow);
+                return bmp;
             }
-            return bmp;
+            return placeholder ?? (placeholder = Tile(Logo()));
+        }
+        static Bitmap placeholder;
+
+        void IconReady(string key, Bitmap bmp)
+        {
+            iconCache[key] = bmp; // a replaced bitmap is left to the GC: an item on screen may still draw it
+            iconStamp[key] = new KeyValuePair<long, DateTime>(DockScan.Stamp(key.StartsWith("@") ? null : key), DateTime.UtcNow);
+            RebuildItems();
+        }
+
+        static bool IsWebFallback(Item it)
+        {
+            // A web app with no icon found yet shows the logo for now: don't let that stick on disk.
+            return it.Kind == Kind.App && it.WinIcon == null && Pwa.IsWebAppId(Pwa.IdOfTarget(it.Target)) && Pwa.IconForId(Pwa.IdOfTarget(it.Target), it.Label) == null;
         }
 
         static Bitmap BuildIcon(Item it)
@@ -3346,8 +3391,14 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             List<IntPtr> w;
             if (!running.TryGetValue(UacTarget, out w)) { UacSurfaced.Clear(); return; }
             foreach (IntPtr h in w)
-                if (UacSurfaced.Add(h)) { try { WinUtil.Focus(h); } catch (Exception ex) { Program.Log(ex); } }
+            {
+                // The prompt belongs to an elevated SYSTEM process, so ShowWindow / SetForegroundWindow are blocked by UIPI.
+                // SwitchToThisWindow (what a taskbar click uses) is not. Retry every refresh until it is no longer minimized.
+                if (!NativeMethods.IsIconic(h)) { UacSurfaced.Add(h); continue; }
+                try { SwitchToThisWindow(h, true); } catch (Exception ex) { Program.Log(ex); }
+            }
         }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern void SwitchToThisWindow(IntPtr h, bool altTab);
 
         internal static string ProcessPath(uint pid)
         {

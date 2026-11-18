@@ -40,8 +40,9 @@ namespace MacDock
                 g.FillPath(lg, path);
             try
             {
+                var fam = Typography.SystemFamily(fontName); // shared and cached: never disposed
                 using (var gp = new GraphicsPath())
-                using (var fam = new FontFamily(fontName))
+                using (var famUnused = new System.IO.MemoryStream())
                 using (var sf = new StringFormat(StringFormat.GenericTypographic))
                 {
                     gp.AddString(glyph, fam, 0, 100f, new PointF(0, 0), sf);

@@ -62,7 +62,7 @@ namespace MacDock
         // Reads "@font = Name" from dock.txt, if present. Must run before any font is requested.
         public static void Configure(string configPath)
         {
-            LoadBundled();
+            LoadBundled(); Program.T("typo-bundled");
             string wanted = null;
             try
             {
@@ -76,8 +76,158 @@ namespace MacDock
             }
             catch { }
 
-            family = Pick(wanted, Preferred);
+            Program.T("typo-read"); family = Pick(wanted, Preferred); Program.T("typo-pick");
             displayFamily = string.IsNullOrEmpty(wanted) ? Pick(null, PreferredDisplay) : family;
+        }
+
+        // ---- Fast font lookups. GDI+ resolves a family *by name* by walking every installed font; with thousands of user fonts that took
+        // 6-28 s per lookup (the dock froze on start and on folder clicks). GDI answers the same question from the system font cache instantly.
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateFontW(int h, int w, int esc, int orient, int weight, uint italic, uint underline, uint strike, uint charset, uint outPrec, uint clipPrec, uint quality, uint pitch, string face);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern int GetTextFaceW(IntPtr dc, int n, System.Text.StringBuilder face);
+        public static bool Installed(string name) { lock (sysProbe) { bool ok; if (!sysProbe.TryGetValue(name, out ok)) sysProbe[name] = ok = GdiHas(name); return ok; } }
+        static bool GdiHas(string name)
+        {
+            if (string.IsNullOrEmpty(name) || name.Length > 31) return false;
+            IntPtr dc = CreateCompatibleDC(IntPtr.Zero), f = IntPtr.Zero, old = IntPtr.Zero;
+            try
+            {
+                f = CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 1 /*DEFAULT_CHARSET*/, 0, 0, 0, 0, name);
+                if (f == IntPtr.Zero) return false;
+                old = SelectObject(dc, f);
+                var sb = new System.Text.StringBuilder(64);
+                GetTextFaceW(dc, sb.Capacity, sb);
+                return string.Equals(sb.ToString(), name, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+            finally { if (old != IntPtr.Zero) SelectObject(dc, old); if (f != IntPtr.Zero) DeleteObject(f); DeleteDC(dc); }
+        }
+
+        // System fonts that MacDock draws symbols/emoji with, loaded straight from their files (no by-name lookup).
+        static readonly Dictionary<string, string> SystemFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Segoe UI Emoji", "seguiemj.ttf" }, { "Segoe UI Symbol", "seguisym.ttf" }, { "Segoe MDL2 Assets", "segmdl2.ttf" },
+            { "Segoe Fluent Icons", "SegoeIcons.ttf" }, { "Segoe UI", "segoeui.ttf" },
+        };
+        static readonly Dictionary<string, FontFamily> sysFamilies = new Dictionary<string, FontFamily>(StringComparer.OrdinalIgnoreCase);
+        public static FontFamily SystemFamily(string name)
+        {
+            lock (sysFamilies)
+            {
+                FontFamily ff;
+                if (sysFamilies.TryGetValue(name, out ff)) return ff;
+                string file;
+                if (SystemFiles.TryGetValue(name, out file))
+                {
+                    try
+                    {
+                        string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), file);
+                        if (File.Exists(path)) { var pc = new PrivateFontCollection(); pc.AddFontFile(path); privateList.Add(pc); ff = pc.Families[0]; }
+                    }
+                    catch { ff = null; }
+                }
+                // Any other installed family: find its file in the Fonts registry (per-user and machine) and load that file privately.
+                if (ff == null) ff = FromRegistry(name);
+                if (ff == null) ff = new FontFamily(name); // last resort (slow on machines with many fonts), cached so it is paid once
+                sysFamilies[name] = ff;
+                return ff;
+            }
+        }
+        static FontFamily FromRegistry(string name)
+        {
+            try
+            {
+                var roots = new[] { Microsoft.Win32.Registry.CurrentUser, Microsoft.Win32.Registry.LocalMachine };
+                foreach (var root in roots)
+                    using (var k = root.OpenSubKey(@"Software\Microsoft\Windows NT\CurrentVersion\Fonts"))
+                    {
+                        if (k == null) continue;
+                        foreach (string v in k.GetValueNames())
+                        {
+                            string face = v; int p = face.IndexOf(" ("); if (p > 0) face = face.Substring(0, p);
+                            bool match = false;
+                            foreach (string part in face.Split('&')) if (string.Equals(part.Trim(), name, StringComparison.OrdinalIgnoreCase)) match = true;
+                            if (!match) continue;
+                            string file = k.GetValue(v) as string; if (string.IsNullOrEmpty(file)) continue;
+                            if (!Path.IsPathRooted(file)) file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), file);
+                            if (!File.Exists(file)) continue;
+                            var pc = new PrivateFontCollection(); pc.AddFontFile(file);
+                            foreach (FontFamily f in pc.Families) if (string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase)) { privateList.Add(pc); return f; }
+                        }
+                    }
+            }
+            catch { }
+            return null;
+        }
+        // ---- Glyph coverage. When text holds a character the font lacks, GDI+ searches every installed font for a fallback; with
+        // thousands of fonts that took 3-10 s for one label (e.g. "AMD Software꞉ Adrenalin Edition", U+A789). Safe() swaps known
+        // look-alikes for plain characters, and FontFor() picks Segoe UI (loaded from its file) when Inter cannot draw the text.
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern int GetGlyphIndicesW(IntPtr dc, string s, int n, [Out] ushort[] idx, uint flags);
+        static readonly Dictionary<string, Dictionary<char, bool>> covers = new Dictionary<string, Dictionary<char, bool>>(StringComparer.OrdinalIgnoreCase);
+        static bool Covers(string face, string s)
+        {
+            Dictionary<char, bool> map;
+            lock (covers)
+            {
+                if (!covers.TryGetValue(face, out map)) covers[face] = map = new Dictionary<char, bool>();
+                var todo = new List<char>();
+                foreach (char ch in s) { bool ok; if (!map.TryGetValue(ch, out ok)) { if (!todo.Contains(ch)) todo.Add(ch); } else if (!ok) return false; }
+                if (todo.Count == 0) return true;
+                IntPtr dc = CreateCompatibleDC(IntPtr.Zero), f = IntPtr.Zero, old = IntPtr.Zero;
+                try
+                {
+                    f = CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, face); old = SelectObject(dc, f);
+                    string q = new string(todo.ToArray()); var idx = new ushort[q.Length];
+                    GetGlyphIndicesW(dc, q, q.Length, idx, 1 /*GGI_MARK_NONEXISTING_GLYPHS*/);
+                    for (int i = 0; i < q.Length; i++) map[q[i]] = idx[i] != 0xFFFF || char.IsWhiteSpace(q[i]) || char.IsControl(q[i]);
+                }
+                catch { foreach (char ch in todo) map[ch] = true; }
+                finally { if (old != IntPtr.Zero) SelectObject(dc, old); if (f != IntPtr.Zero) DeleteObject(f); DeleteDC(dc); }
+                foreach (char ch in s) if (!map[ch]) return false;
+                return true;
+            }
+        }
+        static readonly Dictionary<char, string> lookalike = new Dictionary<char, string>
+        {
+            { '\uA789', ":" }, { '\u2236', ":" }, { '\uFF1A', ":" }, { '\u2215', "/" }, { '\u2044', "/" }, { '\u2010', "-" }, { '\u2011', "-" },
+            { '\u2012', "-" }, { '\u2212', "-" }, { '\u00A0', " " }, { '\u2009', " " }, { '\u200B', "" }, { '\u200E', "" }, { '\u200F', "" }, { '\uFEFF', "" },
+        };
+        static readonly Dictionary<string, string> safeCache = new Dictionary<string, string>();
+        public static string Safe(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            lock (safeCache)
+            {
+                string r;
+                if (safeCache.TryGetValue(s, out r)) return r;
+                var sb = new System.Text.StringBuilder(s.Length);
+                foreach (char ch in s) { string rep; if (lookalike.TryGetValue(ch, out rep)) sb.Append(rep); else sb.Append(ch); }
+                r = sb.ToString();
+                if (safeCache.Count > 4000) safeCache.Clear();
+                safeCache[s] = r;
+                return r;
+            }
+        }
+        static readonly Dictionary<Font, Font> segoeTwin = new Dictionary<Font, Font>();
+        // The font to draw s with: f itself when its family has every glyph, else a Segoe UI twin of the same size and style.
+        public static Font FontFor(Font f, string s)
+        {
+            if (f == null || string.IsNullOrEmpty(s) || Covers(f.FontFamily.Name, s)) return f;
+            if (!Covers("Segoe UI", s)) return f;
+            lock (segoeTwin)
+            {
+                Font t;
+                if (!segoeTwin.TryGetValue(f, out t)) segoeTwin[f] = t = new Font(SystemFamily("Segoe UI"), f.Size, f.Style, f.Unit);
+                return t;
+            }
+        }
+
+        public static Font SystemFont(string name, float size, FontStyle style = FontStyle.Regular, GraphicsUnit unit = GraphicsUnit.Point)
+        {
+            return new Font(SystemFamily(name), size, style, unit);
         }
 
         static readonly Dictionary<string, bool> sysProbe = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
@@ -87,7 +237,7 @@ namespace MacDock
             {
                 bool ok;
                 if (sysProbe.TryGetValue(name, out ok)) return ok;
-                try { using (new FontFamily(name)) ok = true; } catch { ok = false; }
+                ok = GdiHas(name);
                 sysProbe[name] = ok;
                 return ok;
             }
@@ -101,7 +251,7 @@ namespace MacDock
             {
                 bool ok;
                 if (probe.TryGetValue(name, out ok)) return ok;
-                try { using (new FontFamily(name)) ok = true; } catch { ok = false; }
+                ok = GdiHas(name);
                 probe[name] = ok;
                 return ok;
             }
@@ -116,6 +266,7 @@ namespace MacDock
 
         // Fonts for small UI text (menus, labels, status items).
         public static Font Text(float points, Weight weight = Weight.Regular) { return Get(family, points, weight); }
+        public static Font Copy(float points, Weight weight = Weight.Regular) { return (Font)Get(family, points, weight).Clone(); } // for callers that Dispose: Text() returns a shared cached Font that must never be disposed
 
         // ----- type scale: one set of named roles (Inter) so hierarchy is the same in every window -----
         public static Font Title() { return Text(15f, Weight.Semibold); }      // page / window titles
@@ -150,7 +301,7 @@ namespace MacDock
                 }
                 FontFamily priv = null;
                 if (privateFonts && (bundled.Contains(name) || !SystemHas(name))) privateMap.TryGetValue(name + "|" + (style == FontStyle.Bold ? "Bold" : "Regular"), out priv);
-                font = priv != null ? new Font(priv, points, style, GraphicsUnit.Point) : new Font(name, points, style, GraphicsUnit.Point);
+                font = priv != null ? new Font(priv, points, style, GraphicsUnit.Point) : new Font(SystemFamily(name), points, style, GraphicsUnit.Point);
                 cache[key] = font;
                 return font;
             }

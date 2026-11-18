@@ -207,6 +207,7 @@ namespace MacDock
             return int.TryParse(SetCfg.Get("avatar"), out n) && n >= 0 && n < AvatarGlyphs.Length ? n : 0;
         }
 
+        static readonly System.Collections.Generic.Dictionary<float, Font> SymbolFonts = new System.Collections.Generic.Dictionary<float, Font>();
         public static void DrawAvatar(Graphics g, Rectangle r, int index, string initial)
         {
             if (index < 0 || index >= AvatarGlyphs.Length) index = 0;
@@ -218,7 +219,7 @@ namespace MacDock
             string glyph = index == 0 ? initial : AvatarGlyphs[index];
             const TextFormatFlags mid = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding;
             if (index == 0) SetText.DrawText(g, glyph, Typography.Text(r.Width * 0.3f, Weight.Semibold), r, Color.White, mid); // cached font: not disposed
-            else using (var f = new Font("Segoe UI Symbol", r.Width * 0.4f, GraphicsUnit.Pixel)) SetText.DrawText(g, glyph, f, r, Color.White, mid);
+            else { float sz = r.Width * 0.4f; Font f; lock (SymbolFonts) { if (!SymbolFonts.TryGetValue(sz, out f)) SymbolFonts[sz] = f = Typography.SystemFont("Segoe UI Symbol", sz, FontStyle.Regular, GraphicsUnit.Pixel); } SetText.DrawText(g, glyph, f, r, Color.White, mid); } // cached: creating this font can take seconds
         }
 
         public static GraphicsPath Round(RectangleF r, float radius)
@@ -233,15 +234,10 @@ namespace MacDock
             return p;
         }
 
-        static HashSet<string> fonts;
+
         public static bool HasFont(string name)
         {
-            if (fonts == null)
-            {
-                using (var c = new InstalledFontCollection())
-                    fonts = new HashSet<string>(c.Families.Select(f => f.Name), StringComparer.OrdinalIgnoreCase);
-            }
-            return fonts.Contains(name);
+            return Typography.Installed(name); // fast GDI check: enumerating every installed font took seconds on this machine
         }
 
         public static void OpenTarget(string target)
@@ -263,7 +259,7 @@ namespace MacDock
             {
                 using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
                 {
-                    if (on) k.SetValue("MacDock", "\"" + Application.ExecutablePath + "\"");
+                    if (on) k.SetValue("MacDock", "\"" + AutoExe() + "\"");
                     else k.DeleteValue("MacDock", false);
                 }
                 RegSet(ChoiceKey, "AutostartChoice", on ? 1 : 0); // remembered, so the default below never overrides the user
@@ -279,7 +275,7 @@ namespace MacDock
             try
             {
                 using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
-                    k.SetValue("MacDock", "\"" + Application.ExecutablePath + "\"");
+                    k.SetValue("MacDock", "\"" + AutoExe() + "\"");
                 RegSet(ChoiceKey, "AutostartChoice", 1);
             }
             catch (Exception ex) { Program.Log(ex); } // blocked: stay off, and try again next run
@@ -287,9 +283,35 @@ namespace MacDock
 
         // Safety net: a per-user scheduled task starts MacDock every minute if it is not running (a second copy exits at the mutex).
         // It lives in Task Scheduler, outside any parent process, so it brings the dock back even after a hard kill.
+        static string AutoExe()
+        {
+            try
+            {
+                string i = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MacDock", "bin", "MacDock.exe");
+                return Path.GetFullPath(File.Exists(i) ? i : Application.ExecutablePath);
+            }
+            catch (Exception ex) { Program.Log(ex); return Application.ExecutablePath; }
+        }
+
+        // Repoints an existing MacDockGuard task (keeps its triggers) at the installed exe.
+        static void RepointGuardTask()
+        {
+            string exe = AutoExe();
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo("schtasks.exe", "/Change /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\"")
+                    { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
+                    using (var p = Process.Start(psi)) p.WaitForExit(15000);
+                }
+                catch { }
+            });
+        }
+
         static void EnsureGuardTask()
         {
-            string exe = Application.ExecutablePath;
+            string exe = AutoExe();
             System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
                 try
@@ -307,10 +329,11 @@ namespace MacDock
         {
             if (RegInt(ChoiceKey, "AutostartChoice", -1) == 0) return;
             if (RegInt(ChoiceKey, "GuardTask", 0) == 1) EnsureGuardTask(); // opt-in only (default off)
+            EnsureGuardTask(); // /Create /F: repoints the task at the installed exe ("/Change /TR" prompts for a password and hangs)
             try
             {
                 using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
-                    k.SetValue("MacDock", "\"" + Application.ExecutablePath + "\"");
+                    k.SetValue("MacDock", "\"" + AutoExe() + "\"");
                 RegSet(ChoiceKey, "AutostartChoice", 1);
             }
             catch (Exception ex) { Program.Log(ex); }
@@ -1098,7 +1121,7 @@ namespace MacDock
                 float size = 9f;
                 for (int pass = 0; pass < 2; pass++)
                 {
-                    using (var font = new Font(fontName, size))
+                    using (var font = new Font(Typography.SystemFamily(fontName), size))
                     using (var bmp = new Bitmap(40, 40))
                     {
                         using (Graphics bg = Graphics.FromImage(bmp))

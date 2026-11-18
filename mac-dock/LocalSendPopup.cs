@@ -18,12 +18,13 @@ namespace MacDock
     {
         static LocalSendPopup current;
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
 
         readonly string[] files;
         readonly Form dim;
         readonly Timer poll = new Timer { Interval = 700 };
-        readonly Timer anim = new Timer { Interval = 90 };
+        readonly Timer anim = new Timer { Interval = 140 };
         List<LsPeer> peers = new List<LsPeer>();
         string key = "", message = "";
         int hoverRow = -1, hoverBtn = -1, pressRow = -1, dots, ticks;
@@ -74,7 +75,8 @@ namespace MacDock
             if (Visible) Location = new Point(center.X - w / 2, center.Y - h / 2);
             Rectangle foot = new Rectangle(V(20), h - V(54), w - V(40), V(36));
             cancelRect = new Rectangle(foot.Right - V(96), foot.Top, V(96), foot.Height);
-            rescanRect = new Rectangle(foot.Left, foot.Top, V(96), foot.Height);
+            int pw; using (Font pf = Typography.Copy(10f, Weight.Semibold)) pw = Math.Max(TextRenderer.MeasureText("Scanning...", pf, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width, TextRenderer.MeasureText("Rescan", pf, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width) + V(32); // sized from the widest label so the text always fits
+            rescanRect = new Rectangle(foot.Left, foot.Top, pw, foot.Height);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -88,6 +90,7 @@ namespace MacDock
         void ShowAll()
         {
             dim.Show(); Show(); Activate();
+            try { SetWindowPos(dim.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); } catch { } // dim just under the card, both above other topmost windows
             try { SetForegroundWindow(Handle); } catch { }
             poll.Start(); anim.Start();
             AutoScan();
@@ -136,14 +139,14 @@ namespace MacDock
             var flagsL = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding;
 
             // header
-            using (Font tf = Typography.Text(13.5f, Weight.Semibold))
+            using (Font tf = Typography.Copy(13.5f, Weight.Semibold))
                 TextRenderer.DrawText(g, "Send with LocalSend", tf, new Rectangle(0, V(18), Width, V(28)), Txt, Panel, flagsC);
             string what = files.Length == 1 ? Path.GetFileName(files[0]) : files.Length + " files";
-            using (Font sf = Typography.Text(10f))
+            using (Font sf = Typography.Copy(10f))
                 TextRenderer.DrawText(g, what, sf, new Rectangle(V(24), V(48), Width - V(48), V(20)), Sub, Panel, flagsC);
             bool anim3 = !sending && scanning;
             string st = sending ? message : (peers.Count == 0 ? "Searching for nearby devices" : (scanning ? "Scanning" : "Choose a device"));
-            using (Font sf = Typography.Text(10f))
+            using (Font sf = Typography.Copy(10f))
                 DrawAnimated(g, st, sf, new Rectangle(V(24), V(78), Width - V(48), V(20)), Sub, Panel, anim3, dots);
 
             // device rows
@@ -154,7 +157,7 @@ namespace MacDock
                 if (i >= shown)
                 {
                     if (i == 0 && peers.Count == 0)
-                        using (Font sf = Typography.Text(10f)) TextRenderer.DrawText(g, "Open LocalSend on the other device", sf, r, Sub, Panel, flagsC);
+                        using (Font sf = Typography.Copy(10f)) TextRenderer.DrawText(g, "Open LocalSend on the other device", sf, r, Sub, Panel, flagsC);
                     continue;
                 }
                 LsPeer pr = peers[i];
@@ -166,11 +169,11 @@ namespace MacDock
                 Rectangle av = new Rectangle(r.Left + V(10), r.Top + (r.Height - d) / 2, d, d);
                 using (var br = new LinearGradientBrush(av, Color.FromArgb(120, 170, 255), Color.FromArgb(40, 100, 230), 90f)) g.FillEllipse(br, av);
                 string letter = string.IsNullOrEmpty(pr.Alias) ? "?" : pr.Alias.Substring(0, 1).ToUpperInvariant();
-                using (Font lf = Typography.Text(11f, Weight.Semibold)) TextRenderer.DrawText(g, letter, lf, av, Color.White, Color.Transparent, flagsC);
+                using (Font lf = Typography.Copy(11f, Weight.Semibold)) TextRenderer.DrawText(g, letter, lf, av, Color.White, Color.Transparent, flagsC);
                 int tx = av.Right + V(12);
-                using (Font nf = Typography.Text(10.5f, Weight.Semibold)) TextRenderer.DrawText(g, pr.Alias, nf, new Rectangle(tx, r.Top + V(7), r.Right - tx - V(10), V(20)), nameC, rowBack, flagsL);
-                string sub = pr.Ip + (string.IsNullOrEmpty(pr.Model) ? "" : "  ·  " + pr.Model);
-                using (Font sf = Typography.Text(9.25f)) TextRenderer.DrawText(g, sub, sf, new Rectangle(tx, r.Top + V(26), r.Right - tx - V(10), V(18)), subC, rowBack, flagsL);
+                using (Font nf = Typography.Copy(10.5f, Weight.Semibold)) TextRenderer.DrawText(g, pr.Alias, nf, new Rectangle(tx, r.Top + V(7), r.Right - tx - V(10), V(20)), nameC, rowBack, flagsL);
+                string sub = pr.Ip + (string.IsNullOrEmpty(pr.Model) ? "" : "  \u00B7  " + pr.Model);
+                using (Font sf = Typography.Copy(9.25f)) TextRenderer.DrawText(g, sub, sf, new Rectangle(tx, r.Top + V(26), r.Right - tx - V(10), V(18)), subC, rowBack, flagsL);
             }
 
             // footer buttons
@@ -178,24 +181,24 @@ namespace MacDock
             DrawPill(g, cancelRect, "Cancel", hoverBtn == 2, true);
         }
 
-        // Text plus a "..." whose dots appear one by one. The layout always reserves the full three dots, so the text never shifts.
-        void DrawAnimated(Graphics g, string text, Font f, Rectangle r, Color fore, Color back, bool animate, int visibleDots)
+        // Static text (centred, never shifts) whose colour gently pulses while a scan is running; no changing characters, so the layout is fixed.
+        void DrawAnimated(Graphics g, string text, Font f, Rectangle r, Color fore, Color back, bool animate, int phase)
         {
-            var fl = TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.VerticalCenter;
-            int tw = TextRenderer.MeasureText(g, text, f, new Size(int.MaxValue, int.MaxValue), fl).Width;
-            int dw = TextRenderer.MeasureText(g, ".", f, new Size(int.MaxValue, int.MaxValue), fl).Width;
-            int total = tw; // centre on the text alone; the dots hang off its right edge
-            int x = r.Left + (r.Width - total) / 2;
-            TextRenderer.DrawText(g, text, f, new Rectangle(x, r.Top, tw + 2, r.Height), fore, back, fl);
-            for (int i = 0; animate && i < Math.Min(3, visibleDots); i++)
-                TextRenderer.DrawText(g, ".", f, new Rectangle(x + tw + i * dw, r.Top, dw + 2, r.Height), fore, back, fl);
+            Color c = fore;
+            if (animate)
+            {
+                double k = 0.5 + 0.5 * Math.Sin(phase * Math.PI / 2); // 0..1 over four ticks
+                c = Color.FromArgb(back.R + (int)((fore.R - back.R) * (0.45 + 0.55 * k)), back.G + (int)((fore.G - back.G) * (0.45 + 0.55 * k)), back.B + (int)((fore.B - back.B) * (0.45 + 0.55 * k)));
+                text += "...";
+            }
+            TextRenderer.DrawText(g, text, f, r, c, back, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
         }
 
         void DrawPill(Graphics g, Rectangle r, string text, bool hot, bool primaryStyle)
         {
             Color back = hot ? Color.FromArgb(84, 87, 100) : Pill;
             using (GraphicsPath gp = Round(r, r.Height / 2)) using (var br = new SolidBrush(back)) g.FillPath(br, gp);
-            using (Font f = Typography.Text(10f, Weight.Semibold))
+            using (Font f = Typography.Copy(10f, Weight.Semibold))
                 DrawAnimated(g, text, f, r, Txt, back, text == "Scanning", dots);
         }
 

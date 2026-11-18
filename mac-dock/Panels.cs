@@ -19,6 +19,8 @@ namespace MacDock
 
     sealed class PanelRow
     {
+        public static float Scale = 1f; // DPI factor: fonts are in points, so text rows grow with it
+        static int Sc(int v) { return (int)Math.Round(v * Scale); }
         public RowKind Kind;
         public string Text;
         public string Sub;
@@ -53,12 +55,12 @@ namespace MacDock
             {
                 switch (Kind)
                 {
-                    case RowKind.Title: return 38;
-                    case RowKind.Big: return 66;
-                    case RowKind.Info: return 24;
-                    case RowKind.Header: return 26;
-                    case RowKind.Item: return 38;
-                    case RowKind.Button: return 32;
+                    case RowKind.Title: return Sc(38);
+                    case RowKind.Big: return Sc(66);
+                    case RowKind.Info: return Sc(24);
+                    case RowKind.Header: return Sc(26);
+                    case RowKind.Item: return Sc(38);
+                    case RowKind.Button: return Sc(32);
                     case RowKind.Slider: return Card ? 64 : 40;
                     case RowKind.Tile: return 64;
                     case RowKind.Chip: return 30;
@@ -150,6 +152,7 @@ namespace MacDock
 
         public GlassPanel(int width, List<PanelRow> rows, Point anchor, int barHeight, Action closed)
         {
+            PanelRow.Scale = Math.Max(1f, Dpi.Of(Screen.PrimaryScreen));
             this.panelWidth = width;
             this.rows = rows;
             this.anchor = anchor;
@@ -750,8 +753,8 @@ namespace MacDock
                                 break;
 
                             case RowKind.Big:
-                                g.DrawString(r.Text, big, textBrush, new Rectangle(rc.Left + 6, rc.Top, rc.Width - 12, 40), left);
-                                g.DrawString(r.Sub, small, mutedBrush, new Rectangle(rc.Left + 8, rc.Top + 40, rc.Width - 16, 20), left);
+                                g.DrawString(r.Text, big, textBrush, new Rectangle(rc.Left + 6, rc.Top, rc.Width - 12, rc.Height * 46 / 66), left);
+                                g.DrawString(r.Sub, small, mutedBrush, new Rectangle(rc.Left + 8, rc.Top + rc.Height * 46 / 66, rc.Width - 16, rc.Height * 20 / 66), left);
                                 break;
 
                             case RowKind.Info:

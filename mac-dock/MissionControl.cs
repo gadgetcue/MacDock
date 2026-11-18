@@ -1293,13 +1293,13 @@ namespace MacDock
                 // Label: app icon and window title.
                 Bitmap small = ExeIcon(c.Exe);
                 int labelY = c.Rect.Bottom + 12;
-                string title = string.IsNullOrEmpty(c.Title) ? System.IO.Path.GetFileNameWithoutExtension(c.Exe) : c.Title;
-                float textWidth = Math.Min(g.MeasureString(title, titleFont, 600, StringFormat.GenericTypographic).Width, Math.Max(40, c.Rect.Width - 30));
+                string title = string.IsNullOrEmpty(c.Title) ? System.IO.Path.GetFileNameWithoutExtension(c.Exe) : c.Title; title = Typography.Safe(title);
+                float textWidth = Math.Min(g.MeasureString(title, Typography.FontFor(titleFont, title), 600, StringFormat.GenericTypographic).Width, Math.Max(40, c.Rect.Width - 30));
                 float total = textWidth + (small != null ? 26 : 0);
                 float x = c.Rect.Left + (c.Rect.Width - total) / 2f;
                 if (small != null) g.DrawImage(small, x, labelY, 20, 20);
                 using (var b = new SolidBrush(Color.White))
-                    g.DrawString(title, titleFont, b, new RectangleF(x + (small != null ? 26 : 0), labelY - 1, textWidth + 2, 22), Typography.Format());
+                    g.DrawString(title, Typography.FontFor(titleFont, title), b, new RectangleF(x + (small != null ? 26 : 0), labelY - 1, textWidth + 2, 22), Typography.Format());
 
                 if (hot) DrawRoundButton(g, c.CloseRect, Color.FromArgb(40, 42, 52), "x", hoverAction && i == hover);
             }
@@ -1515,12 +1515,12 @@ namespace MacDock
         void PaintTile(Graphics g, Tile t, Rectangle cell, Rectangle icon, StringFormat nameFormat, Brush white, Brush placeholder)
         {
             if (t.Folder != null) DrawFolderIcon(g, t, icon);
-            else if (t.Icon != null) g.DrawImage(t.Icon, icon);
+            else if (t.Icon != null) { long tq2 = System.Diagnostics.Stopwatch.GetTimestamp(); g.DrawImage(t.Icon, icon); double tm2 = (System.Diagnostics.Stopwatch.GetTimestamp() - tq2) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; if (tm2 > 80) Program.Log("SLOW tile icon " + tm2.ToString("0") + " ms: " + t.Shown); }
             else using (GraphicsPath p = Layered.RoundedRect(icon, 20)) g.FillPath(placeholder, p);
 
             nameFormat.FormatFlags |= StringFormatFlags.NoWrap;
             nameFormat.Trimming = StringTrimming.EllipsisCharacter;
-            g.DrawString(t.Shown, titleFont, white, new Rectangle(cell.Left + 6, icon.Bottom + 10, cell.Width - 12, 22), nameFormat);
+            { long tq = System.Diagnostics.Stopwatch.GetTimestamp(); string shn = Typography.Safe(t.Shown); g.DrawString(shn, Typography.FontFor(titleFont, shn), white, new Rectangle(cell.Left + 6, icon.Bottom + 10, cell.Width - 12, 22), nameFormat); double tms = (System.Diagnostics.Stopwatch.GetTimestamp() - tq) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; if (tms > 80) Program.Log("SLOW tile text " + tms.ToString("0") + " ms: " + t.Shown); }
         }
 
         // A rounded glass tile with the first nine apps of the folder in a 3x3 grid, like macOS.

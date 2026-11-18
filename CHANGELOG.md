@@ -1,5 +1,19 @@
 ﻿# Changelog
 
+## v2.2
+### Fixed
+- **Windows no longer cover the top status bar.** A window dragged or moved up under the bar (CPU/RAM, Bluetooth, volume, Wi-Fi, battery) used to draw its title bar and min/max/close buttons over the bar text. The dock now holds windows below the bar while you drag them, and slides any that end up there back down. Maximized and fullscreen windows are left alone, and elevated windows can't be moved by the dock.
+- **Battery popup text overlap at 125% and higher display scaling.** The popup's rows were a fixed pixel height while the text scales with Windows DPI, so "Battery Saver", the large percentage and "Charging" ran into each other. Row heights now scale with the display.
+- **Folder fan no longer freezes the dock.** Images are read to memory before decoding so a slow or cloud-backed file can't hold the paint lock, and the "Open in Explorer" arrow is drawn as a vector shape instead of building a symbol font on every open.
+- **No more multi-second freezes with thousands of installed fonts.** Fonts are loaded from their files instead of being looked up by name, and text with glyphs Inter lacks falls back to Segoe UI instead of triggering a system-wide font search.
+- A frozen app can no longer freeze the dock: window titles are read from cache and windows are restored asynchronously.
+
+### Changed
+- Folder fans warm up at startup so the first folder click opens instantly.
+- Open windows come from a background scan (new `DockScan`), and icons are cached on disk and refreshed in the background, so the dock paints without waiting on slow apps.
+- Pending elevated (UAC) prompts are brought forward more reliably.
+- The LocalSend popup scanning label no longer shifts the layout.
+- `MacDock.exe --fan-bench <folder>` writes folder fan frame timings for diagnosing slow opens.
 ## v2.1
 ### Added
 - **Send with LocalSend from Explorer.** Right-click any file or a multi-selection and choose "Send with LocalSend" (also added to the Send to menu). A new popup lists nearby devices, shows Scanning while it looks, and sends the files to the one you pick. Downloads fan items have the same entry in their right-click menu.

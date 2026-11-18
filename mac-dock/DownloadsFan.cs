@@ -169,7 +169,7 @@ namespace MacDock
                 if (cy >= 26) moreRect = new Rectangle(cx - 22, cy - 22, 44, 44);
             }
         }
-        Rectangle moreRect; bool moreHot, pressMore;
+        Rectangle moreRect; bool moreHot, pressMore; double moreGrow; // 0..1 hover growth of the arrow button, eased like the file icons
 
         bool labelsLeft;
         string style;
@@ -207,8 +207,11 @@ namespace MacDock
             }
             catch { }
             if (new FileInfo(path).Length > 3 * 1024 * 1024) return null;
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (Image img = Image.FromStream(fs, false, false))
+            // Read the bytes first: GDI+ holds a process-wide lock while it pulls from a stream, so a slow or cloud-backed file read inside
+            // Image.FromStream froze every dock paint (and the dock) until the read ended.
+            byte[] raw; using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { raw = new byte[(int)Math.Min(fs.Length, 3L * 1024 * 1024)]; int got = 0, n; while (got < raw.Length && (n = fs.Read(raw, got, raw.Length - got)) > 0) got += n; if (got < raw.Length) Array.Resize(ref raw, got); }
+            using (var ms = new MemoryStream(raw))
+            using (Image img = Image.FromStream(ms, false, false))
             {
                 double s = Math.Min((double)IconSize / img.Width, (double)IconSize / img.Height);
                 int w = Math.Max(1, (int)(img.Width * s)), h = Math.Max(1, (int)(img.Height * s));
@@ -228,12 +231,50 @@ namespace MacDock
         }
         protected override bool ShowWithoutActivation { get { return true; } }
 
+        // Startup warm-up: build one fan off screen (window handle, JIT, first GDI+ draw) so the first real folder click opens instantly.
+        public static void Warm(string folder)
+        {
+            try
+            {
+                var f = new DownloadsFan(folder, new Point(-30000, -30000), p => false, () => { });
+                IntPtr h = f.Handle; f.Draw(); f.Dispose();
+            }
+            catch { }
+        }
+
+        static List<string> benchFrames;
+        // `MacDock.exe --fan-bench <folder>`: opens the fan on its own for 5 s and writes frame timings to scratch\fanbench.txt.
+        public static int Bench(string folder)
+        {
+            Application.EnableVisualStyles(); benchFrames = new List<string>();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            Prefetch(folder); for (int w = 0; w < 60 && Cached(folder) == null; w++) Thread.Sleep(50); sw.Restart();
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            var f = new DownloadsFan(folder, new Point(wa.Left + wa.Width / 2, wa.Bottom - 10), p => true, () => { });
+            f.Pinned = true;
+            long maxGap = 0, lastTick = 0; var gapClock = System.Diagnostics.Stopwatch.StartNew();
+            var probe = new System.Windows.Forms.Timer { Interval = 15 };
+            probe.Tick += (s, e) => { long now = gapClock.ElapsedMilliseconds; if (lastTick > 0) maxGap = Math.Max(maxGap, now - lastTick); lastTick = now; };
+            var end = new System.Windows.Forms.Timer { Interval = 5000 };
+            end.Tick += (s, e) =>
+            {
+                end.Stop(); probe.Stop();
+                string r = "items=" + f.items.Count + " frames=" + f.drawN + " avg=" + (f.drawN > 0 ? f.drawSum / f.drawN : 0).ToString("0.0") + "ms max=" + f.drawMax.ToString("0.0") + "ms uiMaxGap=" + maxGap + "ms total=" + sw.ElapsedMilliseconds + "ms";
+                try { File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scratch", "fanbench.txt"), r + Environment.NewLine + string.Join(Environment.NewLine, benchFrames.Take(60))); } catch { }
+                f.Close(); Application.ExitThread();
+            };
+            f.Show(); probe.Start(); end.Start();
+            Application.Run();
+            return 0;
+        }
+
         public new void Show()
         {
             Log("Show after ctor " + ((clk.ElapsedTicks - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0.0") + "ms");
             born = DateTime.UtcNow; // restart the clock: building a big folder (Downloads) can take longer than the animation itself
             base.Show();
             Draw();
+            born = DateTime.UtcNow; // start the fan-out from the first frame actually on screen (window creation used to eat most of the 240 ms animation)
             if (vsync == null) { vsync = new VsyncDriver(this, Poll); vsync.Wake(); } // one step per display refresh, steady frame pacing
         }
 
@@ -277,7 +318,7 @@ namespace MacDock
         }
 
         VsyncDriver vsync;
-        Font arrowFont;
+
 
         void Poll()
         {
@@ -299,6 +340,7 @@ namespace MacDock
             bool mh = !Animating && !moreRect.IsEmpty && moreRect.Contains(c);
             if (mh != moreHot) { moreHot = mh; dirty = true; }
             for (int k = 0; k < items.Count; k++) { double tgt = k == hover ? 1 : 0, d = tgt - items[k].Hot; if (Math.Abs(d) > 0.01) { items[k].Hot += d * 0.3; dirty = true; } else items[k].Hot = tgt; }
+            { double mt = moreHot ? 1 : 0, md = mt - moreGrow; if (Math.Abs(md) > 0.01) { moreGrow += md * 0.3; dirty = true; } else moreGrow = mt; }
 
             bool near = keepOpen(sp) || idx >= 0 || moreHot || Animating;
             if (!near && items.Any((it) => Rectangle.Inflate(HitRect(items.IndexOf(it)), 6, 6).Contains(c))) near = true;
@@ -444,7 +486,7 @@ namespace MacDock
             using (Graphics g = surface.Begin())
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.InterpolationMode = Animating ? InterpolationMode.Bilinear : InterpolationMode.HighQualityBicubic; // cheaper filtering while moving keeps every frame under the refresh interval
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
                 var fmt = new StringFormat { LineAlignment = StringAlignment.Center, Alignment = StringAlignment.Center, Trimming = StringTrimming.None, FormatFlags = StringFormatFlags.NoWrap };
                 if (style == "grid" && items.Count > 0)
@@ -540,7 +582,7 @@ namespace MacDock
                         using (var rim = new Pen(Color.FromArgb(la * 55 / 255, 255, 255, 255), 1f))
                             { g.FillPath(b, gp); g.DrawPath(rim, gp); }
                         using (var tb = new SolidBrush(Color.FromArgb(la, 250, 250, 252)))
-                            g.DrawString(Display(it), font, tb, lr, fmt);
+                            { string dn = Typography.Safe(Display(it)); g.DrawString(dn, Typography.FontFor(font, dn), tb, lr, fmt); }
                         g.Restore(saved);
                     }
                 }
@@ -550,7 +592,7 @@ namespace MacDock
                     double mp = Math.Max(0, Math.Min(1, Progress(items.Count)));
                     if (mp > 0.01)
                     {
-                        float ms = (float)(0.35 + 0.65 * mp);
+                        float ms = (float)((0.35 + 0.65 * mp) * (1 + 0.34 * moreGrow)); // grows on hover like the file icons
                         float mcx = (float)(origin.X + (moreRect.Left + moreRect.Width / 2f - origin.X) * mp), mcy = (float)(origin.Y + (moreRect.Top + moreRect.Height / 2f - origin.Y) * mp);
                         int mal = (int)(255 * Math.Min(1, mp * 1.6));
                         var mst = g.Save();
@@ -559,9 +601,16 @@ namespace MacDock
                         using (var b = new SolidBrush(Color.FromArgb((moreHot ? 225 : 190) * mal / 255, 70, 70, 78)))
                         using (var pen = new Pen(Color.FromArgb(70 * mal / 255, 255, 255, 255)))
                         { g.FillEllipse(b, mr); g.DrawEllipse(pen, mr); }
-                        if (arrowFont == null) arrowFont = new Font("Segoe UI Symbol", 17f, FontStyle.Bold);
-                        using (var tb = new SolidBrush(Color.FromArgb(235 * mal / 255, 255, 255, 255)))
-                            g.DrawString("➦", arrowFont, tb, new RectangleF(mr.Left, mr.Top, mr.Width, mr.Height), fmt);
+                        // Vector arrow: creating a "Segoe UI Symbol" Font for the glyph took ~6.6 s on this machine (GDI+ font lookup) on every
+                        // fan open, freezing the dock on each folder click. A drawn path costs nothing.
+                        using (var ap = new Pen(Color.FromArgb(235 * mal / 255, 255, 255, 255), 2.4f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                        {
+                            float u = mr.Width / 44f;
+                            // Curved "➦"-style arrow: a thick shaft bending up from lower left, ending in a filled head pointing right.
+                            ap.Width = Math.Max(2.4f, 3.4f * u);
+                            g.DrawBezier(ap, new PointF(-9 * u, 9 * u), new PointF(-9.5f * u, -1 * u), new PointF(-6 * u, -5 * u), new PointF(3 * u, -5 * u));
+                            using (var hb = new SolidBrush(ap.Color)) g.FillPolygon(hb, new[] { new PointF(1.5f * u, -12 * u), new PointF(11.5f * u, -5 * u), new PointF(1.5f * u, 2 * u) });
+                        }
                         g.Restore(mst);
                     }
                     if (moreHot)
@@ -591,6 +640,7 @@ namespace MacDock
             Program.Mark = "fan-present"; long te = clk.ElapsedTicks; surface.Present(Handle, Left, Top, 255); Program.Mark = "fan-idle";
             double dd = (clk.ElapsedTicks - dt0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency, ppr = (clk.ElapsedTicks - te) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             drawN++; drawSum += dd; if (dd > drawMax) drawMax = dd;
+            if (benchFrames != null) benchFrames.Add(((clk.ElapsedTicks - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0") + "ms draw=" + dd.ToString("0.0"));
             if (drawN <= 3 || drawN % 20 == 0) Log("frame " + drawN + " draw=" + dd.ToString("0.0") + "ms (present " + ppr.ToString("0.0") + "ms) avg=" + (drawSum / drawN).ToString("0.0") + " max=" + drawMax.ToString("0.0"));
         }
 
@@ -617,7 +667,7 @@ namespace MacDock
         {
             if (disposing)
             {
-                timer.Dispose(); if (arrowFont != null) arrowFont.Dispose(); if (surface != null) surface.Dispose();
+                timer.Dispose(); if (surface != null) surface.Dispose();
             }
             base.Dispose(disposing);
         }

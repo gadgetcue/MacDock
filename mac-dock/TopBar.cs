@@ -449,6 +449,7 @@ namespace MacDock
                 data.rc.Bottom = data.rc.Top + BarHeight;
                 Win32.SHAppBarMessage(3, ref data); // ABM_SETPOS
                 appBarRegistered = true;
+                DockClamp.BarBottom = screen.Top + BarHeight; DockClamp.Monitor = screen; DockClamp.Start(); // windows dragged up under the bar get slid back below it
             }
             catch { }
         }
@@ -457,6 +458,7 @@ namespace MacDock
         {
             if (!appBarRegistered) return;
             appBarRegistered = false;
+            DockClamp.BarBottom = 0;
             var data = new Win32.APPBARDATA();
             data.cbSize = Marshal.SizeOf(typeof(Win32.APPBARDATA));
             data.hWnd = Handle;

@@ -660,7 +660,7 @@ namespace MacDock
             for (int i = 0; i < text.Length; i++) if (IsEmojiAt(text, i)) { any = true; break; }
             if (!any) { g.DrawString(text, font, brush, r, fmt); return; }
             Font ef;
-            if (!emojiFonts.TryGetValue(font.Size, out ef)) { ef = new Font("Segoe UI Emoji", font.Size, FontStyle.Regular, font.Unit); emojiFonts[font.Size] = ef; }
+            if (!emojiFonts.TryGetValue(font.Size, out ef)) { ef = Typography.SystemFont("Segoe UI Emoji", font.Size, FontStyle.Regular, font.Unit); emojiFonts[font.Size] = ef; }
             float x = r.Left;
             int pos = 0;
             while (pos < text.Length && x < r.Right)

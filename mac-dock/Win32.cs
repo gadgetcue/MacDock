@@ -57,7 +57,9 @@ namespace MacDock
         public static void Focus(IntPtr h)
         {
             if (!NativeMethods.IsWindow(h)) return;
-            if (NativeMethods.IsIconic(h)) NativeMethods.ShowWindow(h, 9);
+            // A frozen app must never freeze the dock: restore it asynchronously and never tie our input queue to its thread.
+            if (NativeMethods.IsIconic(h)) NativeMethods.ShowWindowAsync(h, 9);
+            if (NativeMethods.IsHungAppWindow(h)) { NativeMethods.SetForegroundWindow(h); return; }
             // A synthetic Alt tap lets a background process take the foreground.
             NativeMethods.keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
             NativeMethods.keybd_event(VK_MENU, 0, 2, UIntPtr.Zero);
@@ -70,12 +72,12 @@ namespace MacDock
             bool a1 = false, a2 = false;
             try
             {
-                if (fgThread != 0 && fgThread != me) a1 = AttachThreadInput(me, fgThread, true);
+                if (fgThread != 0 && fgThread != me && !NativeMethods.IsHungAppWindow(fg)) a1 = AttachThreadInput(me, fgThread, true);
                 if (tgtThread != 0 && tgtThread != me && tgtThread != fgThread) a2 = AttachThreadInput(me, tgtThread, true);
-                BringWindowToTop(h);
-                const uint NOSIZE = 1, NOMOVE = 2, SHOW = 0x40;
-                SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, NOMOVE | NOSIZE | SHOW); // above any topmost window...
-                SetWindowPos(h, new IntPtr(-2), 0, 0, 0, 0, NOMOVE | NOSIZE | SHOW); // ...then back to a normal window
+                const uint NOSIZE = 1, NOMOVE = 2, SHOW = 0x40, ASYNC = 0x4000; // ASYNC: never wait on the target app's thread
+                SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, NOMOVE | NOSIZE | ASYNC); // to the top (what BringWindowToTop did)
+                SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, NOMOVE | NOSIZE | SHOW | ASYNC); // above any topmost window...
+                SetWindowPos(h, new IntPtr(-2), 0, 0, 0, 0, NOMOVE | NOSIZE | SHOW | ASYNC); // ...then back to a normal window
                 NativeMethods.SetForegroundWindow(h);
             }
             finally

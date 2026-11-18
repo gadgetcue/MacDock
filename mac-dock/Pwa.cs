@@ -131,7 +131,7 @@ namespace MacDock
         delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
         [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll")] static extern int GetClassName(IntPtr hwnd, StringBuilder text, int count);
-        [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr hwnd);
+        static int GetWindowTextLength(IntPtr hwnd) { return NativeMethods.GetWindowTextLength(hwnd); } // no message: safe with frozen apps
 
         // The visible window of the app with this AppUserModelID, or Zero. By default only Brave / Edge / Chrome windows are
         // looked at (the web apps); anyWindow also checks every other titled top-level window (Store apps and so on).
