@@ -74,7 +74,7 @@ namespace MacDock
         {
             if (Cached(folder) != null) return;
             lock (inflight) { if (!inflight.Add(folder)) return; }
-            new Thread(() =>
+            var loader = new Thread(() =>
             {
                 try
                 {
@@ -91,7 +91,7 @@ namespace MacDock
                             list.Add(new FanItem { Path = f.FullName, Name = f.Name, IsDir = f is DirectoryInfo });
                     }
                     catch { }
-                    foreach (FanItem it in list) it.Icon = DockForm.LoadShellIcon(it.Path, 0, 0);
+                    foreach (FanItem it in list) it.Icon = IconFor(it);
                     var ld = new Loaded { Stamp = stamp, List = list };
                     lock (cache) cache[folder] = ld;
                     foreach (FanItem it in list.Where(x => !x.IsDir && IsImage(x.Path)).ToList())
@@ -99,7 +99,9 @@ namespace MacDock
                     ld.ThumbsDone = true;
                 }
                 finally { lock (inflight) inflight.Remove(folder); }
-            }) { IsBackground = true, Priority = ThreadPriority.BelowNormal }.Start();
+            }) { IsBackground = true, Priority = ThreadPriority.BelowNormal };
+            loader.SetApartmentState(ApartmentState.STA); // shell thumbnail providers (video frames) need an STA thread
+            loader.Start();
         }
 
         public DownloadsFan(string folder, Point anchorTopCenter, Func<Point, bool> keepOpen, Action closed)
@@ -183,10 +185,47 @@ namespace MacDock
         }
         public static void SetStyle(string s) { try { File.WriteAllText(StyleFile, s); } catch { } }
 
+        // Never blank: the shell icon, then the shell's image factory, then the generic icon for the file type (or folder), then a lettered tile.
+        static Bitmap IconFor(FanItem it)
+        {
+            Bitmap b = null;
+            try { b = DockForm.LoadShellIcon(it.Path, 0, 0); } catch { }
+            if (b != null && !ShellIcons.IsBlank(b)) return b;
+            Program.Log("FAN icon fallback: " + it.Path + (b == null ? " (null)" : " (blank)"));
+            try { Bitmap f = ShellIcons.Load(it.Path, 96); if (f != null && !ShellIcons.IsBlank(f)) return f; } catch { }
+            try
+            {
+                // By type only (the file itself may be unreadable, offline or a broken shortcut): .zip, .exe, folder...
+                string key = it.IsDir ? "folder" : (Path.GetExtension(it.Path).Length > 0 ? Path.GetExtension(it.Path) : "file");
+                Bitmap g = DockForm.LoadShellIcon(key, 0x10 /*SHGFI_USEFILEATTRIBUTES*/, it.IsDir ? 0x10u : 0x80u);
+                if (g != null && !ShellIcons.IsBlank(g)) return g;
+            }
+            catch { }
+            return ShellIcons.Generic(it.Name, 96);
+        }
+
         static bool IsImage(string p)
         {
             string e = Path.GetExtension(p).ToLowerInvariant();
-            return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp" || e == ".gif";
+            return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp" || e == ".gif"
+                || e == ".mp4" || e == ".mov" || e == ".mkv" || e == ".avi" || e == ".webm" || e == ".wmv" || e == ".m4v"; // videos: the shell gives a frame
+        }
+
+        static bool IsVideo(string p)
+        {
+            string e = Path.GetExtension(p).ToLowerInvariant();
+            return e == ".mp4" || e == ".mov" || e == ".mkv" || e == ".avi" || e == ".webm" || e == ".wmv" || e == ".m4v";
+        }
+
+        // Windows pads thumbnails to a square with transparent bars; trim them so the picture keeps its real aspect ratio.
+        static Bitmap TrimPadding(Bitmap t)
+        {
+            int minX = t.Width, minY = t.Height, maxX = -1, maxY = -1;
+            for (int y = 0; y < t.Height; y++)
+                for (int x = 0; x < t.Width; x++)
+                    if (t.GetPixel(x, y).A > 12) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+            if (maxX < 0 || (minX == 0 && minY == 0 && maxX == t.Width - 1 && maxY == t.Height - 1)) return null;
+            return t.Clone(new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1), t.PixelFormat);
         }
 
         static Bitmap MakeThumb(string path)
@@ -195,7 +234,21 @@ namespace MacDock
             // process-wide lock for seconds and froze every dock paint (the "folder click hangs" stall).
             try
             {
-                using (Bitmap t = ShellIcons.LoadThumb(path, IconSize))
+                using (Bitmap t0 = ShellIcons.LoadThumb(path, IconSize))
+                {
+                    Bitmap trimmed = null;
+                    try
+                    {
+                        if (t0 != null)
+                        {
+                            Size? real = MediaSize.Probe(path); // true shape from the file header
+                            trimmed = real.HasValue ? MediaSize.CropToAspect(t0, real.Value) : null;
+                            if (trimmed == null) trimmed = TrimPadding(t0); // unknown format: trim transparent padding instead
+                        }
+                    }
+                    catch { }
+                    Bitmap t = trimmed ?? t0;
+                    try {
                     if (t != null)
                     {
                         double sc = Math.Min((double)IconSize / t.Width, (double)IconSize / t.Height);
@@ -204,8 +257,11 @@ namespace MacDock
                         using (Graphics g = Graphics.FromImage(o)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(t, 0, 0, w, h); }
                         return o;
                     }
+                    } finally { if (trimmed != null) trimmed.Dispose(); }
+                }
             }
             catch { }
+            if (IsVideo(path)) return null; // no shell frame: keep the file icon (GDI+ can't decode video)
             if (new FileInfo(path).Length > 3 * 1024 * 1024) return null;
             // Read the bytes first: GDI+ holds a process-wide lock while it pulls from a stream, so a slow or cloud-backed file read inside
             // Image.FromStream froze every dock paint (and the dock) until the read ended.
@@ -514,7 +570,7 @@ namespace MacDock
                     double pr = Math.Max(0, Math.Min(1, Progress(i)));
                     RectangleF rf = CurrentRect(i);
                     bool hot = i == hover;
-                    { float gI = (float)(IconSize * 0.34 * it.Hot); rf.Inflate(gI, gI); }
+                    float pop = 1f; { float gI = (float)(IconSize * 0.34 * it.Hot); pop = (rf.Width + 2 * gI) / Math.Max(1f, rf.Width); rf.Inflate(gI, gI); }
                     Rectangle r = Rectangle.Round(rf);
                     int alpha = (int)(255 * Math.Min(1, pr * 1.6));
 
@@ -522,7 +578,7 @@ namespace MacDock
                     if (img != null)
                     {
                         RectangleF dst = rf;
-                        if (it.Thumb != null) dst = new RectangleF(rf.Left + (rf.Width - it.Thumb.Width) / 2f, rf.Top + (rf.Height - it.Thumb.Height) / 2f, it.Thumb.Width, it.Thumb.Height);
+                        if (it.Thumb != null) { float tw = it.Thumb.Width * pop, th = it.Thumb.Height * pop; dst = new RectangleF(rf.Left + (rf.Width - tw) / 2f, rf.Top + (rf.Height - th) / 2f, tw, th); } // picture thumbnails pop on hover like the icons
                         var rotSaved = g.Save();
                         double rot = style == "fan" ? it.Angle * 0.6 : 0; // thumbnails lean a few degrees like the Dock's, following the arc
                         if (rot != 0) { g.TranslateTransform(dst.Left + dst.Width / 2f, dst.Top + dst.Height / 2f); g.RotateTransform((float)rot); g.TranslateTransform(-(dst.Left + dst.Width / 2f), -(dst.Top + dst.Height / 2f)); }

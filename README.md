@@ -4,12 +4,12 @@ A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds 
 
 ![Desktop with dock and menu bar](screenshots/v1.5/desktop.jpg)
 
-See the [changelog](CHANGELOG.md) for what's new in v1.8.
+See the [changelog](CHANGELOG.md) for what's new in v2.3.
 
 ## Installation guide
 **Requirements:** Windows 11 (Windows 10 mostly works), x64, .NET Framework 4.x (already part of Windows). No admin rights and no SDK needed.
 
-1. Download `MacDock-v1.8.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v1.8.zip SHA256`.
+1. Download `MacDock-v2.3.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v2.3.zip SHA256`.
 2. Extract the zip to any folder (right-click > Extract All).
 3. Double-click `Install.bat`. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
 4. MacDock is copied to `%LOCALAPPDATA%\MacDock`, a Start Menu shortcut is created, and the dock starts. It also starts at login (toggle in MacDock Settings).
@@ -57,7 +57,18 @@ You do not have to take our word for it:
 - **Fullscreen aware**: the dock, bar and island hide for fullscreen apps.
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
-## Screenshots (v2.1)
+## Screenshots (v2.3)
+![Menu bar status readouts](screenshots/v2.3/menubar-status-readouts.jpg)
+
+![Dock](screenshots/v2.3/dock.jpg)
+
+![Settings: Menu Bar & Island](screenshots/v2.3/settings-menubar-and-island.jpg)
+
+![Settings: Dock](screenshots/v2.3/settings-dock.jpg)
+
+![Welcome tour](screenshots/v2.3/welcome-tour-1.jpg)
+
+### Earlier (v2.1)
 ![Desktop with dock and menu bar](screenshots/v2.1/desktop.jpg)
 
 ![Dock magnification](screenshots/v2.1/dock-magnify.jpg)

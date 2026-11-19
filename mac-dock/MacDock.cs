@@ -1,4 +1,4 @@
-﻿// MacDock - a lightweight macOS-style dock for Windows.
+// MacDock - a lightweight macOS-style dock for Windows.
 //
 // dock.txt (in %APPDATA%\MacDock) controls what is pinned:
 //   - apps (.exe / .lnk), folders, files, websites (https://...), shell:/ms-settings: links, and [start]
@@ -30,10 +30,14 @@ namespace MacDock
         [DllImport("kernel32.dll")]
         static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
 
+        [DllImport("user32.dll")] static extern void DisableProcessWindowsGhosting();
+
         static void Relaunch()
         {
             // Parent the new process to explorer.exe so it is outside the caller's process tree / job object.
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + Application.ExecutablePath + "\"") { UseShellExecute = false }); }
+            // Via the MacDockGuard task (real path, outside any job); never explorer.exe with a path (packaged-shell popups). The task repeats every minute anyway.
+            TaskbarControl.Handoff = true;
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c timeout /t 3 /nobreak >nul & schtasks /Run /TN MacDockGuard") { UseShellExecute = false, CreateNoWindow = true }); }
             catch (Exception ex) { Program.Log(ex); }
         }
 
@@ -109,6 +113,7 @@ namespace MacDock
             int test = Array.FindIndex(args, a => a.Equals("/wt-selftest", StringComparison.OrdinalIgnoreCase));
             if (test >= 0 && test + 1 < args.Length) { Environment.ExitCode = WindowThemeTest.Run(args[test + 1]); return; }
 
+            if (args.Length >= 5 && args[0].Equals("--tour-shot", StringComparison.OrdinalIgnoreCase)) { Environment.ExitCode = OnboardingForm.Shot(args.Skip(1).ToArray()); return; }
             { int sb = Array.FindIndex(args, a => a.Equals("--scroll-bench", StringComparison.OrdinalIgnoreCase)); if (sb >= 0 && sb + 1 < args.Length) { Environment.ExitCode = SettingsForm.ScrollBench(args[sb + 1]); return; } }
 
             // "MacDock.exe --send <file>" (Explorer right-click verb): queue the file for the LocalSend panel in the running dock.
@@ -157,6 +162,7 @@ namespace MacDock
             using (new System.Threading.Mutex(true, "MacDockSingleInstance", out created))
             {
                 if (!created) return;
+                try { DisableProcessWindowsGhosting(); } catch { } // a busy UI thread must never get a "Not responding" ghost that Windows (or a click) can end
                 Application.EnableVisualStyles();
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
                 Application.ThreadException += (s, e) => Log(e.Exception);
@@ -254,6 +260,9 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                     };
                     watchdog.Start();
                     StartStallWatch(dock);
+                    // WinForms' Control.DefaultFont looks "Microsoft Sans Serif" up by name: ~5 s on this PC's ~3,600 fonts. The first
+                    // TextBox (Settings search) would pay that on the UI thread and freeze the bar, so resolve it once in the background.
+                    System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { var sw = Stopwatch.StartNew(); var df = Control.DefaultFont; Log("DefaultFont warmed in " + sw.ElapsedMilliseconds + " ms"); } catch (Exception ex) { Log(ex); } });
                     // Memory diet: every 45 s compact the heap and hand unused pages back to Windows (they fault back in on demand).
                     var trim = new Timer { Interval = 45000 };
                     trim.Tick += (s, e) =>
@@ -283,8 +292,8 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                     bar.Dispose();
                     island.Dispose();
                     spotlight.Dispose();
+                    if (!QuitRequested) Relaunch(); // closed or crashed without a deliberate Quit (sets the taskbar handoff)
                     TaskbarControl.Restore();
-                    if (!QuitRequested) Relaunch(); // closed or crashed without a deliberate Quit
                 }
             }
         }
@@ -318,6 +327,8 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                         {
                             if (!logged) { logged = true; stallStart = pong; cpu0 = ThreadCpu(); seen.Clear(); Log("UI STALL begin (no response for " + (sent - pong) + " ms) mark=" + Mark); }
                             string mk = Mark ?? ""; int c; seen.TryGetValue(mk, out c); seen[mk] = c + 1;
+                            // Frozen for a full minute: restart cleanly instead of leaving a dead dock and bar on screen.
+                            if (sent - pong > 60000 && !QuitRequested) { Log("UI HUNG 60 s at mark=" + mk + ": restarting via MacDockGuard"); Relaunch(); try { TaskbarControl.Restore(); } catch { } Process.GetCurrentProcess().Kill(); } if (c == 0 && seen.Count > 1) Log("UI STALL still stuck, now at mark=" + mk);
                         }
                         else if (logged) { logged = false; Log("UI STALL end after ~" + (sent - stallStart) + " ms; cpu: " + ThreadDelta(cpu0, uiId) + "; where: " + string.Join(", ", seen.OrderByDescending(k => k.Value).Take(4).Select(k => k.Key + " x" + k.Value).ToArray())); }
                         ui.BeginInvoke((Action)(() => { long now = Environment.TickCount; if (logged && now - lastPong > 0) { } lastPong = now; }));
@@ -379,6 +390,10 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
 
         public static bool IsHidden { get { return hidden; } }
 
+        // Set when a replacement dock instance is about to start (update / guard relaunch): Restore() then leaves the
+        // taskbar hidden so it doesn't flash back for the seconds until the new instance hides it again.
+        public static bool Handoff;
+
         public static void Hide()
         {
             IntPtr tray = FindWindow("Shell_TrayWnd", null);
@@ -388,6 +403,8 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
             {
                 APPBARDATA get = NewData(tray);
                 previousState = (uint)(ulong)SHAppBarMessage(ABM_GETSTATE, ref get);
+                // A previous instance handed the hidden taskbar over: its saved state is the user's real one (the live one is our auto-hide).
+                try { uint sv; if (File.Exists(StatePath()) && uint.TryParse(File.ReadAllText(StatePath()).Trim(), out sv)) previousState = sv; } catch { }
                 try { File.WriteAllText(StatePath(), previousState.ToString()); } catch { } // survives a kill, so /restore puts the user's real state back
                 APPBARDATA set = NewData(tray);
                 set.lParam = (IntPtr)(previousState | ABS_AUTOHIDE);
@@ -406,6 +423,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         public static void Restore()
         {
             if (!hidden) return;
+            if (Handoff) return; // a new instance takes over; keep it hidden and keep the state file
             hidden = false;
 
             foreach (IntPtr h in TrayWindows()) NativeMethods.ShowWindowAsync(h, SW_SHOWNA);
@@ -538,7 +556,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         [DllImport("shell32.dll")] public static extern int SHGetImageList(int listType, ref Guid iid, out IImageList list);
     }
 
-    enum Kind { App, Folder, File, Url, Start, Mission, Launchpad, Trash, Split }
+    enum Kind { App, Folder, File, Url, Start, Mission, Launchpad, Trash, Split, Minimized }
 
     // One line of dock.txt.
     sealed class Entry
@@ -695,6 +713,30 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         // Slides down out of sight while a fullscreen app is in front (0 = shown, 1 = hidden).
         Spring hideSpring = new Spring(0);
         int fullscreenTick;
+        bool hideForApp;
+        string[] hideApps = new string[0]; DateTime hideAppsRead = DateTime.MinValue;
+
+        // Per-app hidden mode: @hide-dock-apps=chrome.exe,code.exe in dock.txt auto-hides the dock while one of those apps is in front.
+        bool HideForFrontApp()
+        {
+            try
+            {
+                if ((DateTime.Now - hideAppsRead).TotalSeconds > 5)
+                {
+                    hideAppsRead = DateTime.Now;
+                    string v = SetCfg.Get("hide-dock-apps");
+                    hideApps = string.IsNullOrWhiteSpace(v) ? new string[0] : v.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).ToArray();
+                }
+                if (hideApps.Length == 0) return false;
+                uint pid; NativeMethods.GetWindowThreadProcessId(Win32.GetForegroundWindow(), out pid);
+                string exe = ProcessPath(pid);
+                if (exe == null) return false;
+                string name = System.IO.Path.GetFileName(exe);
+                foreach (string a in hideApps) if (string.Equals(a, name, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            catch { }
+            return false;
+        }
         const double HideOmega = 22, HideZeta = 1.0;
         static float HideDistance { get { return PillHeightConst + BottomMargin + Px(14); } }
         static int PillHeightConst { get { return BasePx + 2 * PadY; } }
@@ -861,10 +903,10 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
             vsync = new VsyncDriver(this, Step); Program.T("vsync");
 
             refreshTimer.Interval = 2000;
-            refreshTimer.Tick += (s, e) => RebuildItems();
+            refreshTimer.Tick += (s, e) => { MinimizedDock.Track(); RebuildItems(); };
             { var warm = new Timer { Interval = 4000 }; warm.Tick += (s, e) => { warm.Stop(); warm.Dispose(); Item fo = items.FirstOrDefault(x => x.Kind == Kind.Folder); if (fo != null) DownloadsFan.Warm(Environment.ExpandEnvironmentVariables(fo.Target)); }; warm.Start(); } // first folder click opens without a cold start
             // Test hook: a line in mac-dock\scratch\click.trigger names a dock item (part of its target); the dock clicks it, like the user would.
-            { var trig = new Timer { Interval = 400 }; trig.Tick += (s, e) => { try { string tf = @"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\scratch\click.trigger"; if (!File.Exists(tf)) return; string want = File.ReadAllText(tf).Trim(); File.Delete(tf); Item hit = items.FirstOrDefault(x => x.Target != null && x.Target.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0); Program.Log("TRIGGER click " + want + " -> " + (hit == null ? "none" : hit.Target)); if (hit != null) { var tsw = Stopwatch.StartNew(); Activate(hit); Program.Log("TRIGGER activate took " + tsw.ElapsedMilliseconds + " ms"); } } catch (Exception ex) { Program.Log(ex); } }; trig.Start(); }
+            { var trig = new Timer { Interval = 400 }; trig.Tick += (s, e) => { try { string tf = @"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\scratch\click.trigger"; if (!File.Exists(tf)) return; string want = File.ReadAllText(tf).Trim(); File.Delete(tf); if (want == "@settings-close") { SettingsForm.CloseForTest(); return; } if (want.StartsWith("@settings:")) { Program.Log("TRIGGER settings page " + want.Substring(10)); SettingsForm.ShowSettings(want.Substring(10)); return; } if (want == "@settings") { Program.Log("TRIGGER settings"); SettingsForm.ShowSettings(); Program.Log("TRIGGER settings done"); return; } Item hit = items.FirstOrDefault(x => x.Target != null && x.Target.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0); Program.Log("TRIGGER click " + want + " -> " + (hit == null ? "none" : hit.Target)); if (hit != null) { var tsw = Stopwatch.StartNew(); Activate(hit); Program.Log("TRIGGER activate took " + tsw.ElapsedMilliseconds + " ms"); } } catch (Exception ex) { Program.Log(ex); } }; trig.Start(); }
 
             Program.T("ctor-a"); LoadConfig(); Program.T("ctor-config");
             ApplyTaskbarSetting(); Program.T("ctor-taskbar");
@@ -1093,7 +1135,7 @@ Theme.Refresh();
                     }
                     if (it.Kind == Kind.Folder && preview is DownloadsFan && previewItem != null && previewItem.Key == it.Key) DrawFanTile(g, it, ((DownloadsFan)preview).Presence);
                     else DrawIcon(g, it, it.Rect);
-                    if (it.Handles.Count > 0) // running indicator, like the macOS dot
+                    if (it.Handles.Count > 0 && it.Kind != Kind.Minimized) // running indicator, like the macOS dot
                         g.FillEllipse(dot, it.Rect.Left + it.Rect.Width / 2 - Px(2), pillRect.Bottom - Px(6), Px(4), Px(4));
                 }
 
@@ -1229,7 +1271,8 @@ Theme.Refresh();
             }
 
             if (++fullscreenTick % 5 == 0) Fullscreen.Update(); // ~4 times a second is plenty
-            bool autoAway = !ShowDockOn || (AutoHideOn && AutoHideAway()); // auto-hide polls the cursor; off, it costs nothing
+            if (fullscreenTick % 5 == 0) hideForApp = HideForFrontApp();
+            bool autoAway = !ShowDockOn || ((AutoHideOn || hideForApp) && AutoHideAway()); // auto-hide polls the cursor; off, it costs nothing
             bool away = Fullscreen.Active || autoAway;
 
             if (!Visible)
@@ -1664,6 +1707,14 @@ Theme.Refresh();
 
         // ---------- items ----------
 
+        // A minimize or restore shows up in the dock at once instead of on the next 2 s refresh.
+        System.Windows.Forms.Timer rebuildSoon;
+        internal void RebuildSoon()
+        {
+            if (rebuildSoon == null) { rebuildSoon = new System.Windows.Forms.Timer { Interval = 350 }; rebuildSoon.Tick += (s, e) => { rebuildSoon.Stop(); RebuildItems(); }; }
+            rebuildSoon.Stop(); rebuildSoon.Start();
+        }
+
         void RebuildItems() { var sw = Stopwatch.StartNew(); try { RebuildItems0(); } finally { Program.Slow("RebuildItems", sw); } }
         void RebuildItems0()
         {
@@ -1732,6 +1783,26 @@ Theme.Refresh();
             }
             catch (Exception ex) { Program.Log(ex); }
             list.AddRange(rightItems);
+
+            // Minimized windows get their own tiles just before the Recycle Bin (Settings > Dock: "Minimize windows into the Dock").
+            Program.Mark = "RebuildItems:minimized";
+            try
+            {
+                MinimizedDock.Prune();
+                if (MinimizedDock.On)
+                    foreach (var kv in running)
+                        foreach (IntPtr h in kv.Value)
+                        {
+                            if (!NativeMethods.IsIconic(h)) continue;
+                            Item owner = list.FirstOrDefault(x => x.Kind == Kind.App && x.Handles.Contains(h));
+                            var ttl = new System.Text.StringBuilder(256); Win32.GetWindowText(h, ttl, ttl.Capacity);
+                            var mi = new Item { Kind = Kind.Minimized, Section = 3, Target = "min|" + h.ToInt64(), Handles = new List<IntPtr> { h },
+                                Label = ttl.Length > 0 ? ttl.ToString() : (owner != null ? owner.Label : "Window") };
+                            mi.Icon = MinimizedDock.Tile(h, owner != null ? owner.Icon : null) ?? Logo();
+                            list.Add(mi);
+                        }
+            }
+            catch (Exception ex) { Program.Log(ex); }
 
             // The Recycle Bin always sits at the far right (like the macOS Trash), unless the user already pinned one.
             Program.Mark = "RebuildItems:trash";
@@ -2067,6 +2138,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 Program.Mark = "ShowPreview:fan.Show"; fan.Show(); Program.Mark = "ShowPreview:fan-shown";
                 return;
             }
+            if (it.Kind == Kind.Minimized || !SetCfg.GetBool("window-previews", true)) return; // hover previews can be switched off in Settings > Dock
             var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
             if (live.Count < 1) return;
             Point c = PointToScreen(new Point((int)(it.Rect.Left + it.Rect.Width / 2), CardAnchorY(it)));
@@ -2088,6 +2160,13 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
         void Activate(Item it)
         {
             Program.Mark = "Activate";
+            if (it.Kind == Kind.Minimized)
+            {
+                IntPtr mh = it.Handles.Count > 0 ? it.Handles[0] : IntPtr.Zero;
+                if (mh != IntPtr.Zero && NativeMethods.IsWindow(mh)) { NativeMethods.ShowWindowAsync(mh, SW_RESTORE); FocusWindow(mh); }
+                RebuildSoon();
+                return;
+            }
             if (it.Kind == Kind.Folder)
             {
                 // Clicking a folder stack opens its fan (or folds it back when it is already open); "Open in Explorer" sits at the fan's top.
@@ -2369,6 +2448,8 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             int index = IndexAt(e.X, e.Y);
 
             if (e.Button == MouseButtons.Right) ShowMenu(index >= 0 ? items[index] : null, e.Location);
+            else if (e.Button == MouseButtons.Middle && index >= 0 && items[index].Kind == Kind.Trash) RecycleBin.Empty(); // middle-click empties the bin
+            else if (e.Button == MouseButtons.Left && index >= 0 && items[index].Kind == Kind.Trash && (ModifierKeys & (Keys.Control | Keys.Shift)) != 0) RecycleBin.Empty();
             else if (e.Button == MouseButtons.Left && index >= 0) Activate(items[index]);
         }
 
@@ -2405,7 +2486,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                     Item targetItem = it;
                     list.Add(MenuEntry.Item("Close", null, () => CloseItem(targetItem)));
                     if (it.Handles.Count >= 2) list.Add(MenuEntry.Item("Close all windows", null, () => CloseItem(targetItem))); // WM_CLOSE to each window only; never touches MacDock
-                    if (it.Kind != Kind.Split) list.Add(MenuEntry.Item("Force Close", null, () => ForceCloseItem(targetItem)));
+                    if (it.Kind != Kind.Split && it.Kind != Kind.Minimized) list.Add(MenuEntry.Item("Force Close", null, () => ForceCloseItem(targetItem)));
                     list.Add(MenuEntry.Sep());
                 }
 

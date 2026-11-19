@@ -1,4 +1,4 @@
-// Dynamic island at the top-center of the screen. It stays a small black pill and springs open for
+﻿// Dynamic island at the top-center of the screen. It stays a small black pill and springs open for
 // notifications, power events, now-playing media, a hover peek, and the notification list.
 
 using System;
@@ -21,10 +21,19 @@ namespace MacDock
             public Action Click;
         }
 
-        const int CanvasW = 520, CanvasH = 340, TopY = 0;
+        const int CanvasW = 520, TopY = 0;
+        static int CanvasH { get { return (int)(340 * Ds) + 30; } }
         // Idle: a round dot exactly as tall as the status bar.
         static readonly int IdleW = TopBar.BarHeight - 10, IdleH = TopBar.BarHeight - 10;
-        const int HeaderH = 70, MediaH = 56, RowH = 46, FooterH = 44, TabH = 36, ClipRowH = 34, ClipMax = 5;
+        // Island lives on the primary monitor: Ds follows that monitor's live DPI (fonts are in points, so text boxes must scale too).
+        static float Ds = Math.Max(1f, Dpi.Of(Screen.PrimaryScreen));
+        static int HeaderH { get { return (int)(56 * Ds); } }
+        static int MediaH { get { return (int)(46 * Ds); } }
+        static int RowH { get { return (int)(30 * Ds); } }
+        static int FooterH { get { return (int)(30 * Ds) + 6; } }
+        static int TabH { get { return (int)(32 * Ds); } }
+        static int ClipRowH { get { return (int)(34 * Ds) + 6; } }
+        const int ClipMax = 5;
 
         readonly Timer timer = new Timer();
         // The pill is an under-damped spring, so it overshoots slightly when it opens, like the real island.
@@ -33,7 +42,7 @@ namespace MacDock
         readonly Font nameFont = Typography.Text(9f, Weight.Medium);
         readonly Font bodyFont = Typography.Secondary();
         readonly Font boldFont = Typography.Text(11f, Weight.Semibold);
-        readonly Font bigFont = Typography.Display(24f, Weight.Semibold);
+        readonly Font bigFont = Typography.Display(20f, Weight.Semibold);
         // Swipe a notification row sideways to dismiss it; the rows below slide up to fill the gap.
         struct RowRect { public Rectangle Rect; public NotificationInfo N; public int Index; }
         readonly List<RowRect> rowRects = new List<RowRect>();
@@ -290,6 +299,15 @@ namespace MacDock
         internal void Reposition()
         {
             Rectangle screen = Screen.PrimaryScreen.Bounds;
+            float ns = Math.Max(1f, Dpi.Of(screen));
+            if (Math.Abs(ns - Ds) > 0.001f)
+            {
+                Ds = ns; // monitor DPI changed: rebuild the canvas at the new size
+                if (surface != null) { surface.Dispose(); surface = null; }
+                prevDirty = Rectangle.Empty;
+                if (Height != CanvasH) Height = CanvasH;
+                frame = 0;
+            }
             int left = screen.Left + (screen.Width - CanvasW) / 2;
             if (Left != left || Top != screen.Top) Location = new Point(left, screen.Top);
         }
@@ -426,14 +444,15 @@ namespace MacDock
 
         int PanelHeight()
         {
-            int h = HeaderH + (Feed.Media != null ? MediaH : 0) + TabH;
+            int h = HeaderH + TabH;
             if (clipTab)
             {
                 int cr = Math.Min(ClipMax, clipHistory.Count);
                 return h + (cr > 0 ? cr * ClipRowH + FooterH : 30) + 6;
             }
             int rows = Math.Min(3, Feed.History.Count);
-            h += rows > 0 ? rows * RowH + FooterH : 30;
+            if (Feed.Media != null) h += MediaH;
+            h += rows > 0 ? rows * RowH + FooterH : (Feed.Media != null ? 6 : (int)(30 * Ds));
             return h + 6;
         }
 
@@ -553,10 +572,10 @@ namespace MacDock
         // Date and time on the left, battery ring on the right.
         void DrawHeader(Graphics g, RectangleF pill, Brush white, Brush gray, StringFormat left, int alpha)
         {
-            g.DrawString(DateTime.Now.ToString("h:mm"), bigFont, white, new RectangleF(pill.Left + 22, pill.Top + 8, 150, 36), left);
-            g.DrawString(DateTime.Now.ToString("ddd, d MMM"), nameFont, gray, new RectangleF(pill.Left + 24, pill.Top + 44, 150, 18), left);
+            g.DrawString(DateTime.Now.ToString("h:mm"), bigFont, white, new RectangleF(pill.Left + 22, pill.Top + 6 * Ds, 90 * Ds, 30 * Ds), left);
+            g.DrawString(DateTime.Now.ToString("ddd, d MMM"), nameFont, gray, new RectangleF(pill.Left + 24, pill.Top + 6 * Ds + 30 * Ds, 170 * Ds, 16 * Ds), left);
 
-            float d = 46, rx = pill.Right - 24 - d, ry = pill.Top + (HeaderH - d) / 2f;
+            float d = 38, rx = pill.Right - 22 - d, ry = pill.Top + (HeaderH - d) / 2f;
             int pct = SystemInfo.HasBattery ? SystemInfo.BatteryPercent : 100;
             Color ring = (SystemInfo.HasBattery && !SystemInfo.OnAc && pct <= 20) ? Color.FromArgb(255, 69, 58) : Color.FromArgb(52, 199, 89);
             using (var track = new Pen(A(Color.FromArgb(60, 255, 255, 255), alpha), 4f))
@@ -570,27 +589,47 @@ namespace MacDock
             string label = SystemInfo.HasBattery ? pct.ToString() : "AC";
             g.DrawString(label, nameFont, white, new RectangleF(rx - 2, ry, d + 4, d + 1), center);
             if (SystemInfo.HasBattery && SystemInfo.Charging)
-                g.DrawString("Charging", nameFont, gray, new RectangleF(rx - 90, ry + 14, 84, 18), new StringFormat(left) { Alignment = StringAlignment.Far });
+                g.DrawString("Charging", nameFont, gray, new RectangleF(rx - 12 - 110 * Ds, ry + (d - 18 * Ds) / 2f, 110 * Ds, 18 * Ds), new StringFormat(left) { Alignment = StringAlignment.Far });
         }
 
-        void DrawMediaPeek(Graphics g, RectangleF pill, Brush white, Brush gray, StringFormat left, int alpha)
+        void DrawMediaPeek(Graphics g, RectangleF pill, float y, Brush white, Brush gray, StringFormat left, int alpha)
         {
             MediaInfo m = Feed.Media;
-            pill.Y += HeaderH; pill.Height = MediaH;
-            g.DrawString(m.Title, boldFont, white, new RectangleF(pill.Left + 22, pill.Top + 6, pill.Width - 160, 22), left);
-            g.DrawString(m.Artist, nameFont, gray, new RectangleF(pill.Left + 22, pill.Top + 30, pill.Width - 160, 20), left);
+            float h = MediaH, art = 34 * Ds, ax = pill.Left + 16, ay = pill.Top + y + (h - art) / 2f;
+            var ar = new Rectangle((int)ax, (int)ay, (int)art, (int)art);
+            using (var path = Layered.RoundedRect(ar, (int)(8 * Ds)))
+            {
+                Bitmap bmp = m.Art;
+                if (bmp != null)
+                {
+                    var st = g.Save();
+                    g.SetClip(path, System.Drawing.Drawing2D.CombineMode.Intersect);
+                    var ia = new ImageAttributes();
+                    ia.SetColorMatrix(new ColorMatrix { Matrix33 = alpha / 255f });
+                    g.DrawImage(bmp, ar, 0, 0, bmp.Width, bmp.Height, GraphicsUnit.Pixel, ia);
+                    g.Restore(st);
+                }
+                else
+                {
+                    using (var fb = new SolidBrush(A(Color.FromArgb(46, 255, 255, 255), alpha))) g.FillPath(fb, path);
+                    var cen = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    g.DrawString("\u266B", bodyFont, white, new RectangleF(ar.X, ar.Y, ar.Width, ar.Height + 1), cen);
+                }
+            }
+            float tx = ax + art + 10 * Ds, bw = 3 * 30 * Ds - 6, tw = pill.Right - tx - bw - 18;
+            g.DrawString(m.Title ?? "", bodyFont, white, new RectangleF(tx, pill.Top + y + h / 2f - 17 * Ds, tw, 17 * Ds), left);
+            g.DrawString(m.Artist ?? "", nameFont, gray, new RectangleF(tx, pill.Top + y + h / 2f, tw, 16 * Ds), left);
 
-            float bx = pill.Right - 132, by = pill.Top + pill.Height / 2f;
+            float bx = pill.Right - 14 - bw, by = pill.Top + y + h / 2f;
             DrawMediaButton(g, bx, by, 0, alpha, MediaFeed.Previous);
-            DrawMediaButton(g, bx + 42, by, m.Playing ? 1 : 2, alpha, MediaFeed.TogglePlayPause);
-            DrawMediaButton(g, bx + 84, by, 3, alpha, MediaFeed.Next);
+            DrawMediaButton(g, bx + 30 * Ds, by, m.Playing ? 1 : 2, alpha, MediaFeed.TogglePlayPause);
+            DrawMediaButton(g, bx + 60 * Ds, by, 3, alpha, MediaFeed.Next);
         }
-
         // kind: 0 previous, 1 pause, 2 play, 3 next
         void DrawMediaButton(Graphics g, float cx, float cy, int kind, int alpha, Action click)
         {
-            hits.Add(new Hit { Rect = new Rectangle((int)cx, (int)cy - 18, 36, 36), Click = click });
-            float x = cx + 18;
+            hits.Add(new Hit { Rect = new Rectangle((int)cx, (int)(cy - 15 * Ds), (int)(30 * Ds), (int)(30 * Ds)), Click = click });
+            float x = cx + 15 * Ds;
             using (var b = new SolidBrush(A(Color.White, alpha)))
             {
                 switch (kind)
@@ -743,14 +782,15 @@ namespace MacDock
         {
             DrawHeader(g, pill, white, gray, left, alpha);
             float y = HeaderH;
-            if (Feed.Media != null) { DrawMediaPeek(g, pill, white, gray, left, alpha); y += MediaH; }
 
             DrawTabs(g, pill, y, white, gray, alpha);
             y += TabH;
             if (clipTab) { DrawClipboard(g, pill, y, white, gray, alpha); return; }
 
+            if (Feed.Media != null) { DrawMediaPeek(g, pill, y, white, gray, left, alpha); y += MediaH; }
             if (Feed.History.Count == 0)
             {
+                if (Feed.Media != null) return;
                 var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
                 g.DrawString("No notifications", bodyFont, gray, new RectangleF(pill.Left, pill.Top + y, pill.Width, 28), center);
                 return;
@@ -766,8 +806,7 @@ namespace MacDock
 
                 if (n != swipeN)
                 {
-                    DrawNotification(g, pill, n, white, gray, left, ry, alpha, false);
-                    g.DrawString(n.Time.ToString("h:mm tt"), nameFont, gray, new RectangleF(pill.Right - 90, pill.Top + ry + 4, 72, 18), right);
+                    DrawPlainRow(g, pill, n, white, gray, left, right, ry);
                     continue;
                 }
 
@@ -779,26 +818,29 @@ namespace MacDock
                 using (var rw = new SolidBrush(A(Color.White, ra)))
                 using (var rg = new SolidBrush(A(Color.FromArgb(150, 255, 255, 255), ra)))
                 {
-                    DrawNotification(g, moved, n, rw, rg, left, ry, ra, false);
-                    g.DrawString(n.Time.ToString("h:mm tt"), nameFont, rg, new RectangleF(moved.Right - 90, pill.Top + ry + 4, 72, 18), right);
+                    DrawPlainRow(g, moved, n, rw, rg, left, right, ry);
                 }
             }
             y += rows * RowH + (shiftFrom <= rows ? (float)rowShift.Value : 0);
 
-            // Clear pill
-            var clear = new Rectangle((int)(pill.Left + pill.Width / 2 - 45), (int)(pill.Top + y + 8), 90, 26);
+            // Quiet text button
+            var clear = new Rectangle((int)(pill.Left + pill.Width / 2 - 45 * Ds), (int)(pill.Top + y + 4), (int)(90 * Ds), (int)(24 * Ds));
             hits.Add(new Hit { Rect = clear, Click = Feed.ClearAll });
-            using (var path = Layered.RoundedRect(clear, 13))
-            using (var fillB = new SolidBrush(A(Color.FromArgb(46, 255, 255, 255), alpha)))
-                g.FillPath(fillB, path);
             var mid = new StringFormat(left) { Alignment = StringAlignment.Center };
-            g.DrawString("Clear", bodyFont, white, new RectangleF(clear.Left, clear.Top, clear.Width, clear.Height), mid);
+            g.DrawString("Clear", nameFont, gray, new RectangleF(clear.Left, clear.Top, clear.Width, clear.Height), mid);
         }
 
+        // One plain line: title on the left, time on the right.
+        void DrawPlainRow(Graphics g, RectangleF pill, NotificationInfo n, Brush white, Brush gray, StringFormat left, StringFormat right, float ry)
+        {
+            float top = pill.Top + ry, h = RowH;
+            DrawRich(g, n.Title, bodyFont, white, new RectangleF(pill.Left + 22, top, pill.Width - 44 - 70 * Ds, h), left);
+            g.DrawString(n.Time.ToString("h:mm tt"), nameFont, gray, new RectangleF(pill.Right - 22 - 70 * Ds, top, 70 * Ds, h), right);
+        }
         // Segmented switch: Notifications | Clipboard.
         void DrawTabs(Graphics g, RectangleF pill, float y, Brush white, Brush gray, int alpha)
         {
-            float w = 112, h = 24, x0 = pill.Left + pill.Width / 2 - w, ty = pill.Top + y + 2;
+            float w = 112 * Ds, h = 24 * Ds, x0 = pill.Left + pill.Width / 2 - w, ty = pill.Top + y + 2;
             var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             for (int i = 0; i < 2; i++)
             {
@@ -828,7 +870,7 @@ namespace MacDock
             for (int i = 0; i < rows; i++)
             {
                 string text = clipHistory[i];
-                var r = new Rectangle((int)pill.Left + 10, (int)(pill.Top + y + i * ClipRowH), (int)pill.Width - 20, ClipRowH - 2);
+                var r = new Rectangle((int)pill.Left + 10, (int)(pill.Top + y + i * ClipRowH), (int)pill.Width - 20, ClipRowH - 6);
                 hits.Add(new Hit { Rect = r, Click = () => CopyBack(text) });
                 if (r.Contains(cur))
                     using (var path = Layered.RoundedRect(r, 10))
@@ -909,6 +951,7 @@ namespace MacDock
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == 0x031D) { OnClipboardChanged(); m.Result = IntPtr.Zero; return; }
+            if (m.Msg == 0x02E0) { Reposition(); m.Result = IntPtr.Zero; return; } // WM_DPICHANGED: layout is ours, ignore the suggested rect
             if (m.Msg == 0x020E) // WM_MOUSEHWHEEL
             {
                 OnHorizontalWheel((short)((m.WParam.ToInt64() >> 16) & 0xFFFF));

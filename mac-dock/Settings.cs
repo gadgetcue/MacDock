@@ -1,4 +1,4 @@
-﻿// MacDock settings window: a dark, macOS "System Settings"-style page (sidebar + grouped rows).
+// MacDock settings window: a dark, macOS "System Settings"-style page (sidebar + grouped rows).
 //
 // Launcher options are stored as "@key value" lines in dock.txt (the same file the dock reads), so changes made here
 // are picked up by the running dock (the taskbar option applies at once) and by the next start (the rest).
@@ -37,11 +37,34 @@ namespace MacDock
             return c == ' ' || c == '=' || c == '\t';
         }
 
+        // The bar, dock and panels ask for settings many times a second. Answers are remembered until dock.txt's
+        // timestamp or size changes (one cheap stat per call instead of reading and parsing the file).
+        static readonly object memoGate = new object();
+        static readonly Dictionary<string, string> memo = new Dictionary<string, string>();
+        static long memoTicks = -1, memoLen = -1; static int memoAt;
+        static void ForgetMemo() { lock (memoGate) { memo.Clear(); memoTicks = -1; memoLen = -1; } }
+
         public static string Get(string key)
         {
             try
             {
-                if (!File.Exists(AppPaths.Config)) return null;
+                int now = Environment.TickCount;
+                long ticks, len;
+                lock (memoGate)
+                {
+                    string hit;
+                    if (memoTicks >= 0 && unchecked(now - memoAt) < 100 && memo.TryGetValue(key, out hit)) return hit; // stat at most ~10x a second
+                }
+                var fi = new FileInfo(AppPaths.Config);
+                if (!fi.Exists) return null;
+                ticks = fi.LastWriteTimeUtc.Ticks; len = fi.Length;
+                lock (memoGate)
+                {
+                    if (ticks != memoTicks || len != memoLen) { memo.Clear(); memoTicks = ticks; memoLen = len; }
+                    memoAt = now;
+                    string hit;
+                    if (memo.TryGetValue(key, out hit)) return hit;
+                }
                 string found = null;
                 foreach (string raw in File.ReadAllLines(AppPaths.Config))
                 {
@@ -50,6 +73,7 @@ namespace MacDock
                     int eq = t.IndexOf('=');
                     found = (eq >= 0 ? t.Substring(eq + 1) : t).Trim();
                 }
+                lock (memoGate) { if (ticks == memoTicks && len == memoLen) memo[key] = found; }
                 return found;
             }
             catch { return null; }
@@ -99,6 +123,7 @@ namespace MacDock
                         lines.Insert(first, newLine);
                     }
                     File.WriteAllLines(AppPaths.Config, lines, new UTF8Encoding(true));
+                    ForgetMemo();
                 }
                 catch (Exception ex)
                 {
@@ -1344,7 +1369,21 @@ namespace MacDock
 
         public static void ShowSettings(string page = null)
         {
-            if (instance == null || instance.IsDisposed) instance = new SettingsForm();
+            try { ShowSettingsCore(page); }
+            catch (Exception ex)
+            {
+                Program.Log("ShowSettings failed: " + ex);
+                try { if (instance != null && !instance.IsDisposed) instance.Dispose(); } catch { }
+                instance = null;
+                try { MessageBox.Show("MacDock Settings could not open: " + ex.Message + "\r\nDetails are in dock.log. The dock keeps running.", "MacDock", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
+            }
+        }
+
+        public static void CloseForTest() { try { if (instance != null && !instance.IsDisposed) instance.Close(); } catch (Exception ex) { Program.Log(ex); } }
+
+        static void ShowSettingsCore(string page)
+        {
+            Program.Log("SET new"); Program.Mark = "SET new"; if (instance == null || instance.IsDisposed) instance = new SettingsForm(); Program.Log("SET ctor done");
             if (page != null) instance.GoTo(page, true);
             if (instance.Visible) { instance.WindowState = FormWindowState.Normal; instance.Activate(); return; }
             // Build everything off-screen at opacity 0, let it paint fully, then fade in.
@@ -1352,9 +1391,9 @@ namespace MacDock
             instance.StartPosition = FormStartPosition.Manual;
             Rectangle av = instance.Avail(Screen.FromPoint(Cursor.Position));
             instance.Bounds = new Rectangle(av.Left + (av.Width - instance.Width) / 2, av.Top, instance.Width, av.Height);
-            instance.CreateControl();
-            instance.PerformLayout();
-            instance.Show();
+            Program.Log("SET bounds"); instance.CreateControl(); Program.Log("SET created");
+            instance.PerformLayout(); Program.Log("SET layout");
+            instance.Show(); Program.Log("SET shown");
             instance.WindowState = FormWindowState.Normal;
             instance.Activate();
             instance.Update();
@@ -1432,12 +1471,12 @@ namespace MacDock
 
         public SettingsForm()
         {
-            SetUi.Apply(SetUi.WantDark());
+            Program.Mark = "SET apply-theme"; SetUi.Apply(SetUi.WantDark()); Program.Mark = "SET form-props";
             Text = "MacDock Settings";
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
-            TopMost = true;
+            TopMost = false; // behave like a normal window: goes behind other apps when they are clicked
             KeyPreview = true;
             DoubleBuffered = true;
             BackColor = SetUi.Content;
@@ -1449,7 +1488,7 @@ namespace MacDock
             // Sidebar
             side.SetBounds(Grip, 100, SideW - Grip, h - 100 - Grip);
             side.Picked += key => GoTo(key, true);
-            AddSidebarItems();
+            Program.Mark = "SET sidebar-items"; AddSidebarItems(); Program.Mark = "SET sidebar-added";
             Controls.Add(side);
 
             searchHost.SetBounds(14, 56, SideW - 28, 34);
@@ -1466,7 +1505,7 @@ namespace MacDock
             search.BorderStyle = BorderStyle.None;
             search.BackColor = SetUi.SearchFill;
             search.ForeColor = SetUi.Dim;
-            search.Font = Typography.Body();
+            Program.Mark = "SET search-font"; search.Font = Typography.Body(); Program.Mark = "SET search-done";
             search.Text = "Search";
             search.SetBounds(34, 0, searchHost.Width - 46, search.Height);
             search.Top = (searchHost.Height - search.Height) / 2 + 1;
@@ -1487,7 +1526,7 @@ namespace MacDock
             history.Add("general");
             historyAt = 0;
             side.Selected = "general";
-            BuildPage("general");
+            Program.Log("SET ctor-build"); BuildPage("general"); Program.Log("SET ctor-built");
 
             captureTimer.Tick += (s, e) => CancelCapture();
             Application.AddMessageFilter(this);
@@ -2618,6 +2657,9 @@ namespace MacDock
                     Toggle(c, "Auto-hide Dock", SetCfg.GetBool("auto-hide-dock", false), v => { SetCfg.SetBool("auto-hide-dock", v); DockForm.Instance.ApplyDockMode(); });
                     Toggle(c, "Show Start icon in Dock", SetCfg.GetBool("show-start-icon", true), v => DockForm.Instance.SetStartIcon(v));
                     Toggle(c, "Genie effect", SetCfg.GetBool("genie", true), v => SetCfg.SetBool("genie", v));
+                    Toggle(c, "Minimize windows into the Dock (as thumbnails)", MinimizedDock.On, v => { SetCfg.SetBool("minimize-to-dock", v); DockForm.Instance.RebuildSoon(); });
+                    Toggle(c, "Show window previews on hover", SetCfg.GetBool("window-previews", true), v => SetCfg.SetBool("window-previews", v));
+                    { string[] gfx = { "genie", "scale", "fade" }; int gi = Array.IndexOf(gfx, SetCfg.Get("genie-style") ?? "genie"); PickerRow(c, "Minimize effect", new[] { "Genie", "Scale", "Fade" }, gi < 0 ? 0 : gi, i => { SetCfg.Set("genie-style", gfx[i], false); return true; }, "Couldn't change the minimize effect."); }
                     Toggle(c, "Open folder fans on click instead of hover", SetCfg.GetBool("fan-click", false), v => SetCfg.SetBool("fan-click", v));
                     Note("With auto-hide off, the dock stays and maximized windows stop above it. With it on, the dock slides away while an app is in front and returns when the pointer reaches the bottom edge. Full-screen apps always hide it.");
                     Head("Windows taskbar");
@@ -2634,35 +2676,68 @@ namespace MacDock
                     break;
 
                 case "menubar":
-                    Head("Keyboard shortcuts");
+                    Head("Status readouts");
                     c = NewCard();
-                    Info(c, "Lock screen", "Win + L");
-                    Head("Custom shortcuts");
+                    Toggle(c, "CPU usage", SetCfg.GetBool("stats-cpu", true), v => SetCfg.SetBool("stats-cpu", v));
+                    Toggle(c, "Memory (RAM) usage", SetCfg.GetBool("stats-ram", true), v => SetCfg.SetBool("stats-ram", v));
+                    Toggle(c, "Disk usage", SetCfg.GetBool("stats-disk", false), v => SetCfg.SetBool("stats-disk", v));
+                    Toggle(c, "Network speed", SetCfg.GetBool("stats-net", false), v => SetCfg.SetBool("stats-net", v));
+                    { string[] nmv = { "both", "down", "up" }; int ni = Array.IndexOf(nmv, SetCfg.Get("stats-net-mode") ?? "both"); PickerRow(c, "Network speed shows", new[] { "Download and upload", "Download only", "Upload only" }, ni < 0 ? 0 : ni, i => { SetCfg.Set("stats-net-mode", nmv[i], false); return true; }, "Couldn't change the network display."); }
+                    Toggle(c, "Arrows next to network speed", SetCfg.GetBool("stats-net-arrows", true), v => SetCfg.SetBool("stats-net-arrows", v));
+                    Toggle(c, "Temperature", SetCfg.GetBool("stats-temp", false), v => SetCfg.SetBool("stats-temp", v));
+                    Toggle(c, "Weather", SetCfg.GetBool("stats-weather", false), v => SetCfg.SetBool("stats-weather", v));
+                    Note("Shown at the right of the menu bar; click them to open Task Manager. CPU and memory turn orange above 80% and red above 90%. Temperature appears only if this PC reports it. Weather looks up your city from your internet connection.");
+
+                    Head("Order of items on the right");
                     c = NewCard();
-                    HotkeyRow(c, "Search (Spotlight)", "hotkey-spotlight", HotkeyHook.DefaultSpotlight);
-                    HotkeyRow(c, "Launchpad", "hotkey-launchpad", HotkeyHook.DefaultLaunchpad);
-                    Note("Click a shortcut, then press the new combination. It needs a modifier (Win, Ctrl, Alt or Shift). Changes apply at once and are saved as @hotkey-spotlight and @hotkey-launchpad. Two shortcuts can't share a combination.");
-                    Head("Menu bar & island");
+                    {
+                        var names = new Dictionary<string, string> { { "clock", "Date & time" }, { "profile", "Account picture" }, { "bell", "Notifications" }, { "screenshot", "Screenshot button" }, { "record", "Screen record button" },
+                            { "control", "Control Center" }, { "search", "Search" }, { "battery", "Battery" }, { "wifi", "Network" }, { "sound", "Volume" }, { "bluetooth", "Bluetooth" }, { "stats", "Status readouts (CPU, memory...)" }, { "tray", "Windows tray icons" } };
+                        var order = BarLayout.Order();
+                        var posOpts = Enumerable.Range(1, order.Count).Select(n => n == 1 ? "1 (far right)" : n == order.Count ? n + " (leftmost)" : n.ToString()).ToArray();
+                        for (int oi = 0; oi < order.Count; oi++)
+                        {
+                            string oid = order[oi];
+                            PickerRow(c, names[oid], posOpts, oi, pos => { BarLayout.Move(oid, pos); BeginInvoke((Action)(() => BuildPage("menubar"))); return true; }, "Couldn't move that item.");
+                        }
+                        { int[] sp = { 0, 2, 4, 6, 8, 10, 14, 18, 24 }; int cur; int.TryParse(SetCfg.Get("bar-spacing"), out cur); int si = Array.IndexOf(sp, cur); if (si < 0) si = 0;
+                          PickerRow(c, "Extra spacing between items", sp.Select(v => v == 0 ? "None (default)" : v + " px").ToArray(), si, i => { SetCfg.Set("bar-spacing", sp[i].ToString(), false); return true; }, "Couldn't change the spacing."); }
+                        Link(c, "Reset order", null, () => { SetCfg.Set("bar-order", string.Join(",", BarLayout.BarDefaultOrder), false); SetCfg.Set("bar-spacing", "0", false); BuildPage("menubar"); });
+                    }
+                    Note("Pick a position for each item, counted from the right edge of the menu bar. Extra spacing adds room after every item. Items that are switched off or not available (for example Battery on a desktop) simply leave their spot empty.");
+
+                    Head("Menu bar buttons");
                     c = NewCard();
-                    Toggle(c, "Show Dynamic Island", SetCfg.GetBool("island", true), v => { SetCfg.SetBool("island", v); IslandForm.SetEnabled(v); });
-                    Toggle(c, "Show CPU usage in status bar", SetCfg.GetBool("stats-cpu", true), v => SetCfg.SetBool("stats-cpu", v));
-                    Toggle(c, "Show RAM usage in status bar", SetCfg.GetBool("stats-ram", true), v => SetCfg.SetBool("stats-ram", v));
-                    Toggle(c, "Screenshot in status bar", ScreenCapture.BarShot, v => ScreenCapture.BarShot = v);
-                    Toggle(c, "Screen record in status bar", ScreenCapture.BarRec, v => ScreenCapture.BarRec = v);
-                    Toggle(c, "Screenshot tile in Control Center", ScreenCapture.TileShot, v => Panels.CcSetMember("shot", v));
-                    Toggle(c, "Screen record tile in Control Center", ScreenCapture.TileRec, v => Panels.CcSetMember("rec", v));
-                    Head("Windows tray icons in the menu bar");
+                    Toggle(c, "Screenshot button", ScreenCapture.BarShot, v => ScreenCapture.BarShot = v);
+                    Toggle(c, "Screen record button", ScreenCapture.BarRec, v => ScreenCapture.BarRec = v);
+
+                    Head("Windows tray icons");
                     c = NewCard();
                     Toggle(c, "Show tray icons in the menu bar", TrayIcons.BarOn, v => { TrayIcons.BarOn = v; });
                     Toggle(c, "Show the tray arrow", TrayIcons.Arrow, v => { TrayIcons.Arrow = v; });
-                    Toggle(c, "Collapsible tray icons (fold into a small handle)", TrayIcons.Collapsible, v => { TrayIcons.Collapsible = v; });
-                    Toggle(c, "Keep tray icons collapsed", TrayIcons.Collapsed, v => { TrayIcons.Collapsed = v; });
+                    Toggle(c, "Fold tray icons into a small handle", TrayIcons.Collapsible, v => { TrayIcons.Collapsible = v; });
+                    Toggle(c, "Keep them folded", TrayIcons.Collapsed, v => { TrayIcons.Collapsed = v; });
                     Link(c, "Choose tray icons", TrayIcons.Selected().Count + " shown", () => GoTo("tray", true));
                     Note("Pick which Windows tray icons appear in the menu bar, including the ones Windows hides in its overflow. Click an icon to send a left click to the original app, right-click for its menu. Windows 11 only exposes its tray through the on-screen icons, so scanning briefly opens the hidden-icons flyout; clicking an icon does the same for an instant.");
+
+                    Head("Control Center");
                     c = NewCard();
-                    Link(c, "Open Windows notification settings", null, () => SetUi.OpenTarget("ms-settings:notifications"));
-                    Link(c, "Open Focus settings", null, () => SetUi.OpenTarget("ms-settings:quiethours"));
-                    Note("The notification island and menu bar items follow your Windows notification and Focus settings.");
+                    Toggle(c, "Screenshot tile", ScreenCapture.TileShot, v => Panels.CcSetMember("shot", v));
+                    Toggle(c, "Screen record tile", ScreenCapture.TileRec, v => Panels.CcSetMember("rec", v));
+
+                    Head("Dynamic Island & notifications");
+                    c = NewCard();
+                    Toggle(c, "Show Dynamic Island", SetCfg.GetBool("island", true), v => { SetCfg.SetBool("island", v); IslandForm.SetEnabled(v); });
+                    Link(c, "Windows notification settings", null, () => SetUi.OpenTarget("ms-settings:notifications"));
+                    Link(c, "Focus settings", null, () => SetUi.OpenTarget("ms-settings:quiethours"));
+                    Note("The island shows notifications, media and power events, and follows your Windows notification and Focus settings.");
+
+                    Head("Keyboard shortcuts");
+                    c = NewCard();
+                    HotkeyRow(c, "Search (Spotlight)", "hotkey-spotlight", HotkeyHook.DefaultSpotlight);
+                    HotkeyRow(c, "Launchpad", "hotkey-launchpad", HotkeyHook.DefaultLaunchpad);
+                    Info(c, "Lock screen", "Win + L");
+                    Note("Click a shortcut, then press the new combination. It needs a modifier (Win, Ctrl, Alt or Shift). Two shortcuts can't share a combination.");
                     break;
 
                 case "launchpad":

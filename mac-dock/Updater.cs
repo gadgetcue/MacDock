@@ -111,6 +111,7 @@ namespace MacDock
                 try { File.Delete(staged); File.Move(exe, staged); File.Move(old, exe); } catch (Exception e) { MacDockProgram_Log(e); }
                 throw new Exception("could not schedule restart; update rolled back");
             }
+            TaskbarControl.Handoff = true; // keep the Windows taskbar hidden across the restart
             Program.QuitRequested = true;
             Environment.Exit(0);
         }

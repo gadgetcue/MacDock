@@ -39,6 +39,13 @@ namespace MacDock
         public static int Cpu;
         public static int Ram;
         public static NetKind Net;
+        public static int DiskPct;              // system drive used %
+        public static long NetDownBps, NetUpBps; // bytes/s over all up interfaces
+        public static int TempC = -1;            // -1 = not exposed by this PC
+        static NetworkInterface[] nics = new NetworkInterface[0];
+        static long lastRx, lastTx, lastNetTick;
+        static int tempTick;
+        public static string Weather = "";       // e.g. "24°C Delhi"; empty until fetched
 
         static long lastIdle, lastKernel, lastUser;
 
@@ -68,6 +75,79 @@ namespace MacDock
             if (GlobalMemoryStatusEx(ref mem)) Ram = (int)mem.dwMemoryLoad;
         }
 
+        // Disk usage, network speed and (when ACPI exposes it) temperature. Cheap except the temp query, which runs on a worker.
+        public static void UpdateExtra(bool disk, bool net, bool temp)
+        {
+            try
+            {
+                if (disk)
+                {
+                    var d = new System.IO.DriveInfo(System.IO.Path.GetPathRoot(Environment.SystemDirectory));
+                    DiskPct = (int)Math.Round(100.0 * (d.TotalSize - d.AvailableFreeSpace) / d.TotalSize);
+                }
+                if (net)
+                {
+                    if (nics.Length == 0) nics = NetworkInterface.GetAllNetworkInterfaces();
+                    long rx = 0, tx = 0;
+                    foreach (var ni in nics)
+                    {
+                        if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                        var st = ni.GetIPv4Statistics(); rx += st.BytesReceived; tx += st.BytesSent;
+                    }
+                    long now = Environment.TickCount;
+                    if (lastNetTick != 0 && now > lastNetTick && rx >= lastRx)
+                    {
+                        long ms = now - lastNetTick;
+                        NetDownBps = (rx - lastRx) * 1000 / ms; NetUpBps = Math.Max(0, (tx - lastTx) * 1000 / ms);
+                    }
+                    lastRx = rx; lastTx = tx; lastNetTick = now;
+                }
+                if (temp && ++tempTick % 10 == 1)
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        try
+                        {
+                            using (var q = new System.Management.ManagementObjectSearcher(@"root\WMI", "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"))
+                                foreach (System.Management.ManagementObject o in q.Get())
+                                { TempC = (int)Math.Round(Convert.ToDouble(o["CurrentTemperature"]) / 10.0 - 273.15); break; }
+                        }
+                        catch { TempC = -1; }
+                    });
+            }
+            catch { }
+        }
+
+        public static string Speed(long bps)
+        {
+            if (bps >= 1048576) return (bps / 1048576.0).ToString("0.0") + "MB/s";
+            return (bps / 1024) + "KB/s";
+        }
+
+        static bool weatherBusy;
+        static long weatherAt;
+        // Opt-in: city from the public IP (ipwho.is), conditions from Open-Meteo. Refreshed every 30 minutes on a worker thread.
+        public static void UpdateWeather()
+        {
+            long now = Environment.TickCount;
+            if (weatherBusy || (weatherAt != 0 && now - weatherAt < 1800000)) return;
+            weatherBusy = true; weatherAt = now;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    var wc = new System.Net.WebClient { Encoding = System.Text.Encoding.UTF8 };
+                    var js = new System.Web.Script.Serialization.JavaScriptSerializer();
+                    var loc = (Dictionary<string, object>)js.DeserializeObject(wc.DownloadString("https://ipwho.is/?fields=latitude,longitude,city"));
+                    string url = "https://api.open-meteo.com/v1/forecast?current=temperature_2m&latitude=" + Convert.ToString(loc["latitude"], System.Globalization.CultureInfo.InvariantCulture) + "&longitude=" + Convert.ToString(loc["longitude"], System.Globalization.CultureInfo.InvariantCulture);
+                    var w = (Dictionary<string, object>)js.DeserializeObject(wc.DownloadString(url));
+                    var cur = (Dictionary<string, object>)w["current"];
+                    Weather = Math.Round(Convert.ToDouble(cur["temperature_2m"], System.Globalization.CultureInfo.InvariantCulture)) + "°C " + loc["city"];
+                }
+                catch { weatherAt = Environment.TickCount - 1500000; } // retry in ~5 minutes
+                finally { weatherBusy = false; }
+            });
+        }
+
         // Which kind of connection is up. Slower, so called every few seconds.
         public static void UpdateNet()
         {
@@ -84,6 +164,7 @@ namespace MacDock
             }
             catch { }
             Net = kind;
+            nics = new NetworkInterface[0]; // re-read the adapter list next sample
         }
     }
 

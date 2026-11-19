@@ -1,4 +1,4 @@
-﻿// macOS-style menu bar along the top of the screen, with working dropdown menus.
+// macOS-style menu bar along the top of the screen, with working dropdown menus.
 // The logo, File, Edit, View and Window menus act on the app that was in front when the menu opened.
 
 using System;
@@ -187,7 +187,7 @@ namespace MacDock
 
             Action action = entries[index].Action;
             Close();
-            if (action != null) action();
+            if (action != null) { try { action(); } catch (Exception ex) { Program.Log("Menu action failed: " + ex); } }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -246,6 +246,15 @@ namespace MacDock
             if (surface != null) surface.Present(Handle, Left, Top, opacity);
             if (closing && opacity == 0) { vsync.Sleep(); Close(); return; }
             if (!closing && opacity == 255) { faded = true; vsync.Sleep(); }
+        }
+
+        // Everything the optional readouts show, so the bar repaints when a value or one of their settings changes.
+        static string ExtraStatsKey()
+        {
+            bool d = SetCfg.GetBool("stats-disk", false), n = SetCfg.GetBool("stats-net", false), t = SetCfg.GetBool("stats-temp", false), w = SetCfg.GetBool("stats-weather", false);
+            string ord = (SetCfg.Get("bar-order") ?? "") + "/" + SetCfg.Get("bar-spacing");
+            if (!d && !n && !t && !w) return ord;
+            return ord + "|" + string.Join(",", d ? SystemInfo.DiskPct.ToString() : "", n ? SystemInfo.Speed(SystemInfo.NetDownBps) + SystemInfo.Speed(SystemInfo.NetUpBps) + SetCfg.Get("stats-net-mode") + SetCfg.GetBool("stats-net-arrows", true) : "", t ? SystemInfo.TempC.ToString() : "", w ? SystemInfo.Weather : "");
         }
 
         void Redraw()
@@ -528,6 +537,12 @@ namespace MacDock
                 volumePercent = volume < 0 ? 0 : (int)Math.Round(volume * 100);
             }
             if (tick % 50 == 0) SystemInfo.UpdateNet();
+            if (tick % 5 == 0)
+            {
+                bool xd = SetCfg.GetBool("stats-disk", false), xn = SetCfg.GetBool("stats-net", false), xt = SetCfg.GetBool("stats-temp", false);
+                if (xd || xn || xt) SystemInfo.UpdateExtra(xd, xn, xt);
+                if (SetCfg.GetBool("stats-weather", false)) SystemInfo.UpdateWeather();
+            }
             UpdateForeground();
 
             NativeMethods.POINT p;
@@ -544,7 +559,7 @@ namespace MacDock
 
             string key = string.Join("|", DateTime.Now.ToString("ddd d MMM h:mm tt"), appName, hoverTitle, openMenu,
                 SystemInfo.Cpu, SystemInfo.Ram, SetCfg.GetBool("stats-cpu", true), SetCfg.GetBool("stats-ram", true), SystemInfo.BatteryPercent, SystemInfo.Charging, SystemInfo.OnAc,
-                SystemInfo.Net, Feed.Unread, volumePercent, TrayIcons.BarOn ? TrayIcons.Cached.Count : -1, TrayIcons.Arrow, TrayIcons.Collapsible, TrayIcons.Collapsed);
+                SystemInfo.Net, ExtraStatsKey(), Feed.Unread, volumePercent, TrayIcons.BarOn ? TrayIcons.Cached.Count : -1, TrayIcons.Arrow, TrayIcons.Collapsible, TrayIcons.Collapsed);
             if (key != lastKey)
             {
                 lastKey = key;
@@ -592,6 +607,15 @@ namespace MacDock
         }
 
         // ---------- drawing ----------
+
+        // Everything the optional readouts show, so the bar repaints when a value or one of their settings changes.
+        static string ExtraStatsKey()
+        {
+            bool d = SetCfg.GetBool("stats-disk", false), n = SetCfg.GetBool("stats-net", false), t = SetCfg.GetBool("stats-temp", false), w = SetCfg.GetBool("stats-weather", false);
+            string ord = (SetCfg.Get("bar-order") ?? "") + "/" + SetCfg.Get("bar-spacing");
+            if (!d && !n && !t && !w) return ord;
+            return ord + "|" + string.Join(",", d ? SystemInfo.DiskPct.ToString() : "", n ? SystemInfo.Speed(SystemInfo.NetDownBps) + SystemInfo.Speed(SystemInfo.NetUpBps) + SetCfg.Get("stats-net-mode") + SetCfg.GetBool("stats-net-arrows", true) : "", t ? SystemInfo.TempC.ToString() : "", w ? SystemInfo.Weather : "");
+        }
 
         void Redraw()
         {
@@ -650,6 +674,11 @@ namespace MacDock
             // Right: laid out from the edge inward, like the macOS menu extras.
             float right = Width - 14;
 
+            var centered = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            // The right side is a set of blocks laid out from the edge inward, in the order saved as @bar-order (Settings > Menu bar).
+            var blocks = new Dictionary<string, Action>();
+            blocks["clock"] = () =>
+            {
             string clock = DateTime.Now.ToString("ddd d MMM  h:mm tt");
             float clockW = Typography.MeasureTabular(g, clock, regular);
             right -= clockW;
@@ -661,11 +690,13 @@ namespace MacDock
                 WinUtil.Combo(WinUtil.VK_LWIN, (byte)'N');
             });
             right -= 12;
-
+            };
+            blocks["profile"] = () =>
+            {
             // Profile avatar.
             right -= 18;
             var avatar = new RectangleF(right, 6, 18, 18);
-            var centered = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+
             AccountPic.Start(() => { try { BeginInvoke((MethodInvoker)Redraw); } catch { } });
             Bitmap pic = AccountPic.Get(Math.Max(18, (int)Math.Round(18 * g.DpiX / 96f)));
             if (pic != null)
@@ -684,7 +715,9 @@ namespace MacDock
             }
             AddHit("profile", right - 5, 28, () => TogglePanel("profile"));
             right -= 12;
-
+            };
+            blocks["bell"] = () =>
+            {
             // Notification bell with an unread badge.
             right -= 15;
             DrawBell(g, right, 8, white);
@@ -698,9 +731,9 @@ namespace MacDock
             }
             AddHit("bell", right - 6, 27, () => { ClosePanel(); if (BellClicked != null) BellClicked(); });
             right -= 12;
-
-            // Screenshot and screen record (Settings > Menu bar & island).
-            bool recOn = ScreenCapture.Recording;
+            };
+            blocks["screenshot"] = () =>
+            {
             if (ScreenCapture.BarShot)
             {
                 right -= 16;
@@ -713,6 +746,10 @@ namespace MacDock
                 AddHit("screenshot", right - 6, 28, () => { ClosePanel(); ScreenCapture.Screenshot(); });
                 right -= 12;
             }
+            };
+            blocks["record"] = () =>
+            {
+            bool recOn = ScreenCapture.Recording;
             if (ScreenCapture.BarRec)
             {
                 right -= 16;
@@ -725,19 +762,25 @@ namespace MacDock
                 AddHit("screenrecord", right - 6, 26, () => { ClosePanel(); ScreenCapture.ToggleRecord(); });
                 right -= 12;
             }
-
+            };
+            blocks["control"] = () =>
+            {
             // Control Center.
             right -= 16;
             DrawControlCenter(g, right, 8);
             AddHit("control", right - 6, 28, () => TogglePanel("control"));
             right -= 12;
-
+            };
+            blocks["search"] = () =>
+            {
             // Search (opens Spotlight).
             right -= 14;
             DrawMagnifier(g, right, 8);
             AddHit("search", right - 6, 26, () => { ClosePanel(); if (SearchClicked != null) SearchClicked(); });
             right -= 12;
-
+            };
+            blocks["battery"] = () =>
+            {
             if (SystemInfo.HasBattery)
             {
                 string pct = SystemInfo.BatteryPercent + "%";
@@ -749,33 +792,66 @@ namespace MacDock
                 AddHit("battery", right - 6, 30 + pctW + 12, () => TogglePanel("battery"));
                 right -= 12;
             }
-
+            };
+            blocks["wifi"] = () =>
+            {
             right -= 16;
             DrawNetwork(g, right, 7, dim);
             AddHit("wifi", right - 6, 28, () => TogglePanel("wifi"));
             right -= 12;
-
+            };
+            blocks["sound"] = () =>
+            {
             right -= 16;
             DrawVolume(g, right, 8);
             AddHit("sound", right - 6, 28, () => TogglePanel("sound"));
             right -= 12;
-
+            };
+            blocks["bluetooth"] = () =>
+            {
             right -= 12;
             DrawBluetooth(g, right, 8);
             AddHit("bluetooth", right - 6, 24, () => TogglePanel("bluetooth"));
             right -= 18;
-
-            bool showCpu = SetCfg.GetBool("stats-cpu", true), showRam = SetCfg.GetBool("stats-ram", true);
-            if (showCpu || showRam)
+            };
+            blocks["stats"] = () =>
             {
-                string stats = (showCpu ? "CPU " + SystemInfo.Cpu + "%" : "") + (showCpu && showRam ? "   " : "") + (showRam ? "RAM " + SystemInfo.Ram + "%" : "");
-                float statsW = Typography.MeasureTabular(g, stats, small);
-                right -= statsW;
-                Typography.DrawTabular(g, stats, small, dim, right, 0, BarHeight - 1);
-                AddHit("stats", right - 6, statsW + 12, () => Process.Start("taskmgr.exe"));
+            bool showCpu = SetCfg.GetBool("stats-cpu", true), showRam = SetCfg.GetBool("stats-ram", true);
+            var parts = new List<string>(); var pcts = new List<int>();
+            if (showCpu) { parts.Add("CPU " + SystemInfo.Cpu + "%"); pcts.Add(SystemInfo.Cpu); }
+            if (showRam) { parts.Add("RAM " + SystemInfo.Ram + "%"); pcts.Add(SystemInfo.Ram); }
+            if (SetCfg.GetBool("stats-disk", false)) { parts.Add("Disk " + SystemInfo.DiskPct + "%"); pcts.Add(0); }
+            if (SetCfg.GetBool("stats-temp", false) && SystemInfo.TempC > 0) parts.Add(SystemInfo.TempC + "°C");
+            if (SetCfg.GetBool("stats-net", false))
+            {
+                string nm = SetCfg.Get("stats-net-mode") ?? "both"; bool arrows = SetCfg.GetBool("stats-net-arrows", true);
+                string dn = (arrows ? "\u2193" : "") + SystemInfo.Speed(SystemInfo.NetDownBps), up = (arrows ? "\u2191" : "") + SystemInfo.Speed(SystemInfo.NetUpBps);
+                parts.Add(nm == "down" ? dn : nm == "up" ? up : dn + " " + up);
+                if (pcts.Count < parts.Count) pcts.Add(0);
+            }
+            if (SetCfg.GetBool("stats-weather", false) && SystemInfo.Weather.Length > 0) { parts.Add(SystemInfo.Weather); pcts.Add(0); }
+            if (parts.Count > 0)
+            {
+                // Orange above 80%, red above 90% (CPU and RAM), like MyDockFinder's monitoring hints.
+                float total = 0; var ws = new float[parts.Count];
+                var pf = new Font[parts.Count];
+                for (int pi = 0; pi < parts.Count; pi++) { pf[pi] = Typography.FontFor(small, parts[pi]); ws[pi] = Typography.MeasureTabular(g, parts[pi], pf[pi]); total += ws[pi] + (pi > 0 ? 14 : 0); }
+                right -= total;
+                float sx = right;
+                for (int pi = 0; pi < parts.Count; pi++)
+                {
+                    if (pi > 0) sx += 14;
+                    int pc = 0; if (parts[pi].StartsWith("CPU ") || parts[pi].StartsWith("RAM ")) int.TryParse(parts[pi].Substring(4).TrimEnd('%'), out pc);
+                    if (pc > 80) { using (var hb = new SolidBrush(pc > 90 ? Color.FromArgb(255, 69, 58) : Color.FromArgb(255, 159, 10))) Typography.DrawTabular(g, parts[pi], pf[pi], hb, sx, 0, BarHeight - 1); }
+                    else Typography.DrawTabular(g, parts[pi], pf[pi], dim, sx, 0, BarHeight - 1);
+                    sx += ws[pi];
+                }
+                AddHit("stats", right - 6, total + 12, () => Process.Start("taskmgr.exe"));
             }
             right -= 12;
-
+            };
+            blocks["tray"] = () =>
+            {
             // Chevron: opens Windows' own tray overflow (the hidden icons), up while it is open.
             if (TrayIcons.Arrow) {
             right -= 12;
@@ -846,6 +922,9 @@ namespace MacDock
                         right -= w;
                     }
                 }            }
+            };
+            int gapPx; int.TryParse(SetCfg.Get("bar-spacing"), out gapPx); gapPx = Math.Max(0, Math.Min(40, gapPx));
+            foreach (string bid in BarLayout.Order()) { Action blk; if (blocks.TryGetValue(bid, out blk)) { float before = right; blk(); if (right < before) right -= gapPx; } } // extra space only after items that were drawn
 
             white.Dispose();
             dim.Dispose();
@@ -989,7 +1068,8 @@ namespace MacDock
         void DrawBattery(Graphics g, float x, float y)
         {
             Color fillColor = SystemInfo.Charging || SystemInfo.OnAc ? Color.FromArgb(52, 199, 89)
-                : SystemInfo.BatteryPercent <= 20 ? Color.FromArgb(255, 69, 58)
+                : SystemInfo.BatteryPercent <= 10 ? Color.FromArgb(255, 69, 58)
+                : SystemInfo.BatteryPercent < 20 ? Color.FromArgb(255, 159, 10)
                 : Color.FromArgb(240, 255, 255, 255);
 
             using (var pen = new Pen(Color.FromArgb(200, 255, 255, 255), 1f))
@@ -1050,6 +1130,9 @@ namespace MacDock
                 }
         }
 
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "IsZoomed")] static extern bool IsZoomedWin(IntPtr h);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetShellWindow();
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
         DateTime dblAt = DateTime.MinValue;
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
@@ -1057,6 +1140,11 @@ namespace MacDock
             if (e.Button != MouseButtons.Left) return;
             foreach (Hit h in hits)
                 if (h.DoubleClick != null && h.Rect.Contains(e.X, e.Y)) { dblAt = DateTime.UtcNow; try { h.DoubleClick(); } catch { } return; }
+            // Double-click on empty bar space maximizes or restores the front window.
+            bool onHit = false; foreach (Hit h in hits) if (h.Rect.Contains(e.X, e.Y)) { onHit = true; break; } foreach (RectangleF tr in titleRects) if (tr.Contains(e.X, e.Y)) { onHit = true; break; }
+            if (!onHit) { IntPtr fg = Win32.GetForegroundWindow(); uint fpid = 0; if (fg != IntPtr.Zero) NativeMethods.GetWindowThreadProcessId(fg, out fpid);
+                // Never our own windows (dock, island, Settings): maximizing the dock window wrecks its layout. Async, so a hung app can't freeze the bar.
+                if (fg != IntPtr.Zero && fpid != (uint)Process.GetCurrentProcess().Id && fg != GetShellWindow() && fg != GetDesktopWindow()) { dblAt = DateTime.UtcNow; try { NativeMethods.ShowWindowAsync(fg, IsZoomedWin(fg) ? 9 : 3); } catch { } } }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -1268,6 +1356,30 @@ namespace MacDock
             List<IntPtr> handles;
             if (exe != null && DockForm.EnumerateRunningWindows().TryGetValue(exe, out handles))
                 foreach (IntPtr h in handles) Win32.PostMessage(h, WinUtil.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        }
+    }
+
+    // Order of the right-hand menu bar items (Settings > Menu bar): @bar-order in dock.txt.
+    static class BarLayout
+    {
+        internal static readonly string[] BarDefaultOrder = { "clock", "profile", "bell", "screenshot", "record", "control", "search", "battery", "wifi", "sound", "bluetooth", "stats", "tray" };
+
+        // Saved order (@bar-order), with anything missing appended in the default order and unknown ids dropped.
+        internal static List<string> Order()
+        {
+            var res = new List<string>();
+            string v = SetCfg.Get("bar-order");
+            if (!string.IsNullOrWhiteSpace(v))
+                foreach (string id in v.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                { string t = id.Trim(); if (Array.IndexOf(BarDefaultOrder, t) >= 0 && !res.Contains(t)) res.Add(t); }
+            foreach (string id in BarDefaultOrder) if (!res.Contains(id)) res.Add(id);
+            return res;
+        }
+
+        internal static void Move(string id, int newIndex)
+        {
+            var o = Order(); o.Remove(id); o.Insert(Math.Max(0, Math.Min(o.Count, newIndex)), id);
+            SetCfg.Set("bar-order", string.Join(",", o.ToArray()), false);
         }
     }
 }

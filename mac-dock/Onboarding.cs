@@ -11,7 +11,7 @@ namespace MacDock
     {
         public const string Handle = "@gadgetcue";
         public const string Line = "This app is brought to you by " + Handle;
-        public const string YouTube = "https://www.youtube.com/@gadgetcue";  
+        public const string YouTube = "https://www.youtube.com/@gadgetcue";
         public const string Instagram = "https://www.instagram.com/gadgetcue";
         public const string Facebook = "https://www.facebook.com/gadgetcue1";
         public static readonly string[][] Links =
@@ -23,6 +23,8 @@ namespace MacDock
     }
 
     // First-run welcome tour. Shown once (flag @onboarded in dock.txt), re-openable from Settings > General.
+    // Fills the work area vertically; every pixel constant scales with the monitor DPI and the content is
+    // measured, centred and (if the screen is short) shrunk so nothing overlaps.
     sealed class OnboardingForm : Form
     {
         const string Flag = "onboarded";
@@ -57,30 +59,62 @@ namespace MacDock
                 "Closing apps|Closing or force-quitting any app never closes MacDock." }
         };
 
+        const int BaseW = 560;
         int page;
         readonly List<Tuple<Rectangle, Action>> hits = new List<Tuple<Rectangle, Action>>();
         Rectangle hot = Rectangle.Empty;
         Bitmap logo;
-        readonly string face;
+        readonly float testScale;
 
-        OnboardingForm()
+        OnboardingForm(float forceScale = 0f, int forceWorkH = 0)
         {
             SetUi.Apply(SetUi.WantDark());
-            face = SetUi.HasFont("Inter") ? "Inter" : (SetUi.HasFont("Segoe UI Variable Text") ? "Segoe UI Variable Text" : "Segoe UI");
+            testScale = forceScale;
             Text = "Welcome to MacDock";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
-            StartPosition = FormStartPosition.CenterScreen;
+            StartPosition = FormStartPosition.Manual;
             TopMost = true;
-            ClientSize = new Size(560, 580);
             BackColor = SetUi.Content;
             DoubleBuffered = true;
+            // Full work-area height on the screen under the cursor; width follows that monitor's DPI.
+            Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+            float s = forceScale > 0 ? forceScale : Dpi.Of(wa);
+            int wh = forceWorkH > 0 ? forceWorkH : wa.Height;
+            ClientSize = new Size(Math.Min((int)Math.Round(BaseW * s), wa.Width), 300);
+            Size = new Size(Width, wh);
+            if (forceScale <= 0) Location = new Point(wa.X + (wa.Width - Width) / 2, wa.Y);
             try { Icon = DockForm.LogoIcon(); } catch { }
             try { logo = DockForm.Logo(); } catch { }
             KeyPreview = true;
-            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.Enter) Next(); else if (e.KeyCode == Keys.Left && page > 0) { page--; Invalidate(); } };
-            FormClosed += (s, e) => { if (logo != null) logo.Dispose(); open = null; };
+            KeyDown += (a, e) => { if (e.KeyCode == Keys.Escape) Close(); else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.Enter) Next(); else if (e.KeyCode == Keys.Left && page > 0) { page--; Invalidate(); } };
+            FormClosed += (a, e) => { if (logo != null) logo.Dispose(); open = null; };
         }
+
+        // Debug hook: MacDock.exe --tour-shot <scale> <workAreaHeightPx> <page> <out.png> renders the tour offscreen.
+        public static int Shot(string[] a)
+        {
+            try
+            {
+                float sc = float.Parse(a[0], System.Globalization.CultureInfo.InvariantCulture);
+                int wh = int.Parse(a[1]); int pg = int.Parse(a[2]);
+                using (var f = new OnboardingForm(sc, wh))
+                {
+                    f.page = pg; f.CreateControl();
+                    using (var bmp = new Bitmap(f.Width, f.Height))
+                    {
+                        f.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+                        bmp.Save(a[3], System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                }
+                return 0;
+            }
+            catch (Exception ex) { Program.Log(ex); return 1; }
+        }
+
+        float Scale() { return testScale > 0 ? testScale : (IsHandleCreated ? Dpi.Of(Handle) : 1f); }
+        protected override void OnDpiChanged(DpiChangedEventArgs e) { base.OnDpiChanged(e); Invalidate(); }
+        protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(); }
 
         void Next() { if (page >= Pages.Length - 1) Close(); else { page++; Invalidate(); } }
 
@@ -99,91 +133,151 @@ namespace MacDock
             base.OnMouseUp(e);
         }
 
+        const TextFormatFlags CC = TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak;
+        const TextFormatFlags LF = TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak;
+
+        static int TH(string t, Font f, int w, TextFormatFlags fl) { return TextRenderer.MeasureText(t, f, new Size(Math.Max(10, w), 0), fl).Height; }
+        float ptk = 0.75f; // points per pixel for the current graphics DPI
+        static int I(float v) { return (int)Math.Round(v); }
+
+        // Natural (unstretched) content height at unit scale u; cardH gets each card's height.
+        int Measure(float u, int W, out int[] cardH)
+        {
+            Font title = Typography.Text(22f * ptk * u, Weight.Semibold), head = Typography.Text(15f * ptk * u, Weight.Semibold),
+                 body = Typography.Text(15f * ptk * u), small = Typography.Text(13f * ptk * u);
+            string[] p = Pages[page];
+            cardH = new int[Math.Max(0, p.Length - 1)];
+            int h = 0;
+            if (page == 0)
+            {
+                if (logo != null) h += I(96 * u) + I(16 * u);
+                h += TH(p[0], title, W - I(48 * u), CC) + I(14 * u);
+                h += TH(p[1], body, W - I(120 * u), CC) + I(8 * u);
+                h += TH(p[2], body, W - I(120 * u), CC);
+                return h;
+            }
+            h += TH(p[0], title, W - I(48 * u), CC) + I(16 * u);
+            for (int i = 1; i < p.Length; i++)
+            {
+                string[] kv = p[i].Split('|');
+                int tw = W - I(64 * u) - I(48 * u);
+                cardH[i - 1] = Math.Max(I(56 * u), I(10 * u) + TH(kv[0], head, tw, LF) + I(4 * u) + TH(kv[1], small, tw, LF) + I(10 * u));
+                h += cardH[i - 1] + (i > 1 ? I(8 * u) : 0);
+            }
+            return h;
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            hits.Clear();
+            hits.Clear(); ptk = 72f / g.DpiY;
             string[] p = Pages[page];
-            int W = ClientSize.Width, y = 36;
-            var cc = TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak;
-            var lf = TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak;
-            using (Font title = new Font(face, 22f, FontStyle.Bold, GraphicsUnit.Pixel), head = new Font(face, 15f, FontStyle.Bold, GraphicsUnit.Pixel),
-                   body = new Font(face, 15f, FontStyle.Regular, GraphicsUnit.Pixel), small = new Font(face, 13f, FontStyle.Regular, GraphicsUnit.Pixel))
+            float s = Scale();
+            int W = ClientSize.Width, H = ClientSize.Height;
+            int top = I(28 * s), bottomZone = I(150 * s);
+            int avail = H - top - bottomZone;
+            int[] ch;
+            float u = s;
+            int nat = Measure(u, W, out ch);
+            if (nat > avail && nat > 0) { u = s * Math.Max(0.6f, (float)avail / nat); nat = Measure(u, W, out ch); }
+            Font title = Typography.Text(22f * ptk * u, Weight.Semibold), head = Typography.Text(15f * ptk * u, Weight.Semibold),
+                 body = Typography.Text(15f * ptk * u), small = Typography.Text(13f * ptk * u);
+            Font bf = Typography.Text(15f * ptk * s, Weight.Semibold), sf = Typography.Text(13f * ptk * s);
+            int extra = Math.Max(0, avail - nat);
+            int y;
+            if (page == 0)
             {
-                if (page == 0 && logo != null) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(logo, (W - 96) / 2, y, 96, 96); y += 112; }
-                TextRenderer.DrawText(g, p[0], title, new Rectangle(24, y, W - 48, 34), SetUi.Text, cc);
-                y += 50;
-                if (page == 0)
+                y = top + extra / 2;
+                if (logo != null) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; int ls = I(96 * u); g.DrawImage(logo, (W - ls) / 2, y, ls, ls); y += ls + I(16 * u); }
+                int hh = TH(p[0], title, W - I(48 * u), CC);
+                TextRenderer.DrawText(g, p[0], title, new Rectangle(I(24 * u), y, W - I(48 * u), hh), SetUi.Text, CC); y += hh + I(14 * u);
+                hh = TH(p[1], body, W - I(120 * u), CC);
+                TextRenderer.DrawText(g, p[1], body, new Rectangle(I(60 * u), y, W - I(120 * u), hh), SetUi.Text, CC); y += hh + I(8 * u);
+                hh = TH(p[2], body, W - I(120 * u), CC);
+                TextRenderer.DrawText(g, p[2], body, new Rectangle(I(60 * u), y, W - I(120 * u), hh), SetUi.Dim, CC);
+            }
+            else
+            {
+                int n = p.Length - 1;
+                int grow = n > 0 ? Math.Min(extra / 2 / n, I(40 * u)) : 0; // stretch cards a little, centre the rest
+                int used = nat + grow * n;
+                y = top + Math.Max(0, (avail - used) / 2);
+                int hh = TH(p[0], title, W - I(48 * u), CC);
+                TextRenderer.DrawText(g, p[0], title, new Rectangle(I(24 * u), y, W - I(48 * u), hh), SetUi.Text, CC); y += hh + I(16 * u);
+                int pad = I(32 * u);
+                for (int i = 1; i < p.Length; i++)
                 {
-                    TextRenderer.DrawText(g, p[1], body, new Rectangle(60, y, W - 120, 44), SetUi.Text, cc); y += 48;
-                    TextRenderer.DrawText(g, p[2], body, new Rectangle(60, y, W - 120, 44), SetUi.Dim, cc);
-                }
-                else
-                {
-                    for (int i = 1; i < p.Length; i++)
+                    string[] kv = p[i].Split('|');
+                    int cardHt = ch[i - 1] + grow;
+                    Rectangle card = new Rectangle(pad, y, W - 2 * pad, cardHt);
+                    using (var gp = SetUi.Round(card, I(10 * u)))
                     {
-                        string[] kv = p[i].Split('|');
-                        Rectangle card = new Rectangle(32, y, W - 64, 56);
-                        using (var gp = SetUi.Round(card, 10))
-                        {
-                            using (var b = new SolidBrush(SetUi.Card)) g.FillPath(b, gp);
-                            using (var pen = new Pen(SetUi.CardLine)) g.DrawPath(pen, gp);
-                        }
-                        using (var b = new SolidBrush(SetUi.Accent)) g.FillEllipse(b, card.X + 14, card.Y + 22, 10, 10);
-                        TextRenderer.DrawText(g, kv[0], head, new Rectangle(card.X + 36, card.Y + 8, card.Width - 48, 20), SetUi.Text, lf);
-                        TextRenderer.DrawText(g, kv[1], small, new Rectangle(card.X + 36, card.Y + 30, card.Width - 48, 20), SetUi.Dim, lf);
-                        y += 62;
+                        using (var b = new SolidBrush(SetUi.Card)) g.FillPath(b, gp);
+                        using (var pen = new Pen(SetUi.CardLine)) g.DrawPath(pen, gp);
                     }
+                    int tx = card.X + I(36 * u), tw = card.Width - I(48 * u);
+                    int h1 = TH(kv[0], head, tw, LF), h2 = TH(kv[1], small, tw, LF);
+                    int ty = card.Y + (cardHt - (h1 + I(4 * u) + h2)) / 2;
+                    int dot = I(10 * u);
+                    using (var b = new SolidBrush(SetUi.Accent)) g.FillEllipse(b, card.X + I(14 * u), ty + (h1 - dot) / 2, dot, dot);
+                    TextRenderer.DrawText(g, kv[0], head, new Rectangle(tx, ty, tw, h1), SetUi.Text, LF);
+                    TextRenderer.DrawText(g, kv[1], small, new Rectangle(tx, ty + h1 + I(4 * u), tw, h2), SetUi.Dim, LF);
+                    y += cardHt + I(8 * u);
                 }
-                // credits
-                int cy = ClientSize.Height - 118;
-                if (page == Pages.Length - 1)
-                {
-                    TextRenderer.DrawText(g, Credits.Line, small, new Rectangle(24, cy, W - 48, 18), SetUi.Dim, cc);
-                    string[][] L = Credits.Links;
-                    int tot = 0; int[] ws = new int[L.Length];
-                    for (int i = 0; i < L.Length; i++) { ws[i] = TextRenderer.MeasureText(L[i][0], small).Width; tot += ws[i] + (i > 0 ? 22 : 0); }
-                    int x = (W - tot) / 2;
-                    TextRenderer.DrawText(g, "Follow us", small, new Rectangle(24, cy + 22, W - 48, 18), SetUi.Dim, cc);
-                    for (int i = 0; i < L.Length; i++)
-                    {
-                        Rectangle r = new Rectangle(x, cy + 44, ws[i], 18);
-                        string url = L[i][1];
-                        hits.Add(Tuple.Create(r, (Action)(() => SetUi.OpenTarget(url))));
-                        TextRenderer.DrawText(g, L[i][0], small, r, SetUi.Accent, TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-                        if (r == hot) using (var pen = new Pen(SetUi.Accent)) g.DrawLine(pen, r.X, r.Bottom, r.Right, r.Bottom);
-                        x += ws[i] + 22;
-                    }
-                }
-                else TextRenderer.DrawText(g, Credits.Line, small, new Rectangle(24, cy + 22, W - 48, 18), SetUi.Dim, cc);
+            }
 
-                // page dots
-                int dx = (W - (Pages.Length * 16 - 6)) / 2, dy = ClientSize.Height - 66;
-                for (int i = 0; i < Pages.Length; i++)
-                    using (var b = new SolidBrush(i == page ? SetUi.Accent : SetUi.Track)) g.FillEllipse(b, dx + i * 16, dy, 10, 10);
-
-                // buttons
-                bool last = page == Pages.Length - 1;
-                Rectangle next = new Rectangle(W - 24 - 112, ClientSize.Height - 54, 112, 34);
-                Rectangle back = new Rectangle(24, ClientSize.Height - 54, 80, 34);
-                Btn(g, next, last ? "Get Started" : "Next", true, head);
-                hits.Add(Tuple.Create(next, (Action)Next));
-                if (page > 0) { Btn(g, back, "Back", false, head); hits.Add(Tuple.Create(back, (Action)(() => { page--; Invalidate(); }))); }
-                else
+            // bottom zone: credits, page dots, buttons, anchored to the bottom and scaled by the DPI
+            int btnH = I(34 * s), m = I(24 * s);
+            int btnY = H - m - btnH;
+            int dotY = btnY - I(26 * s);
+            int dsz = I(10 * s), dstep = I(16 * s);
+            int lh = I(24 * s);
+            int cy = dotY - I(70 * s);
+            if (page == Pages.Length - 1)
+            {
+                TextRenderer.DrawText(g, Credits.Line, sf, new Rectangle(m, cy, W - 2 * m, lh), SetUi.Dim, CC);
+                string[][] L = Credits.Links;
+                int tot = 0; int[] ws = new int[L.Length]; int sp = I(22 * s);
+                for (int i = 0; i < L.Length; i++) { ws[i] = TextRenderer.MeasureText(L[i][0], sf).Width; tot += ws[i] + (i > 0 ? sp : 0); }
+                int x = (W - tot) / 2;
+                TextRenderer.DrawText(g, "Follow us", sf, new Rectangle(m, cy + I(24 * s), W - 2 * m, lh), SetUi.Dim, CC);
+                for (int i = 0; i < L.Length; i++)
                 {
-                    Rectangle skip = new Rectangle(24, ClientSize.Height - 54, 60, 34);
-                    TextRenderer.DrawText(g, "Skip", small, skip, SetUi.Dim, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                    hits.Add(Tuple.Create(skip, (Action)Close));
+                    Rectangle r = new Rectangle(x, cy + I(48 * s), ws[i], lh);
+                    string url = L[i][1];
+                    hits.Add(Tuple.Create(r, (Action)(() => SetUi.OpenTarget(url))));
+                    TextRenderer.DrawText(g, L[i][0], sf, r, SetUi.Accent, TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                    if (r == hot) using (var pen = new Pen(SetUi.Accent)) g.DrawLine(pen, r.X, r.Bottom, r.Right, r.Bottom);
+                    x += ws[i] + sp;
                 }
+            }
+            else TextRenderer.DrawText(g, Credits.Line, sf, new Rectangle(m, cy + I(24 * s), W - 2 * m, lh), SetUi.Dim, CC);
+
+            int dx = (W - (Pages.Length * dstep - (dstep - dsz))) / 2;
+            for (int i = 0; i < Pages.Length; i++)
+                using (var b = new SolidBrush(i == page ? SetUi.Accent : SetUi.Track)) g.FillEllipse(b, dx + i * dstep, dotY, dsz, dsz);
+
+            bool last = page == Pages.Length - 1;
+            int nw = I(112 * s);
+            Rectangle next = new Rectangle(W - m - nw, btnY, nw, btnH);
+            Rectangle back = new Rectangle(m, btnY, I(80 * s), btnH);
+            Btn(g, next, last ? "Get Started" : "Next", true, bf, s);
+            hits.Add(Tuple.Create(next, (Action)Next));
+            if (page > 0) { Btn(g, back, "Back", false, bf, s); hits.Add(Tuple.Create(back, (Action)(() => { page--; Invalidate(); }))); }
+            else
+            {
+                Rectangle skip = new Rectangle(m, btnY, I(60 * s), btnH);
+                TextRenderer.DrawText(g, "Skip", sf, skip, SetUi.Dim, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                hits.Add(Tuple.Create(skip, (Action)Close));
             }
         }
 
-        void Btn(Graphics g, Rectangle r, string text, bool primary, Font f)
+        void Btn(Graphics g, Rectangle r, string text, bool primary, Font f, float s)
         {
             bool h = r == hot;
-            using (var gp = SetUi.Round(r, 17))
+            using (var gp = SetUi.Round(r, I(17 * s)))
             {
                 Color fill = primary ? (h ? Color.FromArgb(40, 150, 255) : SetUi.Accent) : (h ? SetUi.HoverFill : SetUi.PillFill);
                 using (var b = new SolidBrush(fill)) g.FillPath(b, gp);

@@ -152,7 +152,7 @@ namespace MacDock
 
         public GlassPanel(int width, List<PanelRow> rows, Point anchor, int barHeight, Action closed)
         {
-            PanelRow.Scale = Math.Max(1f, Dpi.Of(Screen.PrimaryScreen));
+            PanelRow.Scale = Math.Max(1f, Dpi.Of(new Rectangle(anchor, new Size(1, 1))));
             this.panelWidth = width;
             this.rows = rows;
             this.anchor = anchor;
@@ -248,7 +248,7 @@ namespace MacDock
             try
             {
                 Rectangle area = Screen.FromPoint(anchor).Bounds;
-                int w = panelWidth + Gutter * 2, h = 760 + Gutter * 2; // tall enough for the LocalSend device list
+                int w = panelWidth + Gutter * 2, h = (int)(760 * Math.Max(1f, PanelRow.Scale)) + Gutter * 2; // tall enough for the LocalSend device list
                 int x = Math.Max(area.Left, Math.Min(anchor.X - w / 2, area.Right - w));
                 int y = anchor.Y - Gutter + 6;
                 backdropRect = new Rectangle(x, y, w, Math.Min(h, area.Bottom - y));
@@ -480,6 +480,19 @@ namespace MacDock
                 g.DrawString(r.Text ?? "", small, b, r.Rect, f);
         }
 
+        static int Sx(int v) { return (int)Math.Round(v * PanelRow.Scale); }
+
+        // DrawString that first shrinks the font (min 60%) so the whole text fits the rectangle's width.
+        static void DrawFit(Graphics g, string s, Font f, Brush b, Rectangle rc, StringFormat fmt)
+        {
+            if (string.IsNullOrEmpty(s)) return;
+            float w = g.MeasureString(s, f, new PointF(0, 0), StringFormat.GenericTypographic).Width;
+            if (w <= rc.Width || rc.Width <= 0) { g.DrawString(s, f, b, rc, fmt); return; }
+            float size = Math.Max(f.Size * 0.6f, f.Size * rc.Width / w * 0.97f);
+            using (var sf = new Font(f.FontFamily, size, f.Style, f.Unit))
+                g.DrawString(s, sf, b, rc, fmt);
+        }
+
         void DrawGlassTile(Graphics g, PanelRow r, bool hot)
         {
             Rectangle rc = r.Rect;
@@ -488,7 +501,8 @@ namespace MacDock
             GlassBase(g, rc, rc.Height / 2f, hot);
 
             Color fg = light ? Color.FromArgb(28, 28, 30) : Color.White;
-            Rectangle ic = new Rectangle(rc.Left + 14, rc.Top + (rc.Height - 36) / 2, 36, 36);
+            int icS = Sx(36), pad = Sx(14), tx0 = Sx(58);
+            Rectangle ic = new Rectangle(rc.Left + pad, rc.Top + (rc.Height - icS) / 2, icS, icS);
             Color iconOff = light ? Color.FromArgb(48, 0, 0, 0) : Color.FromArgb(62, 255, 255, 255);
             // As in the reference: an active toggle is a white circle with a blue glyph (the moon is dark on white);
             // an inactive one is a grey circle with a light glyph.
@@ -499,16 +513,19 @@ namespace MacDock
 
             var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             bool noSub = string.IsNullOrEmpty(r.Sub);
-            int textW = rc.Width - 66 - (r.Extra != null ? 22 : 0);
+            int textW = rc.Width - tx0 - Sx(8) - (r.Extra != null ? Sx(22) : 0);
+            // Titles/subtitles shrink (down to 75%) before they would be cut with an ellipsis; layout scales with DPI.
+            int th = Sx(20), sh = Sx(18);
+            int ty = noSub ? rc.Top + (rc.Height - th) / 2 : rc.Top + Sx(12);
             using (var tb = new SolidBrush(fg))
-                g.DrawString(r.Text, tileTitle, tb, new Rectangle(rc.Left + 58, rc.Top + (noSub ? 22 : 12), textW, 20), left);
+                DrawFit(g, r.Text, tileTitle, tb, new Rectangle(rc.Left + tx0, ty, textW, th), left);
             using (var sb = new SolidBrush(Color.FromArgb(light ? 150 : 175, fg)))
-                g.DrawString(r.Sub ?? "", small, sb, new Rectangle(rc.Left + 58, rc.Top + 32, textW, 18), left);
+                DrawFit(g, r.Sub ?? "", small, sb, new Rectangle(rc.Left + tx0, rc.Top + Sx(32), textW, sh), left);
             if (r.Extra != null)
             {
                 // chevron at the right edge: opens this tile's own panel (networks / devices)
-                r.ExtraRect = new Rectangle(rc.Right - 40, rc.Top, 40, rc.Height);
-                float cx = rc.Right - 20, cy = rc.Top + rc.Height / 2f;
+                r.ExtraRect = new Rectangle(rc.Right - Sx(40), rc.Top, Sx(40), rc.Height);
+                float cx = rc.Right - Sx(20), cy = rc.Top + rc.Height / 2f;
                 using (var pen = new Pen(Color.FromArgb(light ? 150 : 190, fg), 2f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
                 { g.DrawLine(pen, cx - 2.5f, cy - 5, cx + 2.5f, cy); g.DrawLine(pen, cx + 2.5f, cy, cx - 2.5f, cy + 5); }
             }
@@ -1291,6 +1308,7 @@ namespace MacDock
     static class Panels
     {
         const int Width = 330;
+        static int Sx(int v) { return (int)Math.Round(v * PanelRow.Scale); }
 
         // Raised when a panel asks for another panel (Control Center -> Wi-Fi, for example).
         public static event Action<string> Navigate;
@@ -1307,6 +1325,7 @@ namespace MacDock
 
         public static GlassPanel Create(string id, Point anchor, int barHeight, Action closed)
         {
+            PanelRow.Scale = Math.Max(1f, Dpi.Of(new Rectangle(anchor, new Size(1, 1))));
             List<PanelRow> rows;
             switch (id)
             {
@@ -1320,7 +1339,7 @@ namespace MacDock
                 default: rows = ProfileRows(); break;
             }
 
-            var panel = new GlassPanel(Width, rows, anchor, barHeight, closed);
+            var panel = new GlassPanel(id == "control" ? Sx(Width) : Width, rows, anchor, barHeight, closed);
             if (id == "control") panel.EnableGlass();
 
             if (id == "wifi") Background(panel, () => WifiRows(panel));
@@ -1531,6 +1550,16 @@ namespace MacDock
                 rows.Add(mute);
             }
 
+            if (outputs != null)
+            {
+                var apps = AppVolume.List();
+                if (apps.Count > 0)
+                {
+                    rows.Add(PanelRow.Separator());
+                    rows.Add(PanelRow.Header("Apps"));
+                    foreach (AppSession a in apps.Take(6)) { AppSession s = a; rows.Add(PanelRow.Info(s.Name, "")); rows.Add(PanelRow.Slider(s.Level, v => s.Set((float)v))); }
+                }
+            }
             rows.Add(PanelRow.Separator());
             rows.Add(PanelRow.Header("Output"));
             if (outputs == null) rows.Add(PanelRow.Info("Devices", "Loading..."));
@@ -1773,7 +1802,7 @@ namespace MacDock
             }
             float volume = Audio.Volume;
 
-            const int W = 330, Col = 160, Gap = 10, Row = 64;
+            int W = Sx(330), Col = Sx(160), Gap = Sx(10), Row = Sx(64);
             int xr = W - Col;
             var rows = new List<PanelRow>();
             Action refresh = () => { if (panel != null) Background(panel, () => ControlRows(panel)); };

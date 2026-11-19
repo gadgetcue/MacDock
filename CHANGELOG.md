@@ -1,4 +1,38 @@
-﻿# Changelog
+# Changelog
+
+## v2.3
+### Performance
+- **The menu bar no longer re-reads `dock.txt` on every tick.** It was reading and parsing the settings file about 100 times a second on the UI thread. Settings lookups are now remembered until the file changes. Measured on the dev PC with the dock idle: bar update cost fell from about 800 ms to about 130 ms of UI time per 10 s, and the whole dock's idle CPU fell from about 2.3 s to about 1.2 s per 20 s (roughly 45% less).
+- Startup is unchanged: a warm restart shows the bar after about 2 s of CPU time. The first start after installing a new build is slower because icons are rebuilt once; they are cached on disk afterwards.
+
+### Added
+- **Status bar readouts**: optional disk usage, network speed, temperature (where the PC exposes it) and weather (looks up your city online). All off by default.
+- **Minimize effect**: Genie, Scale or Fade (Settings > Dock).
+- **Per-app hidden dock**: @hide-dock-apps=chrome.exe,code.exe in dock.txt auto-hides the dock while those apps are in front.
+- **Usage color hints**: CPU/RAM turn orange above 80% and red above 90%; battery icon orange below 20%, red at 10%.
+- **Trash shortcuts**: middle-click, or Ctrl/Shift-click, empties the Recycle Bin.
+- **Menu bar double-click** on empty space maximizes or restores the front window.
+- **Per-app volume** sliders in the Sound panel.
+- **Settings no longer freezes the dock on first open** (the ~5 s Windows Forms default-font lookup now happens in the background at startup).
+- **Crash and hang safety**: no 'Not responding' ghosting, background-thread errors are logged instead of ending the process, and a dock frozen for 60 s restarts itself through MacDockGuard.
+- **Minimize into the Dock**: minimized windows appear as thumbnail tiles (app icon in the corner) before the Recycle Bin; click to restore. Toggle in Settings > Dock.
+- **Hover previews switch**: Settings > Dock > Show window previews on hover.
+- **Settings > Menu Bar & Island regrouped** into Status readouts, Menu bar buttons, Tray icons, Control Center, Dynamic Island & notifications, Keyboard shortcuts.
+- **Menu bar item order and spacing**: move any right-side item (clock, battery, volume, tray icons...) and add extra spacing in Settings > Menu Bar & Island. Network speed can show download, upload or both, with or without arrows.
+- **Fan thumbnails**: picture tiles pop on hover like icons; videos show a frame; thumbnails keep their aspect ratio.
+- **Folder fan never shows a blank tile**: when Windows has no icon for an item (for example some subfolders), the fan falls back to the file-type icon, then a lettered tile.
+- **Single-file installer** (installer\build-setup.ps1).
+- **Redesigned welcome tour**: full-height, DPI-aware, with a clearer feature list.
+- **Dynamic Island notifications** have a new layout with the app's artwork.
+- **Smoother Genie** minimize and restore.
+
+### Fixed
+- **Settings is no longer a topmost window**, so other windows can sit above it like any normal app.
+- **The Windows taskbar stays hidden across an auto-update** instead of flashing back while the dock restarts.
+
+### Developer
+- `mac-dock\scratch\click.trigger` accepts `@settings:<page>` (for example `@settings:menubar`) to open Settings on a page.
+- `MacDock.exe --tour-shot <scale> <workAreaHeightPx> <page> <out.png>` renders the welcome tour offscreen.
 
 ## v2.2
 ### Fixed

@@ -89,6 +89,8 @@ namespace MacDock
             try
             {
                 if (idObject != 0 || hwnd == IntPtr.Zero) return;
+                if (ev == EVENT_SYSTEM_MINIMIZESTART && MinimizedDock.On) MinimizedDock.Capture(hwnd);
+                { var d = DockForm.Instance; if (d != null && d.IsHandleCreated) d.RebuildSoon(); }
                 if (!SetCfg.GetBool("genie", true) || Fullscreen.Active) return;
                 if (!IsAnimatable(hwnd)) return;
 
@@ -163,7 +165,7 @@ namespace MacDock
     // reused: showing it and registering the slices takes a few milliseconds, creating it would take over a hundred.
     sealed class GenieOverlay : Form
     {
-        const int MaxSlices = 44;        // every slice costs one DWM call per frame: too many and the frames stutter
+        const int MaxSlices = 96;       // every slice costs one DWM call per frame: too many and the frames stutter
         const double MinimizeMs = 500, RestoreMs = 420;
         const double Delay = 0.44;       // how much later the top starts than the bottom (0 = whole window at once)
         const double FadeFrom = 0.90;    // the last tenth of the way fades out, so nothing pops off at the icon
@@ -244,6 +246,7 @@ namespace MacDock
             this.rest = rest;
             this.target = target;
             this.minimizing = minimizing;
+            fxStyle = SetCfg.Get("genie-style") ?? "genie"; // read once per effect, not per frame
 
             Rectangle now = Screen.PrimaryScreen.Bounds;
             if (now != screen) { screen = now; Bounds = now; }
@@ -254,7 +257,7 @@ namespace MacDock
             if (DwmQueryThumbnailSourceSize(first, out size) != 0 || size.cx < 40 || size.cy < 40) { DwmUnregisterThumbnail(first); return false; }
             srcW = size.cx;
             srcH = size.cy;
-            slices = Math.Max(28, Math.Min(MaxSlices, rest.Height / 22));
+            slices = Math.Max(40, Math.Min(MaxSlices, rest.Height / 9));
             Array.Clear(last, 0, last.Length);
             frameT = 0;
             thumbs[0] = first;
@@ -291,6 +294,8 @@ namespace MacDock
                 if (thumbs[i] != IntPtr.Zero) { try { DwmUnregisterThumbnail(thumbs[i]); } catch { } thumbs[i] = IntPtr.Zero; }
             if (Visible && !IsDisposed) Hide();
         }
+
+        string fxStyle = "genie";
 
         void Step()
         {
@@ -360,6 +365,7 @@ namespace MacDock
         {
             // 0 = window in place, 1 = collapsed into the icon. Restoring is the exact reverse (leaves the icon fast, settles gently).
             double progress = Pull(minimizing ? t : 1 - t);
+            bool scaleFx = fxStyle == "scale", fadeFx = fxStyle == "fade";
             double iconW = 54, neckY = target.Y;
             int n = slices;
             byte alpha = progress <= FadeFrom ? (byte)255 : (byte)Math.Round(255 * Math.Max(0, 1 - (progress - FadeFrom) / (1 - FadeFrom)));
@@ -373,7 +379,7 @@ namespace MacDock
             {
                 double row = k / (double)n;                      // 0 = top, 1 = bottom
                 double delay = (1 - row) * Delay;
-                double u = Ease((progress - delay) / (1 - Delay));
+                double u = (scaleFx || fadeFx) ? Ease(progress) : Ease((progress - delay) / (1 - Delay));
                 double yRest = rest.Top + row * rest.Height;
                 double cx = rest.Left + rest.Width / 2.0;
                 double halfRest = rest.Width / 2.0;
@@ -382,6 +388,8 @@ namespace MacDock
                 x0[k] = centre - half;
                 x1[k] = centre + half;
                 y[k] = yRest + (neckY - yRest) * u;
+                if (scaleFx) { centre = cx + (target.X - cx) * u; half = halfRest * (1 - 0.92 * u); x0[k] = centre - half; x1[k] = centre + half; }
+                else if (fadeFx) { double sc = 1 - 0.06 * u; centre = cx; half = halfRest * sc; y[k] = rest.Top + rest.Height / 2.0 + (yRest - rest.Top - rest.Height / 2.0) * sc; x0[k] = centre - half; x1[k] = centre + half; }
             }
 
             for (int i = 0; i < n; i++)
@@ -392,6 +400,7 @@ namespace MacDock
                 // Rows that have fully reached the icon sit on one line: leave them out instead of stacking them there.
                 bool folded = y[i + 1] - y[i] < 0.5;
                 if (bottom <= top) bottom = top + 1;
+                else if (i < n - 1) bottom += 1; // 1 px overlap into the next slice: no hairline seams between bands
                 var props = new ThumbProps
                 {
                     flags = TNP_DEST | TNP_SOURCE | TNP_VISIBLE | TNP_OPACITY,
