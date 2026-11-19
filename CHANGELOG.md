@@ -1,5 +1,95 @@
-﻿# Changelog
+# Changelog
 
+## v2.3
+### Performance
+- **The menu bar no longer re-reads `dock.txt` on every tick.** It was reading and parsing the settings file about 100 times a second on the UI thread. Settings lookups are now remembered until the file changes. Measured on the dev PC with the dock idle: bar update cost fell from about 800 ms to about 130 ms of UI time per 10 s, and the whole dock's idle CPU fell from about 2.3 s to about 1.2 s per 20 s (roughly 45% less).
+- Startup is unchanged: a warm restart shows the bar after about 2 s of CPU time. The first start after installing a new build is slower because icons are rebuilt once; they are cached on disk afterwards.
+
+### Added
+- **Status bar readouts**: optional disk usage, network speed, temperature (where the PC exposes it) and weather (looks up your city online). All off by default.
+- **Minimize effect**: Genie, Scale or Fade (Settings > Dock).
+- **Per-app hidden dock**: @hide-dock-apps=chrome.exe,code.exe in dock.txt auto-hides the dock while those apps are in front.
+- **Usage color hints**: CPU/RAM turn orange above 80% and red above 90%; battery icon orange below 20%, red at 10%.
+- **Trash shortcuts**: middle-click, or Ctrl/Shift-click, empties the Recycle Bin.
+- **Menu bar double-click** on empty space maximizes or restores the front window.
+- **Per-app volume** sliders in the Sound panel.
+- **Settings no longer freezes the dock on first open** (the ~5 s Windows Forms default-font lookup now happens in the background at startup).
+- **Crash and hang safety**: no 'Not responding' ghosting, background-thread errors are logged instead of ending the process, and a dock frozen for 60 s restarts itself through MacDockGuard.
+- **Minimize into the Dock**: minimized windows appear as thumbnail tiles (app icon in the corner) before the Recycle Bin; click to restore. Toggle in Settings > Dock.
+- **Hover previews switch**: Settings > Dock > Show window previews on hover.
+- **Settings > Menu Bar & Island regrouped** into Status readouts, Menu bar buttons, Tray icons, Control Center, Dynamic Island & notifications, Keyboard shortcuts.
+- **Menu bar item order and spacing**: move any right-side item (clock, battery, volume, tray icons...) and add extra spacing in Settings > Menu Bar & Island. Network speed can show download, upload or both, with or without arrows.
+- **Fan thumbnails**: picture tiles pop on hover like icons; videos show a frame; thumbnails keep their aspect ratio.
+- **Folder fan never shows a blank tile**: when Windows has no icon for an item (for example some subfolders), the fan falls back to the file-type icon, then a lettered tile.
+- **Single-file installer** (installer\build-setup.ps1).
+- **Redesigned welcome tour**: full-height, DPI-aware, with a clearer feature list.
+- **Dynamic Island notifications** have a new layout with the app's artwork.
+- **Smoother Genie** minimize and restore.
+
+### Fixed
+- **Settings is no longer a topmost window**, so other windows can sit above it like any normal app.
+- **The Windows taskbar stays hidden across an auto-update** instead of flashing back while the dock restarts.
+
+### Developer
+- `mac-dock\scratch\click.trigger` accepts `@settings:<page>` (for example `@settings:menubar`) to open Settings on a page.
+- `MacDock.exe --tour-shot <scale> <workAreaHeightPx> <page> <out.png>` renders the welcome tour offscreen.
+
+## v2.2
+### Fixed
+- **Windows no longer cover the top status bar.** A window dragged or moved up under the bar (CPU/RAM, Bluetooth, volume, Wi-Fi, battery) used to draw its title bar and min/max/close buttons over the bar text. The dock now holds windows below the bar while you drag them, and slides any that end up there back down. Maximized and fullscreen windows are left alone, and elevated windows can't be moved by the dock.
+- **Battery popup text overlap at 125% and higher display scaling.** The popup's rows were a fixed pixel height while the text scales with Windows DPI, so "Battery Saver", the large percentage and "Charging" ran into each other. Row heights now scale with the display.
+- **Folder fan no longer freezes the dock.** Images are read to memory before decoding so a slow or cloud-backed file can't hold the paint lock, and the "Open in Explorer" arrow is drawn as a vector shape instead of building a symbol font on every open.
+- **No more multi-second freezes with thousands of installed fonts.** Fonts are loaded from their files instead of being looked up by name, and text with glyphs Inter lacks falls back to Segoe UI instead of triggering a system-wide font search.
+- A frozen app can no longer freeze the dock: window titles are read from cache and windows are restored asynchronously.
+
+### Changed
+- Folder fans warm up at startup so the first folder click opens instantly.
+- Open windows come from a background scan (new `DockScan`), and icons are cached on disk and refreshed in the background, so the dock paints without waiting on slow apps.
+- Pending elevated (UAC) prompts are brought forward more reliably.
+- The LocalSend popup scanning label no longer shifts the layout.
+- `MacDock.exe --fan-bench <folder>` writes folder fan frame timings for diagnosing slow opens.
+## v2.1
+### Added
+- **Send with LocalSend from Explorer.** Right-click any file or a multi-selection and choose "Send with LocalSend" (also added to the Send to menu). A new popup lists nearby devices, shows Scanning while it looks, and sends the files to the one you pick. Downloads fan items have the same entry in their right-click menu.
+- **New LocalSend popup** with a device list, progress and clean text alignment.
+- **LocalSend port fallback.** If port 53317 is already taken by the LocalSend app or a stale instance, MacDock moves to the next free port and peers still find it.
+- **Icon master switch and custom icon packs.** Settings > Icons has a "Use original app icons" switch that turns off MacDock's styled icons and any custom pack at once. Install your own pack from a folder or .zip of PNG, ICO, ICNS or JPG files named after each app (for example `Chrome.png`), open the pack folder, or remove it again.
+- **Split view in the dock.** Windows tiled with Windows 11 snap layouts get one combined item; click it to bring the whole group forward together, click again to minimize it.
+- **Welcome tour** for first-time users, reachable later from Settings.
+- **Rename Control Center tiles** with the pencil chip when editing.
+- **Pending UAC prompts surface automatically.** With the taskbar hidden, an elevation prompt that was waiting as a minimized button now comes to the front.
+
+### Changed
+- **Folder fan menus appear on top.** Right-click menus in a folder fan open above the fan instead of behind it. The "Open in Explorer" arrow stays at the top of the fan.
+- **Tray icons: left click brings the app's own window forward**, instead of only opening the Windows flyout. Apps with no window get a click through UI Automation with the flyout kept invisible.
+- **Mission Control** reopens faster through a pre-warmed window, and scrolling stays smooth.
+- **Animation timing** follows the compositor refresh steadily, giving smoother hover, scroll and fade motion.
+- **Control Center** opens instantly: Wi-Fi, WMI and radio state are cached and refreshed in the background.
+- **Window previews** keep the close X on top after the layout changes.
+- **Updater** rolls back and keeps the dock running if the restart cannot be scheduled, and shows the reason when an update fails.
+
+### Fixed
+- **Folder click hang.** Opening a folder fan could freeze the dock for seconds while big images decoded. Thumbnails now come from the shell's cache and Explorer hand-offs run off the UI thread.
+- **Web app icons.** Aero Browser (Safari) web apps and Brave, Edge and Chrome web apps now keep their own icon in the dock and Launchpad, and a second click minimizes the right window. Web apps with a profile suffix also count as running.
+- UWP windows that were minimized or suspended no longer fall back to the logo.
+- Settings and Control Center no longer block on slow Wi-Fi, radio or WMI queries.
+- Hung `netsh` calls can no longer stall the caller.
+- Dock stays in sync while icons are being dragged.
+
+## v2.0
+### Added
+- **Use original app icons** toggle (Settings > Icons): show each app's own icon instead of the MacDock icon pack; per-app choice and custom icons from the right-click menu.
+- **Folders dropped on a dock icon are pinned** instead of being opened with the app; hold Shift or Ctrl to move or copy into a folder icon.
+
+### Changed
+- **Smoother scrolling** in Settings and Mission Control: a critically damped spring glides wheel notches together, and the page snapshot is reused instead of re-taken per notch.
+- Window previews refresh when the exe changes, an entry is 10 minutes old, or a new window appears.
+- Taskbar sync: owned windows (dialogs, pop-ups) are no longer shown as taskbar buttons, and UWP windows hosted by ApplicationFrameHost resolve to the real app.
+- Mission Control: closing a window drops its tile and relayouts; thumbnails re-place correctly when cells move.
+- Frame-time logging is off outside profiling, removing needless frame drops.
+
+### Updating
+- Apple menu > **Check for Updates...** downloads this release's zip and swaps in the new MacDock.exe automatically.
 ## v1.9
 ### Added
 - **Tray icons in the status bar**, with a collapsible tray and an arrow toggle; sharper tray icons and fixed click routing.
