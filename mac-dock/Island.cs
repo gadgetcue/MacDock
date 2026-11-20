@@ -78,6 +78,7 @@ namespace MacDock
 
         void OnClipboardChanged()
         {
+            if (!Enabled) return; // the Island is off: don't pop up for a copy
             try
             {
                 uint pid; GetWindowThreadProcessId(GetClipboardOwner(), out pid);
@@ -119,7 +120,13 @@ namespace MacDock
 
         public void ApplyEnabled()
         {
-            if (!IsHandleCreated || IsDisposed) return;
+            if (IsDisposed) return;
+            if (!IsHandleCreated)
+            {
+                // Create the window hidden, so the Settings toggle can show/hide it live.
+                IntPtr h = Handle;
+                if (h == IntPtr.Zero) return;
+            }
             if (Enabled)
             {
                 if (!Visible) Show();
@@ -215,6 +222,7 @@ namespace MacDock
         // Switches to vsync-driven frames until the motion settles.
         void Wake()
         {
+            if (!Enabled) return; // never start a frame while the Island is turned off
             animating = true;
             timer.Stop();
             gate.Set();
@@ -322,6 +330,14 @@ namespace MacDock
 
         void Step()
         {
+            if (!Enabled)
+            {
+                // A queued timer/vsync frame can still arrive just after the user turns the Island off.
+                if (Visible) Hide();
+                animating = false;
+                timer.Stop();
+                return;
+            }
             frame++;
             Fullscreen.Update();
             if (Fullscreen.Active)

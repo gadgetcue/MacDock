@@ -230,7 +230,7 @@ namespace MacDock
                     { var lsT = new Timer { Interval = 4000 }; lsT.Tick += (s3, e3) => { lsT.Stop(); lsT.Dispose(); try { LocalSend.EnsureVerb(); LocalSend.EnsureSendTo(); } catch (Exception ex3) { Log(ex3); } }; lsT.Start(); } // shell integration: after the dock is up
                     LocalSend.WatchSends(id => bar.OpenPanel(id), bar);
                     bar.Show();
-                    if (IslandForm.Enabled) island.Show(); else { island.Show(); island.Hide(); } // handle must exist so it can be re-shown live
+                    island.ApplyEnabled(); // shown only when enabled; the hidden handle still allows live toggling
                     Feed.Start();
                     var watchdog = new Timer { Interval = 2000 };
                     watchdog.Tick += (s, e) =>
