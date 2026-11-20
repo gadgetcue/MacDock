@@ -782,7 +782,7 @@ namespace MacDock
                 float cy = trayOpen ? 17 : 13, d = trayOpen ? -4 : 4;
                 g.DrawLines(pen, new[] { new PointF(right, cy), new PointF(right + 6, cy + d), new PointF(right + 12, cy) });
             }
-            AddHit("tray", right - 6, 24, ToggleTrayOverflow);
+            AddHit("tray", right - 12, 36, ToggleTrayOverflow);
             right -= 12;
             }
 
@@ -855,6 +855,8 @@ namespace MacDock
         static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool BringWindowToTop(IntPtr hWnd);
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -918,6 +920,7 @@ namespace MacDock
                     int y = screen.Bottom - h - 8;
                     const uint SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
                     SetWindowPos(overflow, new IntPtr(-1), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    BringWindowToTop(overflow);
                 }
                 else NativeMethods.ShowWindow(overflow, 0); // SW_HIDE
             }
