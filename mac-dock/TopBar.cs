@@ -849,6 +849,15 @@ namespace MacDock
             dim.Dispose();
         }
 
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
+
         bool trayOpen;
         float trayAnim = 1f;
         VsyncDriver trayVsync;
@@ -893,7 +902,26 @@ namespace MacDock
         {
             ClosePanel();
             trayOpen = !trayOpen;
-            if (trayOpen)
+            // On Windows 10 / older Windows 11 the overflow is a classic window we can show directly.
+            // On newer Windows 11 it is a XAML island that has to be opened with Win+B.
+            IntPtr overflow = FindWindow("NotifyIconOverflowWindow", null);
+            if (overflow != IntPtr.Zero)
+            {
+                if (trayOpen)
+                {
+                    RECT r;
+                    if (!GetWindowRect(overflow, out r)) { r.Left = 0; r.Top = 0; r.Right = 300; r.Bottom = 200; }
+                    int w = r.Right - r.Left; if (w < 120) w = 300;
+                    int h = r.Bottom - r.Top; if (h < 80) h = 200;
+                    var screen = Screen.PrimaryScreen.Bounds;
+                    int x = screen.Right - w - 8;
+                    int y = screen.Bottom - h - 8;
+                    const uint SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
+                    SetWindowPos(overflow, new IntPtr(-1), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                }
+                else NativeMethods.ShowWindow(overflow, 0); // SW_HIDE
+            }
+            else if (trayOpen)
             {
                 WinUtil.Combo(WinUtil.VK_LWIN, (byte)'B');
                 System.Threading.Tasks.Task.Delay(220).ContinueWith(t => WinUtil.Combo(0x0D));
