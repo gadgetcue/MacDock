@@ -143,7 +143,7 @@ namespace MacDock
         {
             var g = e.Graphics;
             using (var b = new SolidBrush(BackColor)) g.FillRectangle(b, ClientRectangle);
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             SetText.DrawText(g, Text, Font, ClientRectangle, ForeColor, BackColor,
                 TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
         }
@@ -431,27 +431,61 @@ namespace MacDock
 
     // ---------- controls ----------
 
+    // macOS-style switch: green when on, white knob, grey when off, knob slides.
     sealed class SetToggle : Control
     {
         bool on;
+        float pos;            // 0 = off, 1 = on (animated)
+        Timer anim;
         public event EventHandler Changed;
+        public static readonly Color Green = Color.FromArgb(52, 199, 89);
 
         public SetToggle()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
             BackColor = Color.Transparent;
-            Size = new Size(38, 22);
+            Size = new Size(40, 24);
             Cursor = Cursors.Hand;
         }
 
-        public bool On { get { return on; } set { if (on == value) return; on = value; Invalidate(); } }
+        public bool On
+        {
+            get { return on; }
+            set { if (on == value) return; on = value; Animate(); }
+        }
+
+        void Animate()
+        {
+            if (!IsHandleCreated || !Visible) { pos = on ? 1f : 0f; Invalidate(); return; }
+            if (anim == null)
+            {
+                anim = new Timer { Interval = 15 };
+                anim.Tick += (s, e) =>
+                {
+                    float target = on ? 1f : 0f;
+                    pos += (target - pos) * 0.35f;
+                    if (Math.Abs(target - pos) < 0.02f) { pos = target; anim.Stop(); }
+                    Invalidate();
+                };
+            }
+            anim.Start();
+        }
+
+        protected override void Dispose(bool disposing) { if (disposing && anim != null) { anim.Dispose(); anim = null; } base.Dispose(disposing); }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); pos = on ? 1f : 0f; }
 
         protected override void OnClick(EventArgs e)
         {
             base.OnClick(e);
             on = !on;
-            Invalidate();
+            Animate();
             if (Changed != null) Changed(this, EventArgs.Empty);
+        }
+
+        static Color Mix(Color a, Color b, float t)
+        {
+            return Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -459,13 +493,16 @@ namespace MacDock
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             var track = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+            Color tc = Mix(SetUi.Track, Green, pos);
             using (var path = SetUi.Round(track, track.Height / 2))
-            using (var b = new SolidBrush(Color.FromArgb(Enabled ? 255 : 110, on ? SetUi.Accent : SetUi.Track)))
+            using (var b = new SolidBrush(Color.FromArgb(Enabled ? 255 : 110, tc)))
                 g.FillPath(b, path);
-            float k = Height - 6;
-            float x = on ? Width - k - 3 : 3;
+            float k = Height - 5;
+            float x = 2.5f + (Width - k - 5f) * pos;
+            using (var sh = new SolidBrush(Color.FromArgb(Enabled ? 40 : 15, 0, 0, 0)))
+                g.FillEllipse(sh, x, 3f, k, k);
             using (var b = new SolidBrush(Color.FromArgb(Enabled ? 255 : 170, 255, 255, 255)))
-                g.FillEllipse(b, x, 3, k, k);
+                g.FillEllipse(b, x, 2.5f, k, k);
         }
     }
 
@@ -1363,7 +1400,7 @@ namespace MacDock
 
     sealed class SettingsForm : Form, IMessageFilter
     {
-        const int W = 960, H = 680, SideW = 300, TopH = 60, Margin = 30, Grip = 6;
+        const int W = 960, H = 680, SideW = 300, TopH = 60, Margin = 30, Grip = 0;
 
         static SettingsForm instance;
 
@@ -1473,7 +1510,9 @@ namespace MacDock
         {
             Program.Mark = "SET apply-theme"; SetUi.Apply(SetUi.WantDark()); Program.Mark = "SET form-props";
             Text = "MacDock Settings";
-            FormBorderStyle = FormBorderStyle.None;
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true; MinimizeBox = true;
+            try { Icon = DockForm.LogoIcon(); ShowIcon = true; } catch { }
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
             TopMost = false; // behave like a normal window: goes behind other apps when they are clicked
@@ -1483,7 +1522,6 @@ namespace MacDock
             int h = Math.Min(H, Screen.PrimaryScreen.WorkingArea.Height - 40);
             ClientSize = new Size(W, h);
             MinimumSize = new Size(720, 480);
-            Region = new Region(SetUi.Round(new RectangleF(0, 0, W, h), 22));
 
             // Sidebar
             side.SetBounds(Grip, 100, SideW - Grip, h - 100 - Grip);
@@ -1656,16 +1694,6 @@ namespace MacDock
             using (var b = new SolidBrush(SetUi.Side)) g.FillRectangle(b, 0, 0, SideW, Height);
             using (var p = new Pen(SetUi.EdgeLine)) g.DrawLine(p, SideW, 0, SideW, Height);
 
-            Color[] dots = { Color.FromArgb(255, 95, 87), Color.FromArgb(254, 188, 46), Color.FromArgb(40, 200, 64) };
-            for (int i = 0; i < 3; i++)
-                using (var b = new SolidBrush(dots[i])) g.FillEllipse(b, 20 + i * 26, 20, 16, 16);
-            if (lightsHover)
-                using (var p = new Pen(Color.FromArgb(150, 0, 0, 0), 2.2f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                {
-                    g.DrawLine(p, 24.5f, 24.5f, 31.5f, 31.5f); g.DrawLine(p, 31.5f, 24.5f, 24.5f, 31.5f);
-                    g.DrawLine(p, 50.5f, 28f, 57.5f, 28f);
-                    g.DrawLine(p, 76.5f, 28f, 83.5f, 28f); g.DrawLine(p, 80f, 24.5f, 80f, 31.5f);
-                }
             using (var p = new Pen(SetUi.Dim, 1.6f)) { p.EndCap = LineCap.Round; g.DrawEllipse(p, 30, 66, 9, 9); g.DrawLine(p, 38, 74, 42, 78); } // magnifier in the search pill
 
             // back / forward pill
@@ -1683,25 +1711,10 @@ namespace MacDock
             SetText.DrawText(g, TitleOf(current == "tray" ? "tray" : side.Selected), Typography.Title(), new Rectangle(SideW + 90, 0, Math.Max(0, Width - SideW - 104), TopH), SetUi.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
 
-        bool lightsHover;
-        void SetLightsHover(bool v) { if (v != lightsHover) { lightsHover = v; Invalidate(new Rectangle(10, 10, 90, 36)); } }
-        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); SetLightsHover(e.X >= 14 && e.X < 92 && e.Y >= 14 && e.Y < 42); }
-        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); SetLightsHover(false); }
-
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
-            if (e.Y < 48 && e.X < 90)
-            {
-                int dot = (e.X - 20) / 26;
-                if (e.X >= 20 && (e.X - 20) % 26 <= 16)
-                {
-                    if (dot == 0) { Close(); return; }
-                    if (dot == 1) { WindowState = FormWindowState.Minimized; return; }
-                    if (dot == 2) { MaximizedBounds = Avail();WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; return; }
-                }
-            }
             if (e.X >= SideW + 14 && e.X < SideW + 72 && e.Y >= 17 && e.Y < 45)
             {
                 if (e.X < SideW + 43 && historyAt > 0) { historyAt--; GoTo(history[historyAt], false); }
@@ -1721,22 +1734,29 @@ namespace MacDock
             if (e.KeyCode == Keys.Escape) Close();
         }
 
-        protected override CreateParams CreateParams
-        {
-            // CS_DROPSHADOW, plus WS_THICKFRAME so the borderless window can be dragged by its edges.
-            get { var cp = base.CreateParams; cp.ClassStyle |= 0x20000; cp.Style = (cp.Style | 0x40000) & ~0xC00000; cp.ExStyle |= 0x02000000; /* WS_EX_COMPOSITED: no child flicker */ return cp; }
-        }
-
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
             ApplyBackdrop();
         }
 
+        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
+
         void ApplyBackdrop()
         {
             if (!IsHandleCreated) return;
             Blur.Disable(Handle); // opaque charcoal like System Settings
+            int dark = SetUi.WantDark() ? 1 : 0; // DWMWA_USE_IMMERSIVE_DARK_MODE: caption follows the theme
+            try
+            {
+                DwmSetWindowAttribute(Handle, 20, ref dark, sizeof(int));
+                int cap = SetUi.Content.R | (SetUi.Content.G << 8) | (SetUi.Content.B << 16); // COLORREF: caption + border blend with the page
+                int txt = SetUi.Text.R | (SetUi.Text.G << 8) | (SetUi.Text.B << 16);
+                DwmSetWindowAttribute(Handle, 35, ref cap, sizeof(int)); // DWMWA_CAPTION_COLOR
+                DwmSetWindowAttribute(Handle, 34, ref cap, sizeof(int)); // DWMWA_BORDER_COLOR
+                DwmSetWindowAttribute(Handle, 36, ref txt, sizeof(int)); // DWMWA_TEXT_COLOR
+            }
+            catch { }
         }
 
         // Switches the whole window between the dark (acrylic) and light (opaque) palettes and rebuilds the page.
@@ -1767,7 +1787,6 @@ namespace MacDock
         {
             base.OnResize(e);
             if (side == null || viewport == null || Width < 100) return;
-            Region = new Region(SetUi.Round(new RectangleF(0, 0, Width, Height), 22));
             side.SetBounds(Grip, 100, SideW - Grip, Height - 100 - Grip);
             viewport.SetBounds(SideW, TopH, Width - SideW - Grip, Height - TopH - Grip);
             Invalidate();
@@ -1792,9 +1811,6 @@ namespace MacDock
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == 0x0083&& m.WParam != IntPtr.Zero) { m.Result = IntPtr.Zero; return; } // WM_NCCALCSIZE: no frame
-            if (m.Msg == 0x0086) { m.Result = (IntPtr)1; return; } // WM_NCACTIVATE: skip the frame repaint that draws a title bar
-            if (m.Msg == 0x0085) { m.Result = IntPtr.Zero; return; } // WM_NCPAINT: never draw a caption/frame
             if (m.Msg == 0x0046 && WindowState == FormWindowState.Normal) // WM_WINDOWPOSCHANGING: stay above the dock
             {
                 var wp = (WINPOS)Marshal.PtrToStructure(m.LParam, typeof(WINPOS));
@@ -1825,16 +1841,6 @@ namespace MacDock
                 mm.ptMaxTrackSize = new Size(av.Width, av.Height);
                 Marshal.StructureToPtr(mm, m.LParam, false);
                 return;
-            }
-            if (m.Msg == 0x0084 && WindowState == FormWindowState.Normal) // WM_NCHITTEST
-            {
-                long lp = m.LParam.ToInt64();
-                Point p = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
-                bool l = p.X < Grip, r = p.X >= Width - Grip, t = p.Y < Grip, b = p.Y >= Height - Grip;
-                int hit = 0;
-                if (t && l) hit = 13; else if (t && r) hit = 14; else if (b && l) hit = 16; else if (b && r) hit = 17;
-                else if (l) hit = 10; else if (r) hit = 11; else if (t) hit = 12; else if (b) hit = 15;
-                if (hit != 0) { m.Result = (IntPtr)hit; return; }
             }
             base.WndProc(ref m);
         }
@@ -2095,6 +2101,19 @@ namespace MacDock
             s.Changed += changed;
             row.SetWidget(s);
             return card.Add(row);
+        }
+
+        // Click to step through a few presets; the value is stored in dock.txt.
+        void CycleRow(SetCard card, string label, string key, int[] opts, int def, string unit)
+        {
+            int cur;
+            if (!int.TryParse(SetCfg.Get(key), out cur)) cur = def;
+            Link(card, label, cur + unit, () =>
+            {
+                int i = Array.IndexOf(opts, cur);
+                SetCfg.Set(key, opts[(i + 1) % opts.Length].ToString(), false);
+                BuildPage(current);
+            });
         }
 
         bool sysReady, sysBusy; int sBr = -1; bool? sNight, sWifi, sBt; float sVol = -1; bool sMuted;
@@ -2728,9 +2747,20 @@ namespace MacDock
                     Head("Dynamic Island & notifications");
                     c = NewCard();
                     Toggle(c, "Show Dynamic Island", SetCfg.GetBool("island", true), v => { SetCfg.SetBool("island", v); IslandForm.SetEnabled(v); });
+                    Toggle(c, "Volume pop-up", SetCfg.GetBool("island-volume", true), v => SetCfg.SetBool("island-volume", v));
+                    Toggle(c, "Brightness pop-up", SetCfg.GetBool("island-brightness", true), v => SetCfg.SetBool("island-brightness", v));
+                    Toggle(c, "Mic and camera in-use dots", SetCfg.GetBool("island-privacy", true), v => SetCfg.SetBool("island-privacy", v));
+                    Toggle(c, "Caps Lock and Num Lock alerts", SetCfg.GetBool("island-locks", true), v => SetCfg.SetBool("island-locks", v));
+                    Toggle(c, "Water reminders", SetCfg.GetBool("island-water", true), v => SetCfg.SetBool("island-water", v));
+                    Toggle(c, "Stand-up reminders", SetCfg.GetBool("island-stand", true), v => SetCfg.SetBool("island-stand", v));
+                    CycleRow(c, "Focus length", "island-pomo-focus", new[] { 15, 25, 30, 45, 50, 60 }, 25, " min");
+                    CycleRow(c, "Break length", "island-pomo-break", new[] { 5, 10, 15 }, 5, " min");
+                    CycleRow(c, "Daily water goal", "island-water-goal", new[] { 4, 6, 8, 10, 12 }, 8, " glasses");
+                    CycleRow(c, "Water reminder every", "island-water-every", new[] { 30, 45, 60, 90, 120 }, 60, " min");
+                    CycleRow(c, "Stand-up reminder every", "island-stand-every", new[] { 30, 45, 60, 90 }, 45, " min");
                     Link(c, "Windows notification settings", null, () => SetUi.OpenTarget("ms-settings:notifications"));
                     Link(c, "Focus settings", null, () => SetUi.OpenTarget("ms-settings:quiethours"));
-                    Note("The island shows notifications, media and power events, and follows your Windows notification and Focus settings.");
+                    Note("The island shows notifications, media and power events, and follows your Windows notification and Focus settings. Hover it and open the Focus tab for the Pomodoro timer and water and stand-up trackers; click a row's value to step through presets.");
 
                     Head("Keyboard shortcuts");
                     c = NewCard();

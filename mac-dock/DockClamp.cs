@@ -71,6 +71,7 @@ namespace MacDock
                 if (GetAncestor(h, 2) != h || !IsWindowVisible(h) || IsIconic(h) || IsZoomed(h)) return;
                 int ex = GetWindowLong(h, -20), st = GetWindowLong(h, -16);
                 if ((ex & 0x80) != 0 && (ex & 0x40000) == 0) return;
+                if ((ex & 0x8) != 0) return; // topmost popups/toasts
                 if ((st & 0x00C00000) == 0 && (st & 0x00040000) == 0) return;
                 Win32.RECT w, vis;
                 if (!GetWindowRect(h, out w)) return;
@@ -101,6 +102,7 @@ namespace MacDock
                 if ((st & 0x00C00000) == 0 && (st & 0x00040000) == 0) return true; // no caption and no sizing frame: fullscreen/borderless, leave it
                 int cloaked; DwmGetWindowAttribute(h, 14, out cloaked, 4);
                 if (cloaked != 0) return true;
+                if ((ex & 0x8) != 0 && !IsZoomed(h)) return true; // topmost popups/toasts (Drive notifications etc.): never move or resize
                 uint pid; GetWindowThreadProcessId(h, out pid);
                 if (pid == self) return true;
                 var cls = new StringBuilder(64); GetClassName(h, cls, 64);
@@ -145,6 +147,7 @@ namespace MacDock
                     int workTop = Screen.FromRectangle(mon).WorkingArea.Top;
                     int up = Math.Min(over, Math.Max(0, vis.Top - workTop));
                     int rest = over - up;
+                    if (rest > 0 && (w.Bottom - w.Top) < mon.Height * 2 / 3) rest = 0; // small windows/popups: slide only, never shrink (clipped bottom)
                     SetWindowPos(h, IntPtr.Zero, w.Left, w.Top - up, w.Right - w.Left, (w.Bottom - w.Top) - rest, 0x0004 | 0x0010);
                     tries.Remove(h);
                     continue;

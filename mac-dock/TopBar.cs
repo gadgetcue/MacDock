@@ -655,7 +655,7 @@ namespace MacDock
             float x = 10;
             for (int i = 0; i < names.Length; i++)
             {
-                float w = i == LogoMenu ? 18 : g.MeasureString(names[i], i == AppMenu ? bold : regular, 1000, StringFormat.GenericTypographic).Width + 18;
+                float w = i == LogoMenu ? 18 : (float)Math.Round(g.MeasureString(names[i], i == AppMenu ? bold : regular, 1000, StringFormat.GenericTypographic).Width + 18);
                 titleRects[i] = new RectangleF(x, 3, w, BarHeight - 7);
 
                 if (i == hoverTitle || i == openMenu)

@@ -11,9 +11,9 @@ using System.Windows.Forms;
 
 namespace MacDock
 {
-    sealed class IslandForm : Form
+    sealed partial class IslandForm : Form
     {
-        enum Mode { Idle, Notif, Power, Panel, Copy }
+        enum Mode { Idle, Notif, Power, Panel, Copy, Toast }
 
         sealed class Hit
         {
@@ -29,7 +29,7 @@ namespace MacDock
         static float Ds = Math.Max(1f, Dpi.Of(Screen.PrimaryScreen));
         static int HeaderH { get { return (int)(56 * Ds); } }
         static int MediaH { get { return (int)(46 * Ds); } }
-        static int RowH { get { return (int)(30 * Ds); } }
+        static int RowH { get { return (int)(44 * Ds); } }
         static int FooterH { get { return (int)(30 * Ds) + 6; } }
         static int TabH { get { return (int)(32 * Ds); } }
         static int ClipRowH { get { return (int)(34 * Ds) + 6; } }
@@ -79,7 +79,7 @@ namespace MacDock
         string copyText;
         // Clipboard history (text), newest first; shown on the panel's Clipboard tab. Click an item to copy it back.
         readonly List<string> clipHistory = new List<string>();
-        bool clipTab;
+        bool clipTab, focusTab;
 
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool AddClipboardFormatListener(IntPtr hwnd);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
@@ -328,6 +328,7 @@ namespace MacDock
             if (frame % 20 == 0) Reposition();
             if (mode != lastRaiseMode || (DateTime.Now - lastRaise).TotalMilliseconds > 40) { lastRaiseMode = mode; Raise(); }
             CheckPower();
+            CheckExtras();
 
             NativeMethods.POINT p;
             NativeMethods.GetCursorPos(out p);
@@ -346,6 +347,7 @@ namespace MacDock
                 case Mode.Notif:
                 case Mode.Power:
                 case Mode.Copy:
+                case Mode.Toast:
                     if (now > until && !hover) mode = Mode.Idle;
                     break;
                 case Mode.Idle:
@@ -365,6 +367,7 @@ namespace MacDock
                 case Mode.Notif: targetW = 440; targetH = 80; break;
                 case Mode.Power: targetW = 280; targetH = 48; break;
                 case Mode.Copy: targetW = 340; targetH = 48; break;
+                case Mode.Toast: targetW = 320; targetH = 48; break;
                 default:
                     targetW = 420; targetH = PanelHeight();
                     break;
@@ -393,7 +396,7 @@ namespace MacDock
             // Only repaint when something changes: while moving, for the equalizer, or while content is live.
             bool equalizer = mode == Mode.Idle && media && Feed.Media.Playing;
             bool live = mode != Mode.Idle;
-            if (!settled || equalizer || frame < 3 || (live && frame % 8 == 0)) Redraw();
+            if (!settled || equalizer || frame < 3 || (live && frame % 8 == 0) || (PomoActive && frame % 25 == 0) || (PrivacyActive && frame % 6 == 0)) Redraw();
             if (!settled)
             {
                 if (!animating) Wake(); // hover/notification started motion from the slow timer: hand over to vsync
@@ -445,6 +448,7 @@ namespace MacDock
         int PanelHeight()
         {
             int h = HeaderH + TabH;
+            if (focusTab) return h + 3 * FocusRowH + 10;
             if (clipTab)
             {
                 int cr = Math.Min(ClipMax, clipHistory.Count);
@@ -477,7 +481,7 @@ namespace MacDock
 
                 var pill = new RectangleF((CanvasW - (float)curW) / 2f, TopY + IdleYOff(), (float)curW, (float)curH);
                 if (mode == Mode.Idle && curW < IdleW + 1.5 && curH < IdleH + 1.5) pill = new RectangleF((CanvasW - IdleW) / 2, TopY + IdleYOff(), IdleW, IdleH); // exact pixel-aligned circle
-                float radius = Math.Min(pill.Height / 2f, mode == Mode.Idle || mode == Mode.Power || mode == Mode.Copy ? 20f : 28f);
+                float radius = Math.Min(pill.Height / 2f, mode == Mode.Idle || mode == Mode.Power || mode == Mode.Copy || mode == Mode.Toast ? 20f : 28f);
 
                 using (GraphicsPath path = Layered.RoundedRect(pill, radius))
                 {
@@ -539,7 +543,9 @@ namespace MacDock
                 switch (mode)
                 {
                     case Mode.Idle:
-                        if (Feed.Media != null) DrawEqualizer(g, pill, wb, left);
+                        if (PrivacyActive) DrawPrivacy(g, pill);
+                        else if (Feed.Media != null) DrawEqualizer(g, pill, wb, left);
+                        if (PomoActive) DrawPomoRing(g, pill);
                         break;
                     case Mode.Notif:
                         if (current != null) DrawNotification(g, pill, current, wb, gb, left, 0, alpha, true);
@@ -549,6 +555,9 @@ namespace MacDock
                         break;
                     case Mode.Copy:
                         DrawCopy(g, pill, wb, gb, alpha);
+                        break;
+                    case Mode.Toast:
+                        DrawToast(g, pill, wb, gb, alpha);
                         break;
                     default:
                         DrawPanel(g, pill, wb, gb, left, right, alpha);
@@ -663,11 +672,29 @@ namespace MacDock
             try
             {
                 if (IconPack.Enabled) bmp = IconPack.ForName(n.App);
-                if (bmp == null && !string.IsNullOrEmpty(n.AppId)) bmp = ShellIcons.Load(ShellIcons.AppsFolderPrefix + n.AppId, 64);
+                string id = n.AppId;
+                if ((bmp == null || ShellIcons.IsBlank(bmp)) && !string.IsNullOrEmpty(id))
+                {
+                    bool isPath = id.IndexOf(':') == 1 || id.StartsWith("\\\\") || id.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
+                    bmp = isPath ? ShellIcons.Load(id, 64) : ShellIcons.Load(ShellIcons.AppsFolderPrefix + id, 64);
+                    if (ShellIcons.IsBlank(bmp) && !isPath) bmp = ShellIcons.Load(id, 64);
+                }
+                if (bmp != null && ShellIcons.IsBlank(bmp)) bmp = null;
+                if (bmp == null) bmp = ShellIcons.Generic(n.App, 64);
             }
-            catch { bmp = null; }
+            catch { try { bmp = ShellIcons.Generic(n.App, 64); } catch { bmp = null; } }
             iconCache[key] = bmp;
             return bmp;
+        }
+
+        // MacDock's own icon (from the exe), cached; used for MacDock's own island alerts.
+        Bitmap appIconBmp; bool appIconTried;
+        Bitmap AppIconBmp()
+        {
+            if (appIconTried) return appIconBmp;
+            appIconTried = true;
+            try { using (var ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath)) appIconBmp = new Bitmap(ic.ToBitmap(), 64, 64); } catch { appIconBmp = null; }
+            return appIconBmp;
         }
 
         static Color AppColor(string app)
@@ -785,6 +812,7 @@ namespace MacDock
 
             DrawTabs(g, pill, y, white, gray, alpha);
             y += TabH;
+            if (focusTab) { DrawFocus(g, pill, y, white, gray, alpha); return; }
             if (clipTab) { DrawClipboard(g, pill, y, white, gray, alpha); return; }
 
             if (Feed.Media != null) { DrawMediaPeek(g, pill, y, white, gray, left, alpha); y += MediaH; }
@@ -833,26 +861,38 @@ namespace MacDock
         // One plain line: title on the left, time on the right.
         void DrawPlainRow(Graphics g, RectangleF pill, NotificationInfo n, Brush white, Brush gray, StringFormat left, StringFormat right, float ry)
         {
-            float top = pill.Top + ry, h = RowH;
-            DrawRich(g, n.Title, bodyFont, white, new RectangleF(pill.Left + 22, top, pill.Width - 44 - 70 * Ds, h), left);
+            // App icon, then the title with "App: preview" under it, and the time on the right.
+            float top = pill.Top + ry, h = RowH, d = 30 * Ds, ix = pill.Left + 18, iy = top + (h - d) / 2f;
+            Bitmap icon = IconFor(n);
+            if (icon != null) g.DrawImage(icon, new RectangleF(ix, iy, d, d));
+            else
+            {
+                using (var badge = new SolidBrush(AppColor(n.App))) g.FillEllipse(badge, ix, iy, d, d);
+                var c = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                g.DrawString(string.IsNullOrEmpty(n.App) ? "!" : n.App.Substring(0, 1).ToUpperInvariant(), boldFont, white, new RectangleF(ix, iy, d, d + 1), c);
+            }
+            float tx = ix + d + 10, tw = pill.Right - 22 - 70 * Ds - tx;
+            string sub = string.IsNullOrEmpty(n.Body) ? n.App : n.App + ": " + n.Body;
+            DrawRich(g, n.Title, bodyFont, white, new RectangleF(tx, top + 3 * Ds, tw, h / 2f - 2), left);
+            DrawRich(g, sub, nameFont, gray, new RectangleF(tx, top + h / 2f, tw, h / 2f - 2), left);
             g.DrawString(n.Time.ToString("h:mm tt"), nameFont, gray, new RectangleF(pill.Right - 22 - 70 * Ds, top, 70 * Ds, h), right);
         }
         // Segmented switch: Notifications | Clipboard.
         void DrawTabs(Graphics g, RectangleF pill, float y, Brush white, Brush gray, int alpha)
         {
-            float w = 112 * Ds, h = 24 * Ds, x0 = pill.Left + pill.Width / 2 - w, ty = pill.Top + y + 2;
+            float w = 100 * Ds, h = 24 * Ds, x0 = pill.Left + pill.Width / 2 - 1.5f * w, ty = pill.Top + y + 2;
             var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-            for (int i = 0; i < 2; i++)
+            for (int i = 0; i < 3; i++)
             {
-                bool on = (i == 1) == clipTab;
+                bool on = i == 0 ? (!clipTab && !focusTab) : (i == 1 ? clipTab : focusTab);
                 var r = new Rectangle((int)(x0 + i * w), (int)ty, (int)w, (int)h);
-                bool toClip = i == 1;
-                hits.Add(new Hit { Rect = r, Click = () => { clipTab = toClip; } });
+                int ti = i;
+                hits.Add(new Hit { Rect = r, Click = () => { clipTab = ti == 1; focusTab = ti == 2; } });
                 if (on)
                     using (var path = Layered.RoundedRect(r, 12))
                     using (var fb = new SolidBrush(A(Color.FromArgb(56, 255, 255, 255), alpha)))
                         g.FillPath(fb, path);
-                g.DrawString(i == 0 ? "Notifications" : "Clipboard", nameFont, on ? white : gray, r, center);
+                g.DrawString(i == 0 ? "Notifications" : (i == 1 ? "Clipboard" : "Focus"), nameFont, on ? white : gray, r, center);
             }
         }
 
@@ -1081,6 +1121,10 @@ namespace MacDock
             {
                 case Mode.Notif:
                     if (current != null && ActivateOwner(current)) Feed.Remove(current);
+                    mode = Mode.Idle;
+                    break;
+                case Mode.Toast:
+                    { Action tc = toastClick; toastClick = null; if (tc != null) tc(); }
                     mode = Mode.Idle;
                     break;
                 case Mode.Idle:

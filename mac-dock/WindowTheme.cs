@@ -116,12 +116,21 @@ namespace MacDock
         {
             if (installed) return;
             ReadConfig();
+            Diag("Install enabled=" + enabled);
             if (!enabled) return;
             installed = true;
             proc = OnEvent;
             hookSystem = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, IntPtr.Zero, proc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
             hookObject = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_UNCLOAKED, IntPtr.Zero, proc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+            Diag("hooks " + hookSystem + " " + hookObject);
             EnumWindows((h, p) => { Update(h); return true; }, IntPtr.Zero);
+            Diag("initial overlays=" + overlays.Count);
+        }
+
+        static string lastDiag = "";
+        public static void Diag(string s)
+        {
+            try { if (s == lastDiag) return; lastDiag = s; File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MacDock", "dock.log"), DateTime.Now + " TL: " + s + "\r\n"); } catch { }
         }
 
         public static void Uninstall()
@@ -146,7 +155,7 @@ namespace MacDock
 
         static void ReadConfig()
         {
-            enabled = true;
+            enabled = false; // native caption buttons are used; overlay permanently off
             excluded.Clear();
             try
             {
@@ -156,7 +165,7 @@ namespace MacDock
                     string l = raw.Trim();
                     if (!l.ToLowerInvariant().StartsWith("@windowtheme")) continue;
                     string rest = l.Substring("@windowtheme".Length).Trim().TrimStart('=').Trim();
-                    if (rest.Equals("off", StringComparison.OrdinalIgnoreCase)) enabled = false;
+                    if (rest.Equals("off", StringComparison.OrdinalIgnoreCase)) { } // legacy kill switch ignored: the Settings toggle (traffic-lights) decides
                     else if (rest.ToLowerInvariant().StartsWith("exclude ")) excluded.Add(rest.Substring(8).Trim());
                 }
             }
@@ -217,12 +226,13 @@ namespace MacDock
         {
             if (!installed) return;
             CaptionKind kind = Classify(hwnd);
+            if (hwnd == GetForegroundWindow()) Diag("fg " + ClassOf(hwnd) + " kind=" + kind);
             if (kind == CaptionKind.None) { Remove(hwnd); return; }
             Style(hwnd);
             if (kind != CaptionKind.Standard) { Remove(hwnd); return; }
 
             CaptionInfo info;
-            if (!Measure(hwnd, out info)) { Remove(hwnd); return; }
+            if (!Measure(hwnd, out info)) { Diag("measure failed " + ClassOf(hwnd)); Remove(hwnd); return; }
             CaptionOverlay ov;
             if (!overlays.TryGetValue(hwnd, out ov))
             {

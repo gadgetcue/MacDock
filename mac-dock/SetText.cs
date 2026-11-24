@@ -26,7 +26,7 @@ namespace MacDock
         {
             if (string.IsNullOrEmpty(text)) return;
             var old = g.TextRenderingHint;
-            g.TextRenderingHint = TextRenderingHint.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             using (var sf = Fmt(f)) using (var b = new SolidBrush(c)) g.DrawString(text, font, b, r, sf);
             g.TextRenderingHint = old;
         }

@@ -411,7 +411,7 @@ namespace MacDock
                         cache[key] = cached;
                     }
                 }
-                return cached == null ? null : new Bitmap(cached);
+                return cached == null ? null : CopyLocked(cached);
             }
 
             // Fallback for missing icons: check if any .icns in dark-icons or icons matches the app name
@@ -429,7 +429,7 @@ namespace MacDock
                         cache[key] = cached;
                     }
                 }
-                if (cached != null) return new Bitmap(cached);
+                if (cached != null) return CopyLocked(cached);
             }
 
             return null;
@@ -453,6 +453,9 @@ namespace MacDock
             using (var img = new Bitmap(ms)) return new Bitmap(img);
         }
 
+        // Copies a shared cached bitmap; GDI+ throws "Object is currently in use elsewhere" when two threads touch one bitmap.
+        static Bitmap CopyLocked(Bitmap b) { lock (b) return new Bitmap(b); }
+
         static Bitmap LoadFile(string key, string path)
         {
             Bitmap cached;
@@ -464,7 +467,7 @@ namespace MacDock
                     cache[key] = cached; // null is remembered too, so a missing file isn't retried
                 }
             }
-            return cached == null ? null : new Bitmap(cached);
+            return cached == null ? null : CopyLocked(cached);
         }
 
         // The rectangle that actually holds artwork (pixels that are mostly opaque), ignoring transparent padding and soft shadows.

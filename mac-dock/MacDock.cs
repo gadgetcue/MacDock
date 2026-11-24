@@ -171,7 +171,7 @@ namespace MacDock
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Log("UNHANDLED (terminating=" + e.IsTerminating + ") " + e.ExceptionObject);
                 System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) => Log("UNOBSERVED " + e.Exception);
                 Microsoft.Win32.SystemEvents.SessionEnding += (s, e) => Log("SessionEnding reason=" + e.Reason);
-Program.T("main-enter"); Theme.Refresh(); Program.T("theme");
+System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { var sw = Stopwatch.StartNew(); var df = Control.DefaultFont; Log("DefaultFont warmed in " + sw.ElapsedMilliseconds + " ms"); } catch (Exception ex) { Log(ex); } }); Program.T("main-enter"); Theme.Refresh(); Program.T("theme");
                 Motion.Refresh();
 SetUi.EnsureAutostart(); Program.T("autostart"); // rewritten every launch unless the user turned it off in Settings
 Typography.Configure(AppPaths.Config); Program.T("typo");
@@ -262,7 +262,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                     StartStallWatch(dock);
                     // WinForms' Control.DefaultFont looks "Microsoft Sans Serif" up by name: ~5 s on this PC's ~3,600 fonts. The first
                     // TextBox (Settings search) would pay that on the UI thread and freeze the bar, so resolve it once in the background.
-                    System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { var sw = Stopwatch.StartNew(); var df = Control.DefaultFont; Log("DefaultFont warmed in " + sw.ElapsedMilliseconds + " ms"); } catch (Exception ex) { Log(ex); } });
+                    // (DefaultFont warm-up now starts at main-enter so it overlaps startup work, esp. cold after wake/boot)
                     // Memory diet: every 45 s compact the heap and hand unused pages back to Windows (they fault back in on demand).
                     var trim = new Timer { Interval = 45000 };
                     trim.Tick += (s, e) =>
@@ -313,7 +313,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
             int uiId = (int)GetCurrentThreadId(); Dictionary<int, double> cpu0 = null;
             var t = new System.Threading.Thread(() =>
             {
-                long lastPong = Environment.TickCount; bool logged = false; long stallStart = 0;
+                long lastPong = Environment.TickCount, lastLoop = Environment.TickCount; bool logged = false; long stallStart = 0;
                 var seen = new Dictionary<string, int>(); // breadcrumbs sampled every 500 ms while the UI thread is stuck
                 while (true)
                 {
@@ -322,6 +322,9 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                     {
                         if (ui.IsDisposed) return;
                         long sent = Environment.TickCount;
+                        // Sleep/hibernate pauses this thread too, so a loop gap >5 s means the PC was suspended: that is not a UI hang. Reset instead of killing the dock on wake.
+                        if (sent - lastLoop > 5000) { if (logged) { logged = false; seen.Clear(); } lastPong = sent; Log("StallWatch: system resume gap " + (sent - lastLoop) + " ms, ignored"); }
+                        lastLoop = sent;
                         long pong = lastPong;
                         if (sent - pong > 1200)
                         {
@@ -565,6 +568,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         public string Label;    // optional custom name
         public string Target;
         public string Raw;      // the original line, used to remove it again
+        public bool SepBefore;  // a user separator (=== line in dock.txt) sits just before this entry
     }
 
     sealed class Item
@@ -1061,7 +1065,6 @@ Theme.Refresh();
             UpdateReservation();
             Redraw();
             BeginInvoke(new Action(Genie.Warm)); // build the genie overlay now, so the first minimize isn't slow
-            // WindowTheme (traffic-light overlay) disabled: it blocked moving/maximizing windows.
         }
 
         // ---------- drawing ----------
@@ -1583,7 +1586,7 @@ Theme.Refresh();
             Item moved = items[from];
             items.RemoveAt(from);
             items.Insert(to, moved);
-            for (int i = 0; i < items.Count; i++) items[i].SepBefore = i > 0 && items[i - 1].Section != items[i].Section;
+            for (int i = 0; i < items.Count; i++) items[i].SepBefore = i > 0 && (items[i - 1].Section != items[i].Section || (items[i].Entry != null && items[i].Entry.SepBefore));
             LayoutItems();
 
             // Neighbours keep their on-screen position for a moment and then glide into their new slot.
@@ -1812,7 +1815,7 @@ Theme.Refresh();
             for (int i = 0; i < list.Count; i++)
             {
                 Item it = list[i];
-                it.SepBefore = i > 0 && list[i - 1].Section != it.Section;
+                it.SepBefore = i > 0 && (list[i - 1].Section != it.Section || (it.Entry != null && it.Entry.SepBefore));
 
                 Item old;
                 if (previous.TryGetValue(it.Key, out old))
@@ -2263,12 +2266,14 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             entries = new List<Entry>();
             hideTaskbar = true;
             int section = 0;
+            bool pendingSep = false;
 
             foreach (string raw in File.ReadAllLines(configPath))
             {
                 string line = raw.Trim();
                 if (line.Length == 0 || line.StartsWith("#")) continue;
-                if (line == "---") { section = 2; continue; }
+                if (line == "---") { section = 2; pendingSep = false; continue; }
+                if (line == "===") { pendingSep = true; continue; } // user divider before the next item
 
                 if (line.StartsWith("@"))
                 {
@@ -2286,7 +2291,8 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                     target = line.Substring(bar + 1).Trim();
                 }
                 target = Environment.ExpandEnvironmentVariables(target.Trim('"'));
-                entries.Add(new Entry { Section = section, Label = label, Target = target, Raw = raw });
+                entries.Add(new Entry { Section = section, Label = label, Target = target, Raw = raw, SepBefore = pendingSep });
+                pendingSep = false;
             }
         }
 
@@ -2319,6 +2325,42 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 {
                     if (sep < 0) lines.Add("---");
                     lines.Add(line);
+                }
+                File.WriteAllLines(configPath, lines);
+            }
+            catch { }
+            LoadConfig();
+            RebuildItems();
+        }
+
+        // User separators are "===" lines in dock.txt; they stay put when icons are reordered and survive restarts and updates.
+        void AddSeparatorAfter(Entry e)
+        {
+            try
+            {
+                List<string> lines = File.ReadAllLines(configPath).ToList();
+                int i = lines.FindIndex(l => l == e.Raw);
+                if (i < 0) return;
+                if (i + 1 < lines.Count && lines[i + 1].Trim() == "===") return;
+                lines.Insert(i + 1, "===");
+                File.WriteAllLines(configPath, lines);
+            }
+            catch { }
+            LoadConfig();
+            RebuildItems();
+        }
+
+        void RemoveSeparatorBefore(Entry e)
+        {
+            try
+            {
+                List<string> lines = File.ReadAllLines(configPath).ToList();
+                int i = lines.FindIndex(l => l == e.Raw);
+                for (i--; i >= 0; i--)
+                {
+                    string t = lines[i].Trim();
+                    if (t == "===") { lines.RemoveAt(i); break; }
+                    if (t.Length > 0 && !t.StartsWith("#")) break;
                 }
                 File.WriteAllLines(configPath, lines);
             }
@@ -2502,6 +2544,10 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 {
                     Entry entry = it.Entry;
                     list.Add(MenuEntry.Item("Remove from Dock", null, () => RemovePin(entry.Raw)));
+                    list.Add(MenuEntry.Item("Add Separator After", null, () => AddSeparatorAfter(entry)));
+                    int ix = items.IndexOf(it);
+                    Entry sepFor = entry.SepBefore ? entry : (ix >= 0 && ix + 1 < items.Count && items[ix + 1].Entry != null && items[ix + 1].Entry.SepBefore ? items[ix + 1].Entry : null);
+                    if (sepFor != null) list.Add(MenuEntry.Item("Remove Separator", null, () => RemoveSeparatorBefore(sepFor)));
                 }
                 else if (it.Entry == null && it.Kind == Kind.App)
                 {
@@ -3371,10 +3417,14 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
 
             NativeMethods.EnumWindows((hWnd, lParam) =>
             {
-                if (!NativeMethods.IsWindowVisible(hWnd) || NativeMethods.GetWindowTextLength(hWnd) == 0) return true;
+                if (!NativeMethods.IsWindowVisible(hWnd)) return true;
 
                 int ex = NativeMethods.GetWindowLong(hWnd, GWL_EXSTYLE);
-                if ((ex & WS_EX_TOOLWINDOW) != 0 && (ex & WS_EX_APPWINDOW) == 0) return true;
+                int sty = NativeMethods.GetWindowLong(hWnd, -16); // GWL_STYLE
+                bool appWin = (ex & WS_EX_APPWINDOW) != 0, captioned = (sty & 0xC00000) == 0xC00000;
+                if ((ex & WS_EX_TOOLWINDOW) != 0 && !appWin) return true;
+                // Untitled windows still count when they look like a real app window (captioned or asking for a taskbar button).
+                if (NativeMethods.GetWindowTextLength(hWnd) == 0 && (!(appWin || captioned) || (ex & 0x08000000) != 0)) return true; // WS_EX_NOACTIVATE
 
                 int cloaked;
                 if (NativeMethods.DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, out cloaked, 4) == 0 && cloaked != 0) return true;
@@ -3382,6 +3432,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 className.Clear();
                 NativeMethods.GetClassName(hWnd, className, className.Capacity);
                 string cls = className.ToString();
+                if (cls == "ApplicationFrameWindow" && NativeMethods.GetWindowTextLength(hWnd) == 0) return true; // blank UWP shell frames
                 if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return true;
 
                 uint pid;
@@ -3395,7 +3446,12 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 }
 
                 // Owned windows (dialogs, pop-ups) are not taskbar buttons unless they ask for one, like the native taskbar.
-                if ((ex & WS_EX_APPWINDOW) == 0 && NativeMethods.GetWindow(hWnd, 4) != IntPtr.Zero) return true; // GW_OWNER
+                // Exception: a captioned window whose owner is hidden is the app's real main window (Delphi / Java / Qt style apps).
+                if (!appWin)
+                {
+                    IntPtr owner = NativeMethods.GetWindow(hWnd, 4); // GW_OWNER
+                    if (owner != IntPtr.Zero && (NativeMethods.IsWindowVisible(owner) || !captioned)) return true;
+                }
 
                 string exe;
                 if (cls == "ApplicationFrameWindow")

@@ -1,4 +1,4 @@
-// MacDock single-file installer: one exe, per-user (no admin), payload embedded as a zip resource.
+﻿// MacDock single-file installer: one exe, per-user (no admin), payload embedded as a zip resource.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -12,8 +12,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("MacDock Project")]
 [assembly: AssemblyProduct("MacDock")]
 [assembly: AssemblyCopyright("Copyright (c) MacDock contributors")]
-[assembly: AssemblyVersion("2.3.0.0")]
-[assembly: AssemblyFileVersion("2.3.0.0")]
+[assembly: AssemblyVersion("2.4.0.0")]
+[assembly: AssemblyFileVersion("2.4.0.0")]
 
 static class Setup
 {
@@ -31,6 +31,7 @@ static class Setup
             try { Process.Start(new ProcessStartInfo("schtasks", "/Delete /TN MacDockGuard /F") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(5000); } catch { }
             try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)) k.DeleteValue("MacDock", false); } catch { }
             try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\MacDock", false); } catch { }
+            try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\DirectX\UserGpuPreferences", true)) k.DeleteValue(ex, false); } catch { }
             try { File.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "MacDock.lnk")); } catch { }
             Process.Start(new ProcessStartInfo("cmd", "/c timeout /t 2 >nul & rmdir /s /q \"" + dest + "\"") { CreateNoWindow = true, UseShellExecute = false });
             return 0;
@@ -62,15 +63,23 @@ static class Setup
             // Settings > Apps > Installed apps entry (per-user)
             using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\MacDock"))
             {
-                k.SetValue("DisplayName", "MacDock"); k.SetValue("DisplayVersion", "2.3.0"); k.SetValue("Publisher", "MacDock Project");
+                k.SetValue("DisplayName", "MacDock"); k.SetValue("DisplayVersion", "2.4.0"); k.SetValue("Publisher", "MacDock Project");
                 k.SetValue("DisplayIcon", exe); k.SetValue("InstallLocation", dest);
                 k.SetValue("UninstallString", "\"" + Path.Combine(dest, "Setup.exe") + "\" /uninstall");
                 k.SetValue("NoModify", 1, RegistryValueKind.DWord); k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
             }
-            Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe) });
+            // Integrated GPU (power saving) for the dock, as Settings > System > Display > Graphics does.
+            try { using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\DirectX\UserGpuPreferences")) k.SetValue(exe, "GpuPreference=1;"); } catch { }
+            try { using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) k.SetValue("MacDock", "\"" + exe + "\""); } catch { }
+            // MacDockGuard: per-user task that restarts the dock within a minute if it is ever not running.
+            try { Process.Start(new ProcessStartInfo("schtasks", "/Create /F /SC MINUTE /MO 1 /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\"") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(15000); } catch { }
+            bool started = false;
+            try { Process.Start(new ProcessStartInfo("schtasks", "/Run /TN MacDockGuard") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(10000); started = true; } catch { }
+            if (!started) Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe) });
             if (!silent) MessageBox.Show("MacDock is installed and running. It starts at login (toggle in Settings).", "MacDock Setup");
             return 0;
         }
         catch (Exception ex) { MessageBox.Show("Install failed: " + ex.Message, "MacDock Setup", MessageBoxButtons.OK, MessageBoxIcon.Error); return 2; }
     }
 }
+

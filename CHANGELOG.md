@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.4
+### Added
+- **Focus tab in the Dynamic Island** (hover the island): a Pomodoro timer with a progress ring on the island, plus water and stand-up trackers. Focus length (15-60 min), break length, daily water goal, water interval and stand-up interval are click-to-step rows in Settings > Menu Bar & Island.
+- **Volume and Brightness pop-ups** on the island, **Caps Lock / Num Lock alerts**, and **mic and camera in-use dots**. Each has its own on/off switch in Settings.
+- **Notification layout**: the island now shows the app's icon, the title, and "App: preview" under it. MacDock's own alerts use its logo, and apps with no usable icon get a coloured letter badge.
+- **Dock separators**: right-click an icon > *Add Separator After* / *Remove Separator*. They are stored as `===` lines in `dock.txt`, so they stay in place when icons are reordered and survive restarts and updates.
+- **Settings window** is now a normal resizable window with Windows minimize/maximize/close buttons, the MacDock logo, and a title bar that follows the light or dark theme. Toggle switches animate and are green when on.
+- **Installer (`MacDock-Setup.exe`)** now also: sets the dock to use the integrated GPU (power saving), registers start at login, creates the `MacDockGuard` scheduled task (restarts the dock within a minute if it is not running), and starts the dock through that task. The uninstaller removes the GPU preference.
+- The installer bundles the fonts, the icon packs (light and dark) and the logo, so a fresh install has the same icons as the dev build.
+
+### Fixed
+- **Icon crash**: two threads copying the same cached icon bitmap could throw GDI+ "Object is currently in use elsewhere". Cached icons are now copied under a lock.
+- **Dock no longer resizes pop-ups**: always-on-top windows such as Drive notifications are left alone, and small windows are slid out from under the bar but never shrunk.
+- **No false hang restart after sleep**: the freeze watchdog ignores the gap when the PC was suspended instead of restarting the dock on wake.
+- **Window list**: untitled but real app windows (captioned, or asking for a taskbar button) are listed, a captioned window with a hidden owner counts as the app's main window, and blank UWP shell frames are skipped.
+- **Sharper menu bar and settings text** (grid-fitted anti-aliasing) and whole-pixel menu title widths.
+- Faster cold start after wake or boot: the default-font warm-up now begins as soon as the app starts.
+
+### Notes
+- An idle-timer experiment (slower idle tick) was tried and reverted; idle behaviour is the same as v2.3.
+- `mac-dock-rs/` (a Rust port, work in progress) is included as source only. It is not part of this release and the installer does not ship it. Not yet ported: LocalSend, folder Fan/Grid/List, macosicons.com lookup, welcome tour, window-title theming, PWA split.
+- The in-app updater only installs a newer exe version, so v2.3 users get this build through *Check for Updates* (the `MacDock-v2.4.zip` asset).
+
 ## v2.3
 ### Performance
 - **The menu bar no longer re-reads `dock.txt` on every tick.** It was reading and parsing the settings file about 100 times a second on the UI thread. Settings lookups are now remembered until the file changes. Measured on the dev PC with the dock idle: bar update cost fell from about 800 ms to about 130 ms of UI time per 10 s, and the whole dock's idle CPU fell from about 2.3 s to about 1.2 s per 20 s (roughly 45% less).

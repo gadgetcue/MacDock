@@ -310,8 +310,7 @@ namespace MacDock
         // Text is drawn with grayscale anti-aliasing and no grid fitting, which keeps letter spacing even.
         public static void Prepare(Graphics g)
         {
-            g.TextRenderingHint = TextRenderingHint.AntiAlias;
-        }
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;        }
 
         // Tight format: no extra padding, trimmed with an ellipsis, vertically centered.
         public static StringFormat Format(StringAlignment horizontal = StringAlignment.Near)
