@@ -1,26 +1,44 @@
-﻿# MacDock
+# MacDock
 
 A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds with the compiler that ships with Windows, so no SDK is needed.
 
-![Desktop with dock and menu bar](screenshots/v1.5/desktop.jpg)
+![MacDock on a MacBook Pro mockup](screenshots/v2.3/mockup-desktop.png)
 
-See the [changelog](CHANGELOG.md) for what's new in v2.3.
+By [@gadgetcue](https://github.com/gadgetcue) · [YouTube](https://www.youtube.com/@gadgetcue) · [Instagram](https://www.instagram.com/gadgetcue) · Telegram
+
+See the [changelog](CHANGELOG.md) for what's new in v2.4.
 
 ## Installation guide
 **Requirements:** Windows 11 (Windows 10 mostly works), x64, .NET Framework 4.x (already part of Windows). No admin rights and no SDK needed.
 
-1. Download `MacDock-v2.3.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v2.3.zip SHA256`.
-2. Extract the zip to any folder (right-click > Extract All).
-3. Double-click `Install.bat`. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
-4. MacDock is copied to `%LOCALAPPDATA%\MacDock`, a Start Menu shortcut is created, and the dock starts. It also starts at login (toggle in MacDock Settings).
+**Only one MacDock install is supported.** Installing again, or installing a newer version, replaces the existing one in `%LOCALAPPDATA%\MacDock`. Do not keep several copies or versions side by side. Install from File Explorer by double-clicking the installer; do not launch it from a sandboxed or packaged app's shell (such as a terminal inside another app), because per-user paths are redirected there and the install or restart can fail with a "path does not exist" popup.
+
+### Option A: single-file installer (easiest)
+1. Download `MacDock-Setup.exe` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest). Optionally check its SHA256 against the release notes: `certutil -hashfile MacDock-Setup.exe SHA256`.
+2. Double-click it and press **OK** on the prompt. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
+3. Setup stops any running MacDock, installs to `%LOCALAPPDATA%\MacDock`, adds a Start Menu shortcut and a *Settings > Apps > Installed apps* entry, sets the dock to use the integrated GPU, registers start at login and the `MacDockGuard` restart task, and starts the dock. It also starts at login (toggle in MacDock Settings).
+4. Silent install: `MacDock-Setup.exe /S`.
+
+### Option B: zip + `Install.bat`
+1. Download `MacDock-v2.4.zip` from the Releases page (check it with `certutil -hashfile MacDock-v2.4.zip SHA256`).
+2. Extract it to any folder (right-click > Extract All).
+3. Double-click `Install.bat`. It copies `bin`, `icons` and `dark-icons` to `%LOCALAPPDATA%\MacDock`, creates the Start Menu shortcut and starts the dock.
 
 If Defender blocks or quarantines it, see [Why does Windows Defender flag MacDock?](#why-does-windows-defender-flag-macdock).
 
-**Quitting:** quitting MacDock from its menu restores the Windows taskbar automatically. If MacDock is killed while the taskbar is hidden, run `MacDock.exe /restore`.
+### Updating
+Open the Apple menu and choose **Check for Updates...**. MacDock reads the latest GitHub release, downloads its `.zip`, and swaps in the new `MacDock.exe` (the old one is kept as `MacDock.exe.old`). It never downgrades, and your pins and settings are untouched. The dock then restarts itself. You can also just run the newer `MacDock-Setup.exe` over the existing install.
 
-**Start / restart:** open *MacDock* from the Start Menu, or run `%LOCALAPPDATA%\MacDock\bin\MacDock.exe`. To restart it, exit MacDock and start it again from the Start Menu. If the taskbar stays hidden after a crash, run `MacDock.exe /restore` (or `mac-dock\restore-taskbar.bat` from the repo).
+### Start, restart, quit
+- **Start / restart:** open *MacDock* from the Start Menu, or run `%LOCALAPPDATA%\MacDock\bin\MacDock.exe`.
+- **Quit:** quitting from the MacDock menu restores the Windows taskbar. Closing, or force-closing, other apps never quits MacDock.
+- **Taskbar stuck hidden** (MacDock was killed while it was hidden): run `MacDock.exe /restore` (or `mac-dock\restore-taskbar.bat` from the repo).
 
-**Uninstall:** run `Uninstall.bat` from the extracted folder (or `%LOCALAPPDATA%\MacDock\Uninstall.bat`). It restores the taskbar, stops MacDock, removes autostart, the optional guard task and the shortcut, and deletes the install folder. Pins and settings in `%APPDATA%\MacDock` are kept until you delete that folder.
+### Uninstall
+- **Installed with `MacDock-Setup.exe`:** *Settings > Apps > Installed apps > MacDock > Uninstall*, or run `%LOCALAPPDATA%\MacDock\Setup.exe /uninstall` (add `/S` to skip the prompt).
+- **Installed with `Install.bat`:** run `Uninstall.bat` from the extracted folder, or `%LOCALAPPDATA%\MacDock\Uninstall.bat`.
+
+Either way, the taskbar is restored, MacDock is stopped, autostart, the `MacDockGuard` task and the Start Menu shortcut are removed, and the install folder is deleted. Your pins and settings in `%APPDATA%\MacDock` are kept until you delete that folder.
 
 ## Why does Windows Defender flag MacDock?
 Short version: **it is a false positive**, but it is understandable why it happens.
@@ -58,34 +76,19 @@ You do not have to take our word for it:
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
 ## Screenshots (v2.3)
-![Menu bar status readouts](screenshots/v2.3/menubar-status-readouts.jpg)
+![Desktop with dock and menu bar](screenshots/v2.3/mockup-desktop.png)
 
-![Dock](screenshots/v2.3/dock.jpg)
+![Folder fan](screenshots/v2.3/mockup-folder-fan.png)
 
-![Settings: Menu Bar & Island](screenshots/v2.3/settings-menubar-and-island.jpg)
+![Settings: Dock](screenshots/v2.3/mockup-settings-dock.png)
 
-![Settings: Dock](screenshots/v2.3/settings-dock.jpg)
+![Settings: Menu Bar & Island](screenshots/v2.3/mockup-settings-menubar-and-island.png)
 
-![Welcome tour](screenshots/v2.3/welcome-tour-1.jpg)
+![Settings: Icons](screenshots/v2.3/mockup-settings-icons.png)
 
-### Earlier (v2.1)
-![Desktop with dock and menu bar](screenshots/v2.1/desktop.jpg)
+![Welcome tour](screenshots/v2.3/mockup-welcome-tour.png)
 
-![Dock magnification](screenshots/v2.1/dock-magnify.jpg)
-
-![Launchpad](screenshots/v2.1/launchpad.jpg)
-
-![Folder fan with menus on top](screenshots/v2.1/folder-fan.jpg)
-
-![Control Center](screenshots/v2.1/control-center.jpg)
-
-![Apple menu](screenshots/v2.1/apple-menu.jpg)
-
-![Icon master switch and custom icon packs](screenshots/v2.1/settings-icons.jpg)
-
-Screenshots were taken on dark mode only.
-
-![MacDock v2.1 mockup](instagram-v2.1/send/macdock-v2.1-light-1.png)
+Full-size 16:10 screenshots are in [`screenshots/v2.3`](screenshots/v2.3).
 
 ## Memory use
 Measured on the v1.5 build on Windows 11 (1920x1080) with the dock idle: **~7-43 MB working set** (about 24 MB average over a minute; Windows trims it), **~92-103 MB private bytes**, and a **peak working set of ~140 MB** since launch (start-up and opening Launchpad). Numbers vary with how many apps you pin and which icon packs you load.
@@ -109,4 +112,9 @@ An optional macosicons.com API key goes in `dock.txt` as `@macosicons-key = YOUR
 
 ## Credits
 Fonts: Inter (SIL Open Font License). Icons in `icons/` and `dark-icons/` belong to their respective authors.
+
+Made by **[@gadgetcue](https://github.com/gadgetcue)**. Follow for updates:
+- YouTube: <https://www.youtube.com/@gadgetcue>
+- Instagram: <https://www.instagram.com/gadgetcue>
+- Telegram: @gadgetcue
 
