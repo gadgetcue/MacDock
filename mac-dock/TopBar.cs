@@ -365,6 +365,7 @@ namespace MacDock
 
         public event Action BellClicked;
         public event Action SearchClicked;
+        public event Action PopupOpening; // a menu or status panel is about to open: the island closes
 
         public TopBar()
         {
@@ -405,20 +406,27 @@ namespace MacDock
             ClosePanel();
             CloseMenu();
             if (same) return;
+            if (PopupOpening != null) PopupOpening();
 
             RectangleF r = iconRects.ContainsKey(id) ? iconRects[id] : (id == "localsend" || id == "nightlight") && iconRects.ContainsKey("control") ? iconRects["control"] : new RectangleF(Width - 100, 0, 30, BarHeight);
             panelId = id;
-            panel = Panels.Create(id, new Point(Left + (int)(r.Left + r.Width / 2), Top + BarHeight), BarHeight, () =>
+            GlassPanel mine = null;
+            mine = Panels.Create(id, new Point(Left + (int)(r.Left + r.Width / 2), Top + BarHeight), BarHeight, () =>
             {
+                if (panel != mine) return; // an older panel finishing its fade must not forget the newer one
                 panel = null;
                 panelId = null;
             });
+            panel = mine;
             panel.Show();
         }
 
         void ClosePanel()
         {
-            if (panel != null) panel.BeginClose();
+            GlassPanel old = panel;
+            panel = null;
+            panelId = null;
+            if (old != null) old.BeginClose();
         }
 
         protected override CreateParams CreateParams
@@ -1175,6 +1183,10 @@ namespace MacDock
                     return;
                 }
             }
+
+            // Empty bar space counts as "elsewhere".
+            CloseMenu();
+            ClosePanel();
         }
 
         void CloseMenu()
@@ -1186,6 +1198,7 @@ namespace MacDock
         {
             CloseMenu();
             ClosePanel();
+            if (PopupOpening != null) PopupOpening();
             openMenu = index;
             Redraw();
 
@@ -1257,7 +1270,7 @@ namespace MacDock
                     string exe = targetExe;
                     m.Add(MenuEntry.Item("Show " + appName + " in Folder", null, !hasApp || exe == null ? null : (Action)(() => Process.Start("explorer.exe", "/select,\"" + exe + "\""))));
                     m.Add(MenuEntry.Sep());
-                    m.Add(MenuEntry.Item("Hide " + appName, "Win+Down", !hasApp ? null : (Action)(() => NativeMethods.ShowWindow(win, 6))));
+                    m.Add(MenuEntry.Item("Hide " + appName, "Win+Down", !hasApp ? null : (Action)(() => NativeMethods.ShowWindowAsync(win, 6))));
                     m.Add(MenuEntry.Item("Hide Others", null, !hasApp ? null : (Action)(() => HideOthers(exe))));
                     m.Add(MenuEntry.Item("Show All", null, ShowAll));
                     m.Add(MenuEntry.Sep());
@@ -1300,9 +1313,9 @@ namespace MacDock
                 case 5:
                     IntPtr w = target;
                     bool any = w != IntPtr.Zero;
-                    m.Add(MenuEntry.Item("Minimize", "Win+Down", !any ? null : (Action)(() => NativeMethods.ShowWindow(w, 6))));
+                    m.Add(MenuEntry.Item("Minimize", "Win+Down", !any ? null : (Action)(() => NativeMethods.ShowWindowAsync(w, 6))));
                     m.Add(MenuEntry.Item(any && Win32.IsZoomed(w) ? "Restore" : "Zoom", "Win+Up",
-                        !any ? null : (Action)(() => NativeMethods.ShowWindow(w, Win32.IsZoomed(w) ? 9 : 3))));
+                        !any ? null : (Action)(() => NativeMethods.ShowWindowAsync(w, Win32.IsZoomed(w) ? 9 : 3))));
                     m.Add(MenuEntry.Item("Close Window", "Alt+F4", !any ? null : (Action)(() => Win32.PostMessage(w, WinUtil.WM_CLOSE, IntPtr.Zero, IntPtr.Zero))));
                     m.Add(MenuEntry.Sep());
                     int listed = 0;
@@ -1339,7 +1352,7 @@ namespace MacDock
             foreach (KeyValuePair<string, List<IntPtr>> app in DockForm.EnumerateRunningWindows())
             {
                 if (string.Equals(app.Key, exe, StringComparison.OrdinalIgnoreCase)) continue;
-                foreach (IntPtr h in app.Value) NativeMethods.ShowWindow(h, 6);
+                foreach (IntPtr h in app.Value) NativeMethods.ShowWindowAsync(h, 6);
             }
         }
 
@@ -1347,7 +1360,7 @@ namespace MacDock
         {
             foreach (KeyValuePair<string, List<IntPtr>> app in DockForm.EnumerateRunningWindows())
                 foreach (IntPtr h in app.Value)
-                    if (NativeMethods.IsIconic(h)) NativeMethods.ShowWindow(h, 9);
+                    if (NativeMethods.IsIconic(h)) NativeMethods.ShowWindowAsync(h, 9);
         }
 
         // Asks every window of the app to close, like Cmd+Q.

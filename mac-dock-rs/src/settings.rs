@@ -50,11 +50,13 @@ pub struct SettingsWin {
     content_h: f32,
     content_range: (f32, f32),
     need: bool,
+    glass: Option<win::Glass>,
+    glass_tint: u32,
 }
 
 impl SettingsWin {
     pub fn new() -> SettingsWin {
-        SettingsWin { hwnd: HWND::default(), gfx: None, w: 0, h: 0, pos: (0, 0), page: 0, visible: false, hits: vec![], drag: None, hover: -1, need: true, scroll: 0.0, content_h: 0.0, content_range: (0.0, 0.0) }
+        SettingsWin { hwnd: HWND::default(), gfx: None, w: 0, h: 0, pos: (0, 0), page: 0, visible: false, hits: vec![], drag: None, hover: -1, need: true, scroll: 0.0, content_h: 0.0, content_range: (0.0, 0.0), glass: None, glass_tint: 0 }
     }
     pub fn show(&mut self, page: u32) {
         let a = app();
@@ -84,6 +86,7 @@ impl SettingsWin {
     }
     pub fn close(&mut self) {
         self.visible = false;
+        if let Some(g) = self.glass.as_mut() { g.hide(); }
         win::hide(self.hwnd);
     }
 
@@ -96,26 +99,29 @@ impl SettingsWin {
         let m = 28.0 * s;
         let (pw_, ph) = (self.w as f32 - 2.0 * m, self.h as f32 - 2.0 * m);
         g.shadow(m, m, pw_, ph, 16.0 * s, 26.0 * s, 200);
-        let bg = if dark { argb(255, 30, 30, 34) } else { argb(255, 242, 242, 246) };
-        let side = if dark { argb(255, 40, 40, 45) } else { argb(255, 230, 230, 236) };
+        let liquid = a.cfg.os("glass-style", "liquid") != "classic";
+        let (ba, sa, ca) = if liquid { if dark { (150u8, 105u8, 195u8) } else { (165, 120, 215) } } else { (255, 255, 255) };
+        let bg = if dark { argb(ba, 30, 30, 34) } else { argb(ba, 242, 242, 246) };
+        let side = if dark { argb(sa, 40, 40, 45) } else { argb(sa, 230, 230, 236) };
         let fg = if dark { argb(255, 240, 240, 244) } else { argb(255, 28, 28, 32) };
         let dim = if dark { argb(255, 150, 150, 160) } else { argb(255, 110, 110, 120) };
-        let card = if dark { argb(255, 44, 44, 50) } else { argb(255, 255, 255, 255) };
+        let card = if dark { argb(ca, 44, 44, 50) } else { argb(ca, 255, 255, 255) };
         let line = if dark { argb(255, 64, 64, 72) } else { argb(255, 224, 224, 230) };
-        let accent = argb(255, 10, 132, 255);
+        let accent = crate::gfx::accent();
+        if !liquid { g.fill_round(m, m, pw_, ph, 16.0 * s, argb(255, 0, 0, 0)); }
         g.fill_round(m, m, pw_, ph, 16.0 * s, bg);
         // sidebar
         let sw = 190.0 * s;
         g.fill_round(m, m, sw, ph, 16.0 * s, side);
         g.fill_rect(m + sw - 20.0 * s, m, 20.0 * s, ph, side);
-        g.stroke_round(m + 0.5, m + 0.5, pw_ - 1.0, ph - 1.0, 16.0 * s, 1.0, argb(60, 255, 255, 255));
+        if liquid { g.liquid_glass(m, m, pw_, ph, 16.0 * s, dark, 0.9); } else { g.stroke_round(m + 0.5, m + 0.5, pw_ - 1.0, ph - 1.0, 16.0 * s, 1.0, argb(60, 255, 255, 255)); }
         self.hits.clear();
         // window dots
         g.fill_circle(m + 22.0 * s, m + 22.0 * s, 6.0 * s, argb(255, 255, 95, 87));
         g.fill_circle(m + 42.0 * s, m + 22.0 * s, 6.0 * s, argb(255, 254, 188, 46));
         g.fill_circle(m + 62.0 * s, m + 22.0 * s, 6.0 * s, argb(255, 40, 200, 64));
         self.hits.push((m + 14.0 * s, m + 14.0 * s, 16.0 * s, 16.0 * s, Act::Close));
-        let pages = ["General", "Dock", "Menu Bar", "Island", "Icons", "About"];
+        let pages = ["General", "Dock", "Menu Bar", "Island", "Appearance", "About"];
         for (i, p) in pages.iter().enumerate() {
             let y = m + 60.0 * s + i as f32 * 38.0 * s;
             if self.page == i as u32 {
@@ -206,6 +212,10 @@ impl SettingsWin {
                 slider(&mut g, &mut self.hits, &mut y, "Icon size", &format!("{} px", s_.size), (s_.size as f32 - 28.0) / 60.0, Act::Size);
                 slider(&mut g, &mut self.hits, &mut y, "Magnification", &if s_.magnify <= 1.01 { "Off".to_string() } else { format!("{:.2}x", s_.magnify) }, (s_.magnify - 1.0) / 1.2, Act::Magnify);
                 trow(&mut g, &mut self.hits, &mut y, "Show Dock", "Turn the Dock off completely", "show-dock", true);
+                prow(&mut g, &mut self.hits, &mut y, "Icon spacing", "dock-spacing");
+                prow(&mut g, &mut self.hits, &mut y, "Corner rounding", "dock-round");
+                trow(&mut g, &mut self.hits, &mut y, "Running indicators", "Dot under open apps", "dock-indicator", true);
+                trow(&mut g, &mut self.hits, &mut y, "Dividers", "Line between apps and folders", "dock-divider", true);
                 row(&mut g, &mut self.hits, &mut y, "Auto-hide Dock", "Slides away until the pointer returns", s_.auto_hide, Act::AutoHide);
                 trow(&mut g, &mut self.hits, &mut y, "Show Start icon in Dock", "The Windows Start button at the left", "show-start-icon", true);
                 trow(&mut g, &mut self.hits, &mut y, "Genie effect", "Windows are sucked into their Dock icon", "genie", true);
@@ -274,6 +284,10 @@ impl SettingsWin {
                 prow(&mut g, &mut self.hits, &mut y, "Pomodoro break length", "island-pomo-break");
             }
             4 => {
+                prow(&mut g, &mut self.hits, &mut y, "Glass style", "glass-style");
+                prow(&mut g, &mut self.hits, &mut y, "Glass opacity", "glass-opacity");
+                prow(&mut g, &mut self.hits, &mut y, "Icon style", "icon-style");
+                prow(&mut g, &mut self.hits, &mut y, "Accent color", "accent");
                 row(&mut g, &mut self.hits, &mut y, "Use icon pack", "Off shows each app's original icon", s_.icons_on, Act::Icons);
                 button(&mut g, &mut self.hits, &mut y, "Open the icons folder", Act::OpenFolder);
                 g.text("Drop .png files named after the app (for example Safari.png) into the icons folder. Names map through iconmap.txt.", cx, y + 6.0 * s, cw, 50.0 * s, 12.0 * s, false, 0, false, true, dim);
@@ -293,6 +307,17 @@ impl SettingsWin {
         self.content_h = (y + self.scroll - content_top).max(0.0) + 24.0 * s;
         g.present_layered(self.hwnd, self.pos.0, self.pos.1, 255);
         self.gfx = Some(g);
+        // live-blur glass behind the panel (same stacked-acrylic technique as the Dock)
+        if liquid && self.visible {
+            let tint = if dark { 0x501C1C20u32 } else { 0x40F5F5F8 };
+            let hw = self.hwnd;
+            let gl = self.glass.get_or_insert_with(|| win::Glass::new(tint));
+            if self.glass_tint != tint { gl.set_tint(tint); self.glass_tint = tint; }
+            gl.invalidate();
+            gl.place(self.pos.0 + m as i32, self.pos.1 + m as i32, pw_ as i32, ph as i32, (16.0 * s) as i32, hw);
+        } else if let Some(gl) = self.glass.as_mut() {
+            gl.hide();
+        }
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<(Act, f32, f32, f32, f32)> {
@@ -604,6 +629,10 @@ pub unsafe fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             st.close();
             LRESULT(0)
         }
+        WM_ACTIVATE => {
+            if st.visible { st.redraw_look(); }
+            DefWindowProcW(h, m, wp, lp)
+        }
         WM_ERASEBKGND => LRESULT(1),
         _ => DefWindowProcW(h, m, wp, lp),
     }
@@ -614,6 +643,11 @@ fn pick_default(key: &str) -> &'static str {
         "genie-style" => "genie",
         "stats-net-mode" => "both",
         "bar-spacing" => "normal",
+        "glass-style" => "liquid",
+        "glass-opacity" => "normal",
+        "icon-style" => "default",
+        "accent" => "blue",
+        "dock-spacing" | "dock-round" => "normal",
         "island-water-every" => "60",
         "island-water-goal" => "8",
         "island-stand-every" => "45",
@@ -626,6 +660,12 @@ fn pick_opts(key: &str) -> &'static [(&'static str, &'static str)] {
     match key {
         "genie-style" => &[("genie", "Genie"), ("scale", "Scale"), ("fade", "Fade")],
         "stats-net-mode" => &[("both", "Download and upload"), ("down", "Download only"), ("up", "Upload only")],
+        "glass-style" => &[("liquid", "Liquid Glass"), ("clear", "Clear glass"), ("classic", "Classic")],
+        "glass-opacity" => &[("low", "Clear"), ("normal", "Normal"), ("high", "Frosted")],
+        "icon-style" => &[("default", "Default"), ("dark", "Dark"), ("clear", "Clear"), ("tinted", "Tinted")],
+        "accent" => &[("blue", "Blue"), ("purple", "Purple"), ("pink", "Pink"), ("red", "Red"), ("orange", "Orange"), ("yellow", "Yellow"), ("green", "Green"), ("graphite", "Graphite")],
+        "dock-spacing" => &[("compact", "Compact"), ("normal", "Normal"), ("roomy", "Roomy")],
+        "dock-round" => &[("square", "Square"), ("soft", "Soft"), ("normal", "Normal"), ("round", "Round")],
         "bar-spacing" => &[("normal", "Normal"), ("compact", "Compact"), ("roomy", "Roomy"), ("wide", "Wide")],
         "island-water-every" => &[("30", "30 min"), ("45", "45 min"), ("60", "60 min"), ("90", "90 min"), ("120", "2 hours")],
         "island-water-goal" => &[("4", "4 glasses"), ("6", "6 glasses"), ("8", "8 glasses"), ("10", "10 glasses"), ("12", "12 glasses")],
@@ -643,6 +683,15 @@ fn option_changed(key: &str) {
     if key.starts_with("bar-") || key.starts_with("stats-") || key.starts_with("tray-") {
         a.bar.relayout(a.scale);
     }
+    if key.starts_with("dock-") || key.starts_with("glass-") || key == "icon-style" || key == "accent" {
+        a.dock.relayout_all(a.scale, &a.cfg);
+        a.dock.apply_theme();
+        a.set.redraw_look();
+        if key == "icon-style" || key == "accent" {
+            a.icons.clear();
+            crate::refresh_windows();
+        }
+    }
     match key {
         "island" => a.island.set_enabled(a.cfg.s.island_on),
         "show-dock" => a.dock.set_disabled(!a.cfg.ob("show-dock", true)),
@@ -657,6 +706,9 @@ fn option_changed(key: &str) {
 }
 
 impl SettingsWin {
+    pub fn redraw_look(&mut self) {
+        if self.visible { self.draw(); }
+    }
     pub fn wheel(&mut self, delta: i32) {
         let s = app().scale;
         let view = self.content_range.1 - self.content_range.0;

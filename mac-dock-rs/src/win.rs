@@ -127,6 +127,7 @@ pub struct Glass {
     pieces: Vec<HWND>,
     tint: u32,
     placed: (i32, i32, i32, i32, i32),
+    last_rects: Vec<(i32, i32, i32, i32)>,
     shown: bool,
 }
 const BANDS: i32 = 5;
@@ -142,7 +143,7 @@ impl Glass {
             crate::sys::set_acrylic(h, tint, false);
             pieces.push(h);
         }
-        Glass { pieces, tint, placed: (0, 0, 0, 0, 0), shown: false }
+        Glass { pieces, tint, placed: (0, 0, 0, 0, 0), last_rects: Vec::new(), shown: false }
     }
     pub fn set_tint(&mut self, tint: u32) {
         self.tint = tint;
@@ -172,9 +173,11 @@ impl Glass {
             rects.push((x + inset, y + h_ - y1, w_ - 2 * inset, y1 - y0));
         }
         unsafe {
-            let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS;
+            let restack = !self.shown || self.last_rects.len() != rects.len();
+            let flags = if restack { SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS } else { SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOZORDER };
             let mut hdwp = BeginDeferWindowPos(rects.len() as i32).unwrap_or_default();
-            for (p, rc) in self.pieces.iter().zip(rects.iter()) {
+            for (i, (p, rc)) in self.pieces.iter().zip(rects.iter()).enumerate() {
+                if !restack && self.last_rects.get(i) == Some(rc) { continue; }
                 if let Ok(n) = DeferWindowPos(hdwp, *p, Some(above), rc.0, rc.1, rc.2.max(1), rc.3.max(1), flags) {
                     hdwp = n;
                 }
@@ -182,6 +185,14 @@ impl Glass {
             let _ = EndDeferWindowPos(hdwp);
         }
         self.placed = (x, y, w_, h_, r);
+        self.last_rects = rects;
         self.shown = true;
+    }
+}
+impl Glass {
+    /// Forget the cached placement so the next `place` re-stacks the pieces (z-order may have changed).
+    pub fn invalidate(&mut self) {
+        self.placed = (0, 0, 0, 0, 0);
+        self.last_rects.clear();
     }
 }

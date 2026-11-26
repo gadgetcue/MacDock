@@ -27,8 +27,7 @@ namespace MacDock
         static readonly System.Collections.Generic.List<Timer> startupTrims = new System.Collections.Generic.List<Timer>();
         internal static bool QuitRequested; // set only by the deliberate "Quit MacDock" menu item
 
-        [DllImport("kernel32.dll")]
-        static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessWorkingSetSizeEx(IntPtr process, IntPtr min, IntPtr max, uint flags);
 
         [DllImport("user32.dll")] static extern void DisableProcessWindowsGhosting();
 
@@ -173,7 +172,10 @@ namespace MacDock
                 Microsoft.Win32.SystemEvents.SessionEnding += (s, e) => Log("SessionEnding reason=" + e.Reason);
 System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { var sw = Stopwatch.StartNew(); var df = Control.DefaultFont; Log("DefaultFont warmed in " + sw.ElapsedMilliseconds + " ms"); } catch (Exception ex) { Log(ex); } }); Program.T("main-enter"); Theme.Refresh(); Program.T("theme");
                 Motion.Refresh();
-SetUi.EnsureAutostart(); Program.T("autostart"); // rewritten every launch unless the user turned it off in Settings
+try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.AboveNormal; } catch { } // stay responsive while builds load the PC
+            // Keep up to 150 MB resident (hard minimum, soft maximum) so builds cannot page the dock out to disk.
+            try { bool ok = SetProcessWorkingSetSizeEx(Process.GetCurrentProcess().Handle, (IntPtr)(150L << 20), (IntPtr)(768L << 20), 1 | 8); Log("working set minimum 150 MB: " + (ok ? "set" : "failed " + Marshal.GetLastWin32Error())); } catch (Exception ex) { Log(ex); }
+            SetUi.EnsureAutostart(); Program.T("autostart"); // rewritten every launch unless the user turned it off in Settings
 Typography.Configure(AppPaths.Config); Program.T("typo");
 
  T("pre-dock"); var dock = new DockForm(); T("dock-ctor"); try { dock.Show(); Application.DoEvents(); } catch (Exception exs) { Log(exs); } T("dock-shown");
@@ -193,6 +195,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                 IslandForm.Enabled = SetCfg.GetBool("island", true);
                 IslandForm.EnabledChanged += () => { try { island.BeginInvoke((Action)(() => island.ApplyEnabled())); } catch { } };
                 bar.BellClicked += island.TogglePanel;
+                bar.PopupOpening += island.ClosePanel;
                 bar.SearchClicked += spotlight.Toggle;
                 HotkeyHook.Install(spotlight.Toggle, null);
 
@@ -253,8 +256,8 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                             if (!dock.Visible) { dock.Show(); dock.Reassert(); }
                             else DockForm.KeepOnTop(dock);
                             if (!bar.Visible) bar.Show();
-                            if (IslandForm.Enabled) { if (!island.Visible) island.Show(); DockForm.KeepOnTop(island); }
                             DockForm.KeepOnTop(bar);
+                            if (IslandForm.Enabled) { if (!island.Visible) island.Show(); DockForm.KeepOnTop(island); }
                         }
                         catch (Exception ex) { Program.Log(ex); }
                     };
@@ -263,18 +266,6 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                     // WinForms' Control.DefaultFont looks "Microsoft Sans Serif" up by name: ~5 s on this PC's ~3,600 fonts. The first
                     // TextBox (Settings search) would pay that on the UI thread and freeze the bar, so resolve it once in the background.
                     // (DefaultFont warm-up now starts at main-enter so it overlaps startup work, esp. cold after wake/boot)
-                    // Memory diet: every 45 s compact the heap and hand unused pages back to Windows (they fault back in on demand).
-                    var trim = new Timer { Interval = 45000 };
-                    trim.Tick += (s, e) =>
-                    {
-                        try
-                        {
-                            GC.Collect(2, GCCollectionMode.Forced, true);
-                            SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
-                        }
-                        catch { }
-                    };
-                    trim.Start();
                     MissionControl.PrewarmSoon(4000);
                     { var obT = new Timer { Interval = 2500 }; obT.Tick += (s4, e4) => { obT.Stop(); obT.Dispose(); OnboardingForm.ShowIfFirstRun(); }; obT.Start(); } // first-run tour, after the dock is up
                     foreach (int ms in new[] { 1500, 3000, 4500, 6000, 8000, 10000, 13000, 16000, 20000, 25000, 30000 }) { var st = new Timer { Interval = ms }; st.Tick += (s2, e2) => { ((Timer)s2).Stop(); MemTrim.Now(true); }; st.Start(); startupTrims.Add(st); }
@@ -308,6 +299,10 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
             foreach (var kv in b) { double was; a.TryGetValue(kv.Key, out was); double dlt = kv.Value - was; if (dlt >= 200 || kv.Key == uiId) l.Add((kv.Key == uiId ? "UI" : "t" + kv.Key) + "=" + (int)dlt + "ms"); }
             return string.Join(" ", l.ToArray());
         }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)] struct MemCounters { public uint cb, PageFaultCount; public UIntPtr a, b, c, d, e, f, g, h; }
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool K32GetProcessMemoryInfo(IntPtr process, out MemCounters c, uint cb);
+        static uint PageFaults() { MemCounters m; return K32GetProcessMemoryInfo((IntPtr)(-1), out m, (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MemCounters))) ? m.PageFaultCount : 0; }
+        static uint faults0;
         internal static void StartStallWatch(Form ui)
         {
             int uiId = (int)GetCurrentThreadId(); Dictionary<int, double> cpu0 = null;
@@ -328,12 +323,12 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                         long pong = lastPong;
                         if (sent - pong > 1200)
                         {
-                            if (!logged) { logged = true; stallStart = pong; cpu0 = ThreadCpu(); seen.Clear(); Log("UI STALL begin (no response for " + (sent - pong) + " ms) mark=" + Mark); }
+                            if (!logged) { logged = true; stallStart = pong; cpu0 = ThreadCpu(); seen.Clear(); faults0 = PageFaults(); Log("UI STALL begin (no response for " + (sent - pong) + " ms) last mark=" + Mark + "; DockScan running " + DockScan.RunningMs + " ms"); }
                             string mk = Mark ?? ""; int c; seen.TryGetValue(mk, out c); seen[mk] = c + 1;
                             // Frozen for a full minute: restart cleanly instead of leaving a dead dock and bar on screen.
                             if (sent - pong > 60000 && !QuitRequested) { Log("UI HUNG 60 s at mark=" + mk + ": restarting via MacDockGuard"); Relaunch(); try { TaskbarControl.Restore(); } catch { } Process.GetCurrentProcess().Kill(); } if (c == 0 && seen.Count > 1) Log("UI STALL still stuck, now at mark=" + mk);
                         }
-                        else if (logged) { logged = false; Log("UI STALL end after ~" + (sent - stallStart) + " ms; cpu: " + ThreadDelta(cpu0, uiId) + "; where: " + string.Join(", ", seen.OrderByDescending(k => k.Value).Take(4).Select(k => k.Key + " x" + k.Value).ToArray())); }
+                        else if (logged) { logged = false; Log("UI STALL end after ~" + (sent - stallStart) + " ms; page faults " + unchecked(PageFaults() - faults0) + "; cpu: " + ThreadDelta(cpu0, uiId) + "; where: " + string.Join(", ", seen.OrderByDescending(k => k.Value).Take(4).Select(k => k.Key + " x" + k.Value).ToArray())); }
                         ui.BeginInvoke((Action)(() => { long now = Environment.TickCount; if (logged && now - lastPong > 0) { } lastPong = now; }));
                     }
                     catch { }
@@ -1673,7 +1668,7 @@ Theme.Refresh();
         // Puts a window back above every other window without moving or activating it.
         internal static void KeepOnTop(Form f)
         {
-            if (f != null && f.IsHandleCreated)
+            if (f != null && f.IsHandleCreated && (!f.Visible || NativeMethods.GetWindow(f.Handle, 3) != IntPtr.Zero)) // skip when already above everything: re-asserting shuffles bar/island every tick (flash)
                 SetWindowPos(f.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010 | 0x0200); // NOMOVE|NOSIZE|NOACTIVATE|NOOWNERZORDER
         }
 
@@ -2196,7 +2191,7 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 var live = it.Handles.Where(h => NativeMethods.IsWindow(h)).ToList();
                 bool showing = live.Any(h => !NativeMethods.IsIconic(h));
                 if (showing) { foreach (IntPtr h in live) NativeMethods.ShowWindowAsync(h, SW_MINIMIZE); }
-                else { for (int k = live.Count - 1; k >= 0; k--) WinUtil.Focus(live[k]); } // restores each to its snapped slot
+                else WinUtil.Focus(Enumerable.Reverse(live).ToArray()); // restores each to its snapped slot
                 return;
             }
 
@@ -2206,7 +2201,6 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
             Program.Mark = "Activate:minimize-check " + it.Target;
             IntPtr front = Win32.GetForegroundWindow();
             IntPtr frontOwner = front == IntPtr.Zero ? IntPtr.Zero : GetAncestor(front, 3); // GA_ROOTOWNER
-            try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scratch", "click.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " target=" + it.Target + " front=" + front + " owner=" + frontOwner + " handles=" + string.Join(",", it.Handles.Select(x => x.ToString())) + "\r\n"); } catch { } // DIAG
             foreach (IntPtr h in it.Handles)
             {
                 if (!NativeMethods.IsWindow(h) || (h != front && h != frontOwner)) continue;

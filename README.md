@@ -2,11 +2,11 @@
 
 A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds with the compiler that ships with Windows, so no SDK is needed.
 
-![MacDock on a MacBook Pro mockup](screenshots/v2.3/mockup-desktop.png)
+![MacDock on a MacBook Pro mockup](screenshots/v3.0/mockups/desktop-dock.png)
 
 By [@gadgetcue](https://github.com/gadgetcue) · [YouTube](https://www.youtube.com/@gadgetcue) · [Instagram](https://www.instagram.com/gadgetcue) · Telegram
 
-See the [changelog](CHANGELOG.md) for what's new in v2.4.
+See the [changelog](CHANGELOG.md) for what's new in v3.0.
 
 ## Installation guide
 **Requirements:** Windows 11 (Windows 10 mostly works), x64, .NET Framework 4.x (already part of Windows). No admin rights and no SDK needed.
@@ -16,11 +16,11 @@ See the [changelog](CHANGELOG.md) for what's new in v2.4.
 ### Option A: single-file installer (easiest)
 1. Download `MacDock-Setup.exe` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest). Optionally check its SHA256 against the release notes: `certutil -hashfile MacDock-Setup.exe SHA256`.
 2. Double-click it and press **OK** on the prompt. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
-3. Setup stops any running MacDock, installs to `%LOCALAPPDATA%\MacDock`, adds a Start Menu shortcut and a *Settings > Apps > Installed apps* entry, sets the dock to use the integrated GPU, registers start at login and the `MacDockGuard` restart task, and starts the dock. It also starts at login (toggle in MacDock Settings).
+3. Setup stops any running MacDock, installs to `%LOCALAPPDATA%\MacDock`, adds a Start Menu shortcut and a *Settings > Apps > Installed apps* entry, sets the dock to use the integrated GPU, asks whether to start it at sign-in, and starts the dock. While start at login is on (toggle in MacDock Settings), MacDock keeps its sign-in entry and the `MacDockGuard` restart task.
 4. Silent install: `MacDock-Setup.exe /S`.
 
 ### Option B: zip + `Install.bat`
-1. Download `MacDock-v2.4.zip` from the Releases page (check it with `certutil -hashfile MacDock-v2.4.zip SHA256`).
+1. Download `MacDock-v3.0.zip` from the Releases page (check it with `certutil -hashfile MacDock-v3.0.zip SHA256`).
 2. Extract it to any folder (right-click > Extract All).
 3. Double-click `Install.bat`. It copies `bin`, `icons` and `dark-icons` to `%LOCALAPPDATA%\MacDock`, creates the Start Menu shortcut and starts the dock.
 
@@ -49,7 +49,7 @@ Short version: **it is a false positive**, but it is understandable why it happe
 
 You do not have to take our word for it:
 - The source is fully open in this repo. Read it, or build it yourself: `mac-dock\build.bat` (run it from a folder path without a `#` in it).
-- Check the zip's SHA256 (listed in each release) and upload the file to [VirusTotal](https://www.virustotal.com/); a few engines may flag it heuristically.
+- Check the download's SHA256 (listed in each release) and upload the file to [VirusTotal](https://www.virustotal.com/); a few engines may flag it heuristically.
 
 **If Defender quarantined it:** Windows Security > Virus & threat protection > Protection history > select the item > Actions > **Restore** (or Allow on device). To stop it being re-flagged, add an exclusion: Virus & threat protection > Manage settings > Exclusions > Add or remove exclusions > Add an exclusion > Folder > `%LOCALAPPDATA%\MacDock`. Then re-run `Install.bat`.
 
@@ -75,22 +75,20 @@ You do not have to take our word for it:
 - **Fullscreen aware**: the dock, bar and island hide for fullscreen apps.
 - **Native glass**: DWM background blur on the dock, bar, menus and panels.
 
-## Screenshots (v2.3)
-![Desktop with dock and menu bar](screenshots/v2.3/mockup-desktop.png)
+## Screenshots (v3.0)
+![Desktop with dock and menu bar](screenshots/v3.0/mockups/desktop-dock.png)
 
-![Folder fan](screenshots/v2.3/mockup-folder-fan.png)
+![Wi-Fi panel](screenshots/v3.0/mockups/wifi-panel.png)
 
-![Settings: Dock](screenshots/v2.3/mockup-settings-dock.png)
+![Settings: General](screenshots/v3.0/mockups/settings.png)
 
-![Settings: Menu Bar & Island](screenshots/v2.3/mockup-settings-menubar-and-island.png)
+![What's new in 3.0](screenshots/v3.0/mockups/whats-new.png)
 
-![Settings: Icons](screenshots/v2.3/mockup-settings-icons.png)
-
-![Welcome tour](screenshots/v2.3/mockup-welcome-tour.png)
-
-Full-size 16:10 screenshots are in [`screenshots/v2.3`](screenshots/v2.3).
+Older screenshots are in [`screenshots/v2.3`](screenshots/v2.3).
 
 ## Memory use
+Since v3.0 MacDock no longer trims its working set and keeps up to 150 MB resident, so Task Manager shows more than the older figures below.
+
 Measured on the v1.5 build on Windows 11 (1920x1080) with the dock idle: **~7-43 MB working set** (about 24 MB average over a minute; Windows trims it), **~92-103 MB private bytes**, and a **peak working set of ~140 MB** since launch (start-up and opening Launchpad). Numbers vary with how many apps you pin and which icon packs you load.
 ## Videos
 - [Demo 1](docs/demo-1.mp4)

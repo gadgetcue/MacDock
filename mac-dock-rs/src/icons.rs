@@ -284,7 +284,7 @@ impl Icons {
             if px.is_none() {
                 self.failed.insert(k.clone());
             }
-            let img = px.and_then(Img::from_pixels).map(Rc::new).or_else(|| self.logo.clone());
+            let img = px.map(|p| p.styled()).and_then(Img::from_pixels).map(Rc::new).or_else(|| self.logo.clone());
             if let Some(i) = img {
                 self.cache.insert(k, i);
             }
@@ -407,7 +407,7 @@ pub fn tint_pixels(mut px: Pixels, name: &str) -> Pixels {
 
 impl Icons {
     pub fn insert(&mut self, key: &str, px: Pixels) {
-        if let Some(i) = Img::from_pixels(px) {
+        if let Some(i) = Img::from_pixels(px.styled()) {
             self.cache.insert(key.to_string(), Rc::new(i));
         }
     }

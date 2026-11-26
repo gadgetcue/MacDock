@@ -1,5 +1,22 @@
 ﻿# Changelog
 
+## v3.0
+### Fixed
+- **Freezes and lag.** MacDock no longer waits on other apps' windows: focusing, minimizing, restoring and window repositioning are asynchronous, and window scanning runs on its own thread.
+- **Memory paging stalls.** The dock no longer trims its own working set. It keeps itself resident and runs at above-normal priority, so it stays responsive under heavy load.
+- **Screen flashing.** The menu bar and island are no longer re-raised when they are already on top.
+- **Wi-Fi panel.** Rebuilt on the native Windows Wi-Fi API: names with special characters display and connect correctly.
+- Menu bar panels: a closing panel no longer disturbs the newer one, clicking empty bar space closes menus, and quick taps outside are picked up.
+
+### Added
+- Wi-Fi password prompt for new networks, and again when a saved password no longer works.
+- The Wi-Fi panel shows the cached list at once, then a fresh scan; saved networks are marked, with a *Wi-Fi Settings...* link and a hint when Location access is off.
+- "What's new in 3.0" page in the welcome tour.
+
+### Changed
+- Per-user installer asks before enabling start at sign-in, writes `install.log` and has a cleaner uninstaller.
+- Long status text in menu bar panels gets the width it needs.
+
 ## v2.0
 ### Added
 - **Use original app icons** toggle (Settings > Icons): show each app's own icon instead of the MacDock icon pack; per-app choice and custom icons from the right-click menu.

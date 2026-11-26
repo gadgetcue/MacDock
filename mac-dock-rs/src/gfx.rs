@@ -190,6 +190,10 @@ impl Img {
             Some(Img { bmp, _buf: buf, w, h, small: None })
         }
     }
+    pub fn from_gfx(g: &Gfx) -> Option<Img> {
+        let p = g.to_pixels();
+        Img::raw(p.w, p.h, p.bgra)
+    }
     pub fn from_pixels(p: Pixels) -> Option<Img> {
         let sp = SMALL_PX.load(std::sync::atomic::Ordering::Relaxed);
         let small = if p.w.max(p.h) as f32 > sp as f32 * 1.5 {
@@ -712,9 +716,143 @@ impl Gfx {
             GdipDeletePen(pen);
         }
     }
+    /// 1:1 pixel copy of a pre-rendered layer (no resampling, premultiplied source-over).
+    pub fn blit_exact(&mut self, img: &Img, x: i32, y: i32) {
+        unsafe {
+            let mut mode = InterpolationModeDefault;
+            GdipGetInterpolationMode(self.g, &mut mode);
+            GdipSetInterpolationMode(self.g, InterpolationModeNearestNeighbor);
+            GdipDrawImageRectRectI(self.g, img.bmp as *mut GpImage, x, y, img.w, img.h, 0, 0, img.w, img.h, UnitPixel, std::ptr::null_mut(), 0, std::ptr::null_mut());
+            GdipSetInterpolationMode(self.g, mode);
+        }
+    }
     pub fn set_fast(&mut self, fast: bool) {
         unsafe {
             GdipSetInterpolationMode(self.g, if fast { InterpolationModeBilinear } else { InterpolationModeHighQualityBicubic });
         }
+    }
+}
+
+// ---------- Liquid Glass look ----------
+static ACCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0xFF0A84FF);
+pub fn accent() -> u32 {
+    ACCENT.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_accent(c: u32) {
+    ACCENT.store(c, std::sync::atomic::Ordering::Relaxed);
+}
+/// Accent colours as in macOS: (key, label, 0xAARRGGBB).
+pub const ACCENTS: &[(&str, &str, u32)] = &[
+    ("blue", "Blue", 0xFF0A84FF),
+    ("purple", "Purple", 0xFFBF5AF2),
+    ("pink", "Pink", 0xFFFF375F),
+    ("red", "Red", 0xFFFF453A),
+    ("orange", "Orange", 0xFFFF9F0A),
+    ("yellow", "Yellow", 0xFFFFD60A),
+    ("green", "Green", 0xFF32D74B),
+    ("graphite", "Graphite", 0xFF8E8E93),
+];
+pub fn accent_for(key: &str) -> u32 {
+    ACCENTS.iter().find(|a| a.0 == key).map(|a| a.2).unwrap_or(0xFF0A84FF)
+}
+
+impl Gfx {
+    /// Vertical multi-stop stroke of a rounded rect (colours at positions 0..1 top to bottom).
+    fn stroke_round_v(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, wd: f32, stops: &[(f32, u32)]) {
+        unsafe {
+            let p = Self::rr_path(x, y, w, h, r);
+            let (p1, p2) = (PointF { X: x, Y: y }, PointF { X: x, Y: y + h.max(1.0) });
+            let mut b: *mut GpLineGradient = null_mut();
+            GdipCreateLineBrush(&p1, &p2, stops[0].1, stops[stops.len() - 1].1, WrapModeTileFlipXY, &mut b);
+            let cols: Vec<u32> = stops.iter().map(|s| s.1).collect();
+            let pos: Vec<f32> = stops.iter().map(|s| s.0).collect();
+            GdipSetLinePresetBlend(b, cols.as_ptr(), pos.as_ptr(), stops.len() as i32);
+            let mut pen: *mut GpPen = null_mut();
+            GdipCreatePen2(b as *mut GpBrush, wd, UnitPixel, &mut pen);
+            GdipDrawPath(self.g, pen, p);
+            GdipDeletePen(pen);
+            GdipDeleteBrush(b as *mut GpBrush);
+            GdipDeletePath(p);
+        }
+    }
+    /// Liquid Glass finish over a live-blurred backdrop: top sheen, lit rim (bright top, soft bottom), a faint chromatic
+    /// fringe at the sides, corner specular glints and a warm bottom bounce. `k` scales everything (0..1).
+    pub fn liquid_glass(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, dark: bool, k: f32) {
+        let wh = |a: f32| argb((a * k).clamp(0.0, 255.0) as u8, 255, 255, 255);
+        let (sheen, rim_top, rim_bot) = if dark { (40.0, 170.0, 90.0) } else { (95.0, 235.0, 150.0) };
+        unsafe {
+            let p = Self::rr_path(x, y, w, h, r);
+            GdipSetClipPath(self.g, p, CombineModeReplace);
+            GdipDeletePath(p);
+        }
+        // sheen (upper half) and bounce light (lower third)
+        self.fill_round_grad(x, y, w, h * 0.55, r, wh(sheen), wh(0.0));
+        self.fill_round_grad(x, y + h * 0.62, w, h * 0.38, r, wh(0.0), wh(if dark { 26.0 } else { 46.0 }));
+        // soft inner shadow just inside the rim: reads as glass thickness
+        self.stroke_round(x + 2.2, y + 2.2, w - 4.4, h - 4.4, (r - 2.2).max(1.0), 2.2, argb((if dark { 34.0 } else { 20.0 } * k) as u8, 0, 0, 0));
+        self.unclip();
+        // chromatic fringe (cyan left, magenta right) as a cheap stand-in for refraction dispersion
+        self.stroke_round(x + 0.1, y + 0.5, w - 1.0, h - 1.0, r, 1.0, argb((30.0 * k) as u8, 90, 200, 255));
+        self.stroke_round(x + 0.9, y + 0.5, w - 1.0, h - 1.0, r, 1.0, argb((26.0 * k) as u8, 255, 120, 190));
+        // lit rim and a second, dimmer rim inside
+        self.stroke_round_v(x + 0.5, y + 0.5, w - 1.0, h - 1.0, r, 1.2, &[(0.0, wh(rim_top)), (0.3, wh(rim_top * 0.28)), (0.7, wh(rim_bot * 0.22)), (1.0, wh(rim_bot))]);
+        self.stroke_round_v(x + 1.7, y + 1.7, w - 3.4, h - 3.4, (r - 1.2).max(1.0), 1.0, &[(0.0, wh(rim_top * 0.45)), (0.5, wh(0.0)), (1.0, wh(rim_bot * 0.3))]);
+        // corner glints, top-left and bottom-right
+        let rr = r.min(w / 2.0).min(h / 2.0);
+        if rr > 4.0 {
+            self.arc(x + rr, y + rr, rr - 1.1, 196.0, 58.0, 2.0, wh(rim_top * 0.95));
+            self.arc(x + w - rr, y + h - rr, rr - 1.1, 16.0, 58.0, 1.8, wh(rim_bot * 0.75));
+            self.arc(x + w - rr, y + rr, rr - 1.1, 292.0, 36.0, 1.4, wh(rim_top * 0.5));
+        }
+        // short top-edge streak
+        let (x0, x1) = (x + rr + 2.0, x + w - rr - 2.0);
+        if x1 > x0 {
+            self.line(x0, y + 1.6, x1, y + 1.6, 1.0, wh(rim_top * 0.35));
+        }
+    }
+}
+
+/// Icon style applied to every icon bitmap (premultiplied BGRA). 0 default, 1 dark, 2 clear, 3 tinted.
+static ICON_STYLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub fn set_icon_style(key: &str) {
+    let v = match key { "dark" => 1, "clear" => 2, "tinted" => 3, _ => 0 };
+    ICON_STYLE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+impl Pixels {
+    pub fn styled(mut self) -> Pixels {
+        let style = ICON_STYLE.load(std::sync::atomic::Ordering::Relaxed);
+        if style == 0 {
+            return self;
+        }
+        let ac = accent();
+        let (ar, ag, ab) = (((ac >> 16) & 255) as f32 / 255.0, ((ac >> 8) & 255) as f32 / 255.0, (ac & 255) as f32 / 255.0);
+        for c in self.bgra.chunks_exact_mut(4) {
+            let a = c[3] as f32;
+            if a == 0.0 {
+                continue;
+            }
+            let af = a / 255.0;
+            let (r, g, b) = ((c[2] as f32 / a).min(1.0), (c[1] as f32 / a).min(1.0), (c[0] as f32 / a).min(1.0));
+            let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            let (nr, ng, nb, na) = match style {
+                1 => (r * 0.46 + 0.02, g * 0.46 + 0.02, b * 0.5 + 0.03, af), // dark: deep, slightly lifted glyph colours
+                2 => {
+                    // clear: frosted translucent glass keeping the glyph
+                    let m = 0.55;
+                    (r * (1.0 - m) + lum * m + 0.28, g * (1.0 - m) + lum * m + 0.28, b * (1.0 - m) + lum * m + 0.30, af * 0.78)
+                }
+                _ => {
+                    // tinted: luminance carried by the accent colour
+                    let t = (0.18 + lum * 0.95).min(1.0);
+                    (ar * t + (t * t) * 0.25, ag * t + (t * t) * 0.25, ab * t + (t * t) * 0.25, af)
+                }
+            };
+            let pm = |v: f32| (v.clamp(0.0, 1.0) * na * 255.0).round() as u8;
+            c[2] = pm(nr);
+            c[1] = pm(ng);
+            c[0] = pm(nb);
+            c[3] = (na * 255.0).round() as u8;
+        }
+        self
     }
 }

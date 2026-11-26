@@ -11,4 +11,5 @@ if ($code -ne 0) { throw "cargo build failed (exit $code)" }
 & "$PSScriptRoot\..\mac-dock\check-icon.ps1" "$PSScriptRoot\target\release\macdock.exe"
 if ($LASTEXITCODE -ne 0) { throw "no embedded icon: aborted" }
 Move-Item target\release\macdock.exe MacDock-rs.exe -Force
+& "$PSScriptRoot\..\installer\sign.ps1" "$PSScriptRoot\MacDock-rs.exe" | Out-Null  # signs only if MACDOCK_PFX is set; always writes SHA256SUMS.txt
 Write-Host ("Built: {0} ({1} MB)" -f "$PSScriptRoot\MacDock-rs.exe", [math]::Round((Get-Item MacDock-rs.exe).Length/1MB,2))

@@ -699,6 +699,19 @@ namespace MacDock
             }
         }
 
+        static void DrawSafe(Graphics g, string s, Font f, Brush b, Rectangle rc, StringFormat fmt)
+        {
+            s = Typography.Safe(s);
+            g.DrawString(s, Typography.FontFor(f, s), b, rc, fmt);
+        }
+
+        static int TextWidth(Graphics g, string s, Font f, int max)
+        {
+            s = Typography.Safe(s);
+            if (string.IsNullOrEmpty(s)) return 0;
+            return Math.Min(max, (int)Math.Ceiling(g.MeasureString(s, Typography.FontFor(f, s), new PointF(0, 0), StringFormat.GenericTypographic).Width) + 2);
+        }
+
         void RenderContent()
         {
             if (content != null) content.Dispose();
@@ -775,8 +788,9 @@ namespace MacDock
                                 break;
 
                             case RowKind.Info:
-                                g.DrawString(r.Text, body, mutedBrush, new Rectangle(rc.Left + 6, rc.Top, rc.Width / 2, rc.Height), left);
-                                g.DrawString(r.Sub, body, textBrush, new Rectangle(rc.Left + rc.Width / 3, rc.Top, rc.Width * 2 / 3 - 6, rc.Height), right);
+                                int labelW = TextWidth(g, r.Text, body, rc.Width / 2);
+                                DrawSafe(g, r.Text, body, mutedBrush, new Rectangle(rc.Left + 6, rc.Top, labelW, rc.Height), left);
+                                DrawSafe(g, r.Sub, body, textBrush, new Rectangle(rc.Left + 14 + labelW, rc.Top, rc.Width - 20 - labelW, rc.Height), right);
                                 break;
 
                             case RowKind.Header:
@@ -786,9 +800,10 @@ namespace MacDock
                             case RowKind.Item:
                                 if (hot) FillRound(g, rc, 9, hoverFill);
                                 if (r.Checked) g.DrawString("✓", body, textBrush, new Rectangle(rc.Left + 8, rc.Top, 20, rc.Height), left);
-                                g.DrawString(r.Text, body, textBrush, new Rectangle(rc.Left + 30, rc.Top, rc.Width - 30 - (string.IsNullOrEmpty(r.Sub) ? 8 : 112), rc.Height), left);
-                                if (!string.IsNullOrEmpty(r.Sub))
-                                    g.DrawString(r.Sub, small, mutedBrush, new Rectangle(rc.Right - 110, rc.Top, 102, rc.Height), right);
+                                // The right-hand text takes the width it needs (up to 55%); the name gets the rest.
+                                int subW = TextWidth(g, r.Sub, small, (rc.Width - 30) * 55 / 100);
+                                DrawSafe(g, r.Text, body, textBrush, new Rectangle(rc.Left + 30, rc.Top, rc.Width - 38 - (subW == 0 ? 0 : subW + 8), rc.Height), left);
+                                if (subW > 0) DrawSafe(g, r.Sub, small, mutedBrush, new Rectangle(rc.Right - 8 - subW, rc.Top, subW, rc.Height), right);
                                 break;
 
                             case RowKind.Button:
@@ -959,10 +974,10 @@ namespace MacDock
             tilesMoved |= StepLayout(dt);
             if (tilesMoved) RenderContent();
             if (!settled || dragging != null || tilesMoved) Compose(); // nothing to redraw while the panel just sits there
-            if (settled && dragging == null && !tilesMoved) { if (vd.Active) vd.Sleep(); timer.Interval = 40; if (!timer.Enabled) timer.Start(); }
+            if (settled && dragging == null && !tilesMoved) { if (vd.Active) vd.Sleep(); timer.Interval = 15; if (!timer.Enabled) timer.Start(); }
             else if (!vd.Active) { timer.Stop(); vd.Wake(); } // moving: one step per refresh of this monitor
 
-            if (ticks % 2 == 0) PollInput();
+            if (settled || ticks % 2 == 0) PollInput(); // every tick once idle, so a quick tap outside is not missed
         }
 
         // Glass layout: rows glide to their new place and size (soft ease-out) after a reorder, resize or add/remove.
@@ -1342,7 +1357,7 @@ namespace MacDock
             var panel = new GlassPanel(id == "control" ? Sx(Width) : Width, rows, anchor, barHeight, closed);
             if (id == "control") panel.EnableGlass();
 
-            if (id == "wifi") Background(panel, () => WifiRows(panel));
+            if (id == "wifi") { Background(panel, () => WifiRows(panel)); Background(panel, () => WifiRows(panel, true)); } // cached list at once, fresh scan after
             else if (id == "bluetooth") Background(panel, () => BluetoothRows(panel));
             else if (id == "nightlight" && NightLight.NeedsRead) Background(panel, () => { NightLight.ReadActual(); return NightLightRows(); });
             else if (id == "sound") Background(panel, () => { string def; List<string> outs = DeviceFeed.AudioOutputs(out def); return SoundRows(outs, def); });
@@ -1423,10 +1438,10 @@ namespace MacDock
             return rows;
         }
 
-        static List<PanelRow> WifiRows(GlassPanel panel)
+        static List<PanelRow> WifiRows(GlassPanel panel, bool rescan = false)
         {
             bool? radio = DeviceFeed.RadioOn("WiFi");
-            List<WifiNetwork> networks = radio == false ? new List<WifiNetwork>() : Wifi.Scan();
+            List<WifiNetwork> networks = radio == false ? new List<WifiNetwork>() : Wifi.Scan(rescan);
             WifiNetwork current = networks.FirstOrDefault(n => n.Connected);
 
             var rows = new List<PanelRow>();
@@ -1442,7 +1457,7 @@ namespace MacDock
             else if (radio == null)
                 rows.Add(PanelRow.Info("Wi-Fi", "Not available on this PC"));
             else
-                rows.Add(PanelRow.Info("Status", current != null ? "Connected to " + current.Name : (radio == true ? "Not connected" : "Off")));
+                rows.Add(current != null ? PanelRow.Info("Connected", current.Name) : PanelRow.Info("Status", radio == true ? "Not connected" : "Off"));
 
             if (radio == true)
             {
@@ -1451,34 +1466,48 @@ namespace MacDock
                 foreach (WifiNetwork net in networks.Take(8))
                 {
                     WifiNetwork n = net;
-                    string detail = (n.Security ?? "") + (n.Signal > 0 ? "  " + n.Signal + "%" : "");
-                    PanelRow item = PanelRow.Item(n.Name, n.Connected ? "Connected - click to disconnect" : detail, n.Connected, null);
+                    string detail = (n.Profile != null ? "Saved" : n.Security) + "  " + n.Signal + "%";
+                    PanelRow item = PanelRow.Item(n.Name, n.Connected ? "Disconnect" : detail, n.Connected, null);
                     item.KeepOpen = true;
-                    item.Click = () =>
-                    {
-                        item.Sub = n.Connected ? "Disconnecting..." : "Connecting...";
-                        Task.Run(() =>
-                        {
-                            string result = n.Connected ? Wifi.Disconnect() : Wifi.Connect(n);
-                            System.Threading.Thread.Sleep(2000);
-                            Background(panel, () =>
-                            {
-                                List<PanelRow> r2 = WifiRows(panel);
-                                if (result != null) r2.Insert(2, PanelRow.Info("Wi-Fi", result));
-                                return r2;
-                            });
-                        });
-                    };
+                    item.Click = () => WifiClick(panel, item, n);
                     rows.Add(item);
                 }
-                if (networks.Count == 0) rows.Add(PanelRow.Info("Networks", "None found"));
+                if (Wifi.LocationBlocked) rows.Add(PanelRow.Item("Location access is off", "Open Settings", false, Open("ms-settings:privacy-location")));
+                else if (networks.Count == 0) rows.Add(PanelRow.Info("Networks", rescan ? "None found" : "Scanning..."));
             }
             rows.Add(PanelRow.Separator());
-            PanelRow rescan = PanelRow.Button("Rescan", null);
-            rescan.KeepOpen = true;
-            rescan.Click = () => Background(panel, () => WifiRows(panel));
-            rows.Add(rescan);
+            PanelRow again = PanelRow.Button("Rescan", null);
+            again.KeepOpen = true;
+            again.Click = () => { again.Text = "Scanning..."; Background(panel, () => WifiRows(panel, true)); };
+            rows.Add(again);
+            rows.Add(PanelRow.Button("Wi-Fi Settings...", Open("ms-settings:network-wifi")));
             return rows;
+        }
+
+        static void WifiClick(GlassPanel panel, PanelRow item, WifiNetwork n)
+        {
+            if (!n.Connected && n.Profile == null && n.Secured)
+            {
+                panel.BeginClose();
+                if (n.Enterprise) Open("ms-settings:network-wifi")();   // work/school sign-in: Windows handles it
+                else WifiPasswordForm.Ask(n, null);
+                return;
+            }
+            item.Sub = n.Connected ? "Disconnecting..." : "Connecting...";
+            var ui = System.Threading.SynchronizationContext.Current;
+            Task.Run(() =>
+            {
+                string result = n.Connected ? Wifi.Disconnect(n) : Wifi.Connect(n, null);
+                if (n.Connected) System.Threading.Thread.Sleep(1000);
+                // A saved password that no longer works: ask for the new one.
+                else if (result != null && n.Secured && !n.Enterprise && ui != null) ui.Post(_ => WifiPasswordForm.Ask(n, result), null);
+                Background(panel, () =>
+                {
+                    List<PanelRow> r2 = WifiRows(panel);
+                    if (result != null) r2.Insert(2, PanelRow.Info("Error", result));
+                    return r2;
+                });
+            });
         }
 
         static List<PanelRow> BluetoothRows(GlassPanel panel)
@@ -1508,7 +1537,7 @@ namespace MacDock
                     foreach (BtDevice dev in devices.Take(8))
                     {
                         BtDevice d = dev;
-                        PanelRow item = PanelRow.Item(d.Name, d.Connected ? "Connected - click to disconnect" : "Not connected - click to connect", d.Connected, null);
+                        PanelRow item = PanelRow.Item(d.Name, d.Connected ? "Disconnect" : "Connect", d.Connected, null);
                         item.KeepOpen = true;
                         item.Click = () =>
                         {

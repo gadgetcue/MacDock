@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -12,11 +14,16 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("MacDock Project")]
 [assembly: AssemblyProduct("MacDock")]
 [assembly: AssemblyCopyright("Copyright (c) MacDock contributors")]
-[assembly: AssemblyVersion("2.4.0.0")]
-[assembly: AssemblyFileVersion("2.4.0.0")]
+[assembly: AssemblyVersion("3.0.0.0")]
+[assembly: AssemblyFileVersion("3.0.0.0")]
 
 static class Setup
 {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool MoveFileEx(string from, string to, int flags);
+    static string logFile;
+    // Every change is written to <install>\install.log (same idea as WacOS instalacao.log), so a user or a scanner can see exactly what was done.
+    static void Log(string line) { try { if (logFile != null) File.AppendAllText(logFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + line + Environment.NewLine); } catch { } }
+    static void Task(string args) { try { Process.Start(new ProcessStartInfo("schtasks", args) { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(15000); } catch { } }
     [STAThread]
     static int Main(string[] args)
     {
@@ -24,16 +31,26 @@ static class Setup
         bool silent = Array.IndexOf(args, "/S") >= 0;
         if (Array.IndexOf(args, "/uninstall") >= 0)
         {
-            if (!silent && MessageBox.Show("Remove MacDock? Your pins and settings in %APPDATA%\\MacDock are kept.", "MacDock Setup", MessageBoxButtons.OKCancel) != DialogResult.OK) return 1;
+            string self = Assembly.GetExecutingAssembly().Location;
+            if (Array.IndexOf(args, "/final") < 0)
+            {
+                if (!silent && MessageBox.Show("Remove MacDock? Your pins and settings in %APPDATA%\\MacDock are kept.", "MacDock Setup", MessageBoxButtons.OKCancel) != DialogResult.OK) return 1;
+                // Run the removal from a temp copy so the install folder (and this exe) can be deleted normally: no cmd/timeout self-delete trick.
+                string tmp = Path.Combine(Path.GetTempPath(), "MacDock-Uninstall.exe");
+                File.Copy(self, tmp, true);
+                Process.Start(new ProcessStartInfo(tmp, "/uninstall /final" + (silent ? " /S" : "")) { UseShellExecute = false });
+                return 0;
+            }
             string ex = Path.Combine(dest, "bin", "MacDock.exe");
             try { if (File.Exists(ex)) Process.Start(ex, "/restore").WaitForExit(5000); } catch { } // brings the Windows taskbar back
-            foreach (var p in Process.GetProcessesByName("MacDock")) { try { p.Kill(); } catch { } }
-            try { Process.Start(new ProcessStartInfo("schtasks", "/Delete /TN MacDockGuard /F") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(5000); } catch { }
+            foreach (var p in Process.GetProcessesByName("MacDock")) { try { p.Kill(); p.WaitForExit(3000); } catch { } }
+            Task("/Delete /TN MacDockGuard /F");
             try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)) k.DeleteValue("MacDock", false); } catch { }
             try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\MacDock", false); } catch { }
             try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\DirectX\UserGpuPreferences", true)) k.DeleteValue(ex, false); } catch { }
             try { File.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "MacDock.lnk")); } catch { }
-            Process.Start(new ProcessStartInfo("cmd", "/c timeout /t 2 >nul & rmdir /s /q \"" + dest + "\"") { CreateNoWindow = true, UseShellExecute = false });
+            for (int i = 0; i < 10 && Directory.Exists(dest); i++) { try { Directory.Delete(dest, true); } catch { Thread.Sleep(500); } }
+            MoveFileEx(self, null, 4); // delete this temp copy at next restart
             return 0;
         }
         if (!silent && MessageBox.Show("Install MacDock for this user?\n\nNo admin rights needed. Installs to:\n" + dest, "MacDock Setup", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return 1;
@@ -47,6 +64,7 @@ static class Setup
         {
             foreach (var p in Process.GetProcessesByName("MacDock")) { try { p.Kill(); p.WaitForExit(3000); } catch { } }
             Directory.CreateDirectory(dest);
+            logFile = Path.Combine(dest, "install.log"); Log("install " + Assembly.GetExecutingAssembly().GetName().Version + " to " + dest + " (per-user, no admin)");
             using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream("payload.zip"))
             using (var z = new ZipArchive(s))
                 foreach (var e in z.Entries)
@@ -57,8 +75,10 @@ static class Setup
                     Directory.CreateDirectory(Path.GetDirectoryName(t));
                     e.ExtractToFile(t, true);
                 }
+            Log("extracted payload to " + dest);
             string exe = Path.Combine(dest, "bin", "MacDock.exe");
             File.Copy(Assembly.GetExecutingAssembly().Location, Path.Combine(dest, "Setup.exe"), true);
+            Log("copied Setup.exe (the uninstaller)");
             // Start Menu shortcut
             Type sh = Type.GetTypeFromProgID("WScript.Shell"); object w = Activator.CreateInstance(sh);
             object lnk = sh.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, w, new object[] { Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "MacDock.lnk") });
@@ -66,22 +86,26 @@ static class Setup
             lt.InvokeMember("TargetPath", BindingFlags.SetProperty, null, lnk, new object[] { exe });
             lt.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, lnk, new object[] { Path.GetDirectoryName(exe) });
             lt.InvokeMember("Save", BindingFlags.InvokeMethod, null, lnk, null);
+            Log("shortcut: Start Menu\\MacDock.lnk");
             // Settings > Apps > Installed apps entry (per-user)
             using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\MacDock"))
             {
-                k.SetValue("DisplayName", "MacDock"); k.SetValue("DisplayVersion", "2.4.0"); k.SetValue("Publisher", "MacDock Project");
+                k.SetValue("DisplayName", "MacDock"); k.SetValue("DisplayVersion", "3.0.0"); k.SetValue("Publisher", "MacDock Project");
                 k.SetValue("DisplayIcon", exe); k.SetValue("InstallLocation", dest);
                 k.SetValue("UninstallString", "\"" + Path.Combine(dest, "Setup.exe") + "\" /uninstall");
                 k.SetValue("NoModify", 1, RegistryValueKind.DWord); k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
             }
             // Integrated GPU (power saving) for the dock, as Settings > System > Display > Graphics does.
             try { using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\DirectX\UserGpuPreferences")) k.SetValue(exe, "GpuPreference=1;"); } catch { }
-            try { using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) k.SetValue("MacDock", "\"" + exe + "\""); } catch { }
-            // MacDockGuard: per-user task that restarts the dock within a minute if it is ever not running.
-            try { Process.Start(new ProcessStartInfo("schtasks", "/Create /F /SC MINUTE /MO 1 /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\"") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(15000); } catch { }
+            // Start at login: ONE mechanism (a per-user, limited, at-logon task) and only if the person agrees.
+            // No Run key on top of it and no every-minute task: stacked persistence is what scanners treat as malware behaviour.
+            // The dock relaunches itself through this same task (schtasks /Run) after a crash.
+            bool auto = silent || MessageBox.Show("Start MacDock automatically when you sign in?\n(You can change this later in MacDock settings.)", "MacDock Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+            if (auto) { Task("/Create /F /SC ONLOGON /RL LIMITED /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\""); Log("scheduled task: MacDockGuard (at logon, limited)"); }
             bool started = false;
-            try { Process.Start(new ProcessStartInfo("schtasks", "/Run /TN MacDockGuard") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(10000); started = true; } catch { }
+            if (auto) { try { Process.Start(new ProcessStartInfo("schtasks", "/Run /TN MacDockGuard") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(10000); started = true; } catch { } }
             if (!started) Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe) });
+            Log("install complete");
             if (!silent) MessageBox.Show("MacDock is installed and running. It starts at login (toggle in Settings).", "MacDock Setup");
             return 0;
         }

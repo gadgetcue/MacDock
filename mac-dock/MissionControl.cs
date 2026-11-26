@@ -268,15 +268,6 @@ namespace MacDock
             spareTimer.Tick += (s, e) => { spareTimer.Stop(); if (current == null) Prewarm(); };
             spareTimer.Start();
         }
-        [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr p, IntPtr a, IntPtr b);
-        static System.Windows.Forms.Timer trimT;
-        static void TrimSoon()
-        {
-            if (trimT != null) { trimT.Stop(); trimT.Dispose(); }
-            trimT = new System.Windows.Forms.Timer { Interval = 1500 };
-            trimT.Tick += (s, e) => { trimT.Stop(); try { GC.Collect(2, GCCollectionMode.Forced, true); SetProcessWorkingSetSize(System.Diagnostics.Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1)); } catch { } };
-            trimT.Start();
-        }
         void WakeFromSpare(long tt)
         {
             previousForeground = Win32.GetForegroundWindow();

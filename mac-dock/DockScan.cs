@@ -25,6 +25,8 @@ namespace MacDock
         }
 
         static volatile Snap latest;
+        static int scanStart; static volatile bool scanning;
+        public static int RunningMs { get { return scanning ? unchecked(Environment.TickCount - scanStart) : 0; } }
         static volatile string[] wanted = new string[0];
         static readonly AutoResetEvent wake = new AutoResetEvent(false);
         static readonly object gate = new object();
@@ -56,7 +58,8 @@ namespace MacDock
                     {
                         if (ui.IsDisposed) return;
                         var sw = Stopwatch.StartNew();
-                        Snap s = Scan(), old = latest;
+                        scanStart = Environment.TickCount; scanning = true;
+                        Snap old = latest, s; try { s = Scan(); } finally { scanning = false; }
                         latest = s;
                         if (sw.ElapsedMilliseconds >= 1000) Program.Log("SLOW DockScan (background, dock unaffected) " + sw.ElapsedMilliseconds + " ms");
                         if (old == null || old.Sig != s.Sig || old.TrashFull != s.TrashFull || old.ConfigStamp != s.ConfigStamp || !SameStamps(old, s))

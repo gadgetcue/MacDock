@@ -1,6 +1,6 @@
 // Windows radios (Wi-Fi, Bluetooth), connected Bluetooth devices, audio outputs and the master volume.
 // Everything here is a real Windows API; nothing is simulated. Calls can block, so use a worker thread
-// for DeviceFeed and Wifi. Audio is quick and can run on the UI thread.
+// for DeviceFeed (Wi-Fi is in Wifi.cs). Audio is quick and can run on the UI thread.
 
 using System;
 using System.Collections;
@@ -12,15 +12,6 @@ using System.Text.RegularExpressions;
 
 namespace MacDock
 {
-    sealed class WifiNetwork
-    {
-        public string Name;
-        public int Signal;
-        public string Security;
-        public bool Connected;
-        public string Auth;
-    }
-
     static class DeviceFeed
     {
         // Radio kind is "WiFi" or "Bluetooth". Returns null if Windows exposes no such radio.
@@ -112,122 +103,6 @@ namespace MacDock
                 if (!string.IsNullOrWhiteSpace(name)) names.Add(name);
             }
             return names;
-        }
-    }
-
-    static class Wifi
-    {
-        // Reads the connected network and nearby networks from Windows' own WLAN tool.
-        public static List<WifiNetwork> Scan()
-        {
-            var result = new List<WifiNetwork>();
-            try
-            {
-                string current = null;
-                string interfaces = Run("netsh", "wlan show interfaces");
-                Match connected = Regex.Match(interfaces, @"^\s*SSID\s*:\s*(.+?)\s*$", RegexOptions.Multiline);
-                if (connected.Success) current = connected.Groups[1].Value;
-
-                string networks = Run("netsh", "wlan show networks mode=bssid");
-                WifiNetwork last = null;
-                foreach (string raw in networks.Split('\n'))
-                {
-                    string line = raw.Trim();
-                    Match ssid = Regex.Match(line, @"^SSID\s+\d+\s*:\s*(.*)$");
-                    if (ssid.Success)
-                    {
-                        string name = ssid.Groups[1].Value.Trim();
-                        last = null;
-                        if (name.Length == 0 || result.Any(n => n.Name == name)) continue;
-                        last = new WifiNetwork { Name = name, Connected = name == current };
-                        result.Add(last);
-                        continue;
-                    }
-                    if (last == null) continue;
-
-                    Match auth = Regex.Match(line, @"^Authentication\s*:\s*(.+)$");
-                    if (auth.Success) { last.Auth = auth.Groups[1].Value.Trim(); last.Security = last.Auth == "Open" ? "Open" : "Secured"; continue; }
-
-                    Match sig = Regex.Match(line, @"^Signal\s*:\s*(\d+)%");
-                    if (sig.Success && last.Signal == 0) last.Signal = int.Parse(sig.Groups[1].Value);
-                }
-
-                if (current != null && !result.Any(n => n.Connected))
-                    result.Insert(0, new WifiNetwork { Name = current, Connected = true, Security = "Secured" });
-            }
-            catch { }
-            return result.OrderByDescending(n => n.Connected).ThenByDescending(n => n.Signal).ToList();
-        }
-
-        // Disconnects from the current network. Returns an error text, or null on success.
-        public static string Disconnect()
-        {
-            try { Run("netsh", "wlan disconnect"); return null; }
-            catch (Exception e) { return e.Message; }
-        }
-
-        // Connects to a network: a saved profile is used as is; otherwise an open network gets a profile, and a secured one
-        // asks for the password first. Returns an error text, or null when the connect request went through.
-        public static string Connect(WifiNetwork n)
-        {
-            try
-            {
-                string profiles = Run("netsh", "wlan show profiles");
-                bool known = Regex.IsMatch(profiles, @":\s*" + Regex.Escape(n.Name) + @"\s*$", RegexOptions.Multiline);
-                if (!known)
-                {
-                    string key = null;
-                    if (n.Security != "Open")
-                    {
-                        key = Microsoft.VisualBasic.Interaction.InputBox("Password for \"" + n.Name + "\":", "Wi-Fi", "");
-                        if (string.IsNullOrEmpty(key)) return null;
-                    }
-                    string err = AddProfile(n, key);
-                    if (err != null) return err;
-                }
-                string outp = Run("netsh", "wlan connect name=\"" + n.Name + "\" ssid=\"" + n.Name + "\"");
-                return outp.Contains("successfully") ? null : "Could not connect";
-            }
-            catch (Exception e) { return e.Message; }
-        }
-
-        static string AddProfile(WifiNetwork n, string key)
-        {
-            string name = System.Security.SecurityElement.Escape(n.Name);
-            string sec;
-            if (key == null) sec = "<authEncryption><authentication>open</authentication><encryption>none</encryption><useOneX>false</useOneX></authEncryption>";
-            else
-            {
-                string a = n.Auth != null && n.Auth.Contains("WPA3") ? "WPA3SAE" : "WPA2PSK";
-                sec = "<authEncryption><authentication>" + a + "</authentication><encryption>AES</encryption><useOneX>false</useOneX></authEncryption>" +
-                      "<sharedKey><keyType>passphrase</keyType><protected>false</protected><keyMaterial>" + System.Security.SecurityElement.Escape(key) + "</keyMaterial></sharedKey>";
-            }
-            string xml = "<?xml version=\"1.0\"?><WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\"><name>" + name + "</name><SSIDConfig><SSID><name>" + name +
-                         "</name></SSID></SSIDConfig><connectionType>ESS</connectionType><connectionMode>auto</connectionMode><MSM><security>" + sec + "</security></MSM></WLANProfile>";
-            string file = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wifi-profile.tmp.xml");
-            try
-            {
-                System.IO.File.WriteAllText(file, xml);
-                string outp = Run("netsh", "wlan add profile filename=\"" + file + "\" user=current");
-                return outp.Contains("added") ? null : "Could not save the network";
-            }
-            finally { try { System.IO.File.Delete(file); } catch { } }
-        }
-
-        static string Run(string file, string args)        {
-            var psi = new ProcessStartInfo(file, args)
-            {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true
-            };
-            using (Process p = Process.Start(psi))
-            {
-                var rd = System.Threading.Tasks.Task.Run(() => p.StandardOutput.ReadToEnd());
-                if (!rd.Wait(6000)) { try { p.Kill(); } catch { } return ""; } // a hung netsh must not hang the caller
-                p.WaitForExit(4000);
-                return rd.Result;
-            }
         }
     }
 

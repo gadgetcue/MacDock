@@ -226,6 +226,13 @@ namespace MacDock
             Wake();
         }
 
+        public void ClosePanel()
+        {
+            if (mode != Mode.Panel) return;
+            mode = Mode.Idle;
+            Wake();
+        }
+
         public void TogglePanel()
         {
             if (!Enabled) return;

@@ -226,7 +226,7 @@ namespace MacDock
         {
             if (!installed) return;
             CaptionKind kind = Classify(hwnd);
-            if (hwnd == GetForegroundWindow()) Diag("fg " + ClassOf(hwnd) + " kind=" + kind);
+            
             if (kind == CaptionKind.None) { Remove(hwnd); return; }
             Style(hwnd);
             if (kind != CaptionKind.Standard) { Remove(hwnd); return; }

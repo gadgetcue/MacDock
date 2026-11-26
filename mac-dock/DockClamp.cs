@@ -39,13 +39,25 @@ namespace MacDock
         [DllImport("user32.dll")] static extern short GetAsyncKeyState(int k);
         static Timer timer;
 
+        // Runs on its own thread with its own message loop: the window scan and the all-process location hook make cross-process
+        // calls (DWM, other apps' windows) that block while those processes are busy. On the UI thread that froze hover and clicks.
+        static System.Threading.Thread worker;
         internal static void Start()
         {
-            HookStart();
-            if (timer != null) return;
-            timer = new Timer { Interval = 350 };
-            timer.Tick += delegate { try { Tick(); } catch { } };
-            timer.Start();
+            if (worker != null) return;
+            worker = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    HookStart();
+                    timer = new Timer { Interval = 350 };
+                    timer.Tick += delegate { try { Tick(); } catch { } };
+                    timer.Start();
+                    Application.Run();
+                }
+                catch { }
+            });
+            worker.IsBackground = true; worker.Name = "DockClamp"; worker.Start();
         }
 
         // Mid-drag clamp: a location-change hook fires for every move step, so a window can't be dragged over the top bar at all.
@@ -81,7 +93,7 @@ namespace MacDock
                 var cls = new StringBuilder(64); GetClassName(h, cls, 64);
                 string c = cls.ToString();
                 if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") return;
-                SetWindowPos(h, IntPtr.Zero, w.Left, w.Top + (BarBottom - vis.Top), 0, 0, 0x0001 | 0x0004 | 0x0010);
+                SetWindowPos(h, IntPtr.Zero, w.Left, w.Top + (BarBottom - vis.Top), 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x4000);
             }
             catch { }
             finally { clamping = false; }
@@ -127,7 +139,7 @@ namespace MacDock
                     if (!GetWindowRect(h, out w)) continue;
                     if (DwmGetWindowAttribute(h, 9, out vis, 16) != 0) vis = w;
                     int down = BarBottom - vis.Top;
-                    if (down > 0) SetWindowPos(h, IntPtr.Zero, w.Left, w.Top + down, 0, 0, 0x0001 | 0x0004 | 0x0010); // NOSIZE | NOZORDER | NOACTIVATE
+                    if (down > 0) SetWindowPos(h, IntPtr.Zero, w.Left, w.Top + down, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x4000); // NOSIZE | NOZORDER | NOACTIVATE
                 }
 
             foreach (IntPtr h in fix)
@@ -148,12 +160,12 @@ namespace MacDock
                     int up = Math.Min(over, Math.Max(0, vis.Top - workTop));
                     int rest = over - up;
                     if (rest > 0 && (w.Bottom - w.Top) < mon.Height * 2 / 3) rest = 0; // small windows/popups: slide only, never shrink (clipped bottom)
-                    SetWindowPos(h, IntPtr.Zero, w.Left, w.Top - up, w.Right - w.Left, (w.Bottom - w.Top) - rest, 0x0004 | 0x0010);
+                    SetWindowPos(h, IntPtr.Zero, w.Left, w.Top - up, w.Right - w.Left, (w.Bottom - w.Top) - rest, 0x0004 | 0x0010 | 0x4000);
                     tries.Remove(h);
                     continue;
                 }
                 // NOMOVE | NOZORDER | NOACTIVATE
-                SetWindowPos(h, IntPtr.Zero, 0, 0, w.Right - w.Left, (w.Bottom - w.Top) - over, 0x0002 | 0x0004 | 0x0010);
+                SetWindowPos(h, IntPtr.Zero, 0, 0, w.Right - w.Left, (w.Bottom - w.Top) - over, 0x0002 | 0x0004 | 0x0010 | 0x4000); // 0x4000 ASYNCWINDOWPOS: a busy app can't stall the dock
             }
         }
     }

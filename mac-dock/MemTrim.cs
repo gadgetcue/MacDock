@@ -1,15 +1,12 @@
-// Keeps the working set small: after startup, popups and Launchpad, compact the heap and hand unused pages back to Windows.
+// Compacts the heap after startup, popups and Launchpad. The working set is deliberately not trimmed: paging it back in stalled the UI under load.
 using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace MacDock
 {
     static class MemTrim
     {
-        [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
-        [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
         static Timer timer;
 
         public static void Now(bool collect)
@@ -17,7 +14,7 @@ namespace MacDock
             try
             {
                 var sw = Stopwatch.StartNew(); if (collect) GC.Collect(2, GCCollectionMode.Forced, true);
-                SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1)); Program.Slow("MemTrim", sw);
+                Program.Slow("MemTrim", sw);
             }
             catch { }
         }

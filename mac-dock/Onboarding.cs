@@ -46,6 +46,11 @@ namespace MacDock
         static readonly string[][] Pages =
         {
             new[] { "Welcome to MacDock", "A macOS-style Dock, menu bar and Launchpad for Windows.", "Take a quick look around. This takes under a minute." },
+            new[] { "What's new in 3.0",
+                "No more freezes|Fixed the lag and freezes. MacDock no longer waits on other apps' windows, and memory is no longer trimmed.",
+                "No screen flashing|Fixed the flicker some screens showed while the dock redrew.",
+                "Safer installer|Installs per user, writes an install log and includes an uninstaller. Friendlier to Windows Defender.",
+                "Updating|Apple menu > Check for Updates... installs new releases automatically." },
             new[] { "What you get",
                 "Dock|Magnifying icons, genie minimize, folders that fan open.",
                 "Launchpad|Every app in one grid. Swipe with four fingers or use the shortcut.",

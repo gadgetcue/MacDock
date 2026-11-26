@@ -54,7 +54,23 @@ namespace MacDock
 
         // Restores the window if minimized, forces it above other windows (even a topmost one) without leaving it
         // topmost, and works around the foreground lock.
-        public static void Focus(IntPtr h)
+        // Other apps' windows are focused on a throwaway thread, so a busy app (or a page-faulting call) never stalls the
+        // dock's UI thread, and one stuck request never delays the next. Several windows are raised in the order given.
+        public static void Focus(params IntPtr[] windows)
+        {
+            if (windows.Length == 1 && IsOurs(windows[0])) { FocusNow(windows[0]); return; } // our own window: on the calling (UI) thread
+            var t = new System.Threading.Thread(() =>
+            {
+                try { MSG m; PeekMessage(out m, IntPtr.Zero, 0, 0, 0); foreach (IntPtr h in windows) FocusNow(h); } // PeekMessage: AttachThreadInput needs a message queue
+                catch (Exception ex) { Program.Log(ex); }
+            }) { IsBackground = true, Priority = System.Threading.ThreadPriority.AboveNormal };
+            t.Start();
+        }
+        [StructLayout(LayoutKind.Sequential)] struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int x, y; }
+        [DllImport("user32.dll")] static extern bool PeekMessage(out MSG m, IntPtr h, uint min, uint max, uint remove);
+        static bool IsOurs(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id; }
+
+        static void FocusNow(IntPtr h)
         {
             if (!NativeMethods.IsWindow(h)) return;
             // A frozen app must never freeze the dock: restore it asynchronously and never tie our input queue to its thread.
@@ -72,8 +88,8 @@ namespace MacDock
             bool a1 = false, a2 = false;
             try
             {
-                if (fgThread != 0 && fgThread != me && !NativeMethods.IsHungAppWindow(fg)) a1 = AttachThreadInput(me, fgThread, true);
-                if (tgtThread != 0 && tgtThread != me && tgtThread != fgThread) a2 = AttachThreadInput(me, tgtThread, true);
+                if (fgThread != 0 && fgThread != me && !IsOurs(fg) && Answers(fg)) a1 = AttachThreadInput(me, fgThread, true);
+                if (tgtThread != 0 && tgtThread != me && tgtThread != fgThread && Answers(h)) a2 = AttachThreadInput(me, tgtThread, true);
                 const uint NOSIZE = 1, NOMOVE = 2, SHOW = 0x40, ASYNC = 0x4000; // ASYNC: never wait on the target app's thread
                 SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, NOMOVE | NOSIZE | ASYNC); // to the top (what BringWindowToTop did)
                 SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, NOMOVE | NOSIZE | SHOW | ASYNC); // above any topmost window...
@@ -86,6 +102,10 @@ namespace MacDock
                 if (a1) AttachThreadInput(me, fgThread, false);
             }
         }
+
+        [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
+        // A busy (not yet "hung") thread would stall us once attached: it must answer WM_NULL within 100 ms.
+        static bool Answers(IntPtr h) { IntPtr r; return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 0x0002, 100, out r) != IntPtr.Zero; }
 
         public static string TitleOf(IntPtr h)
         {

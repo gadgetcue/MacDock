@@ -77,6 +77,11 @@ pub struct Dock {
     pad_y: f32,
     margin: f32,
     group_gap: f32,
+    glass_style: u8,
+    glass_mul: f32,
+    round_k: f32,
+    show_ind: bool,
+    show_div: bool,
     max_scale: f32,
     win_w: i32,
     win_h: i32,
@@ -87,6 +92,12 @@ pub struct Dock {
     mouse_y: f32,
     inside: bool,
     hover: i32,
+    glass_cache: Option<((i32, i32, i32, bool, u8), Img)>,
+    glass_t: std::time::Instant,
+    glass_ok: bool,
+    glass_pending: bool,
+    draw_ms: (f64, u32),
+    seg_ms: (f64, f64, f64),
     hide: Spring,
     fullscreen: bool,
     press: Option<(i32, f32, f32)>,
@@ -203,6 +214,11 @@ impl Dock {
             pad_y: 8.0,
             margin: 8.0,
             group_gap: 14.0,
+            glass_style: 0,
+            glass_mul: 1.0,
+            round_k: 0.30,
+            show_ind: true,
+            show_div: true,
             max_scale: 1.75,
             win_w: 0,
             win_h: 0,
@@ -213,6 +229,12 @@ impl Dock {
             mouse_y: -1.0,
             inside: false,
             hover: -1,
+            glass_cache: None,
+            glass_t: std::time::Instant::now(),
+            glass_ok: false,
+            glass_pending: false,
+            draw_ms: (0.0, 0),
+            seg_ms: (0.0, 0.0, 0.0),
             hide: Spring::new(0.0),
             fullscreen: false,
             press: None,
@@ -265,7 +287,15 @@ impl Dock {
         self.s = scale;
         self.base = cfg.s.size as f32 * scale;
         self.max_scale = cfg.s.magnify;
-        self.gap = 6.0 * scale;
+        crate::gfx::set_accent(crate::gfx::accent_for(&cfg.os("accent", "blue")));
+        crate::gfx::set_icon_style(&cfg.os("icon-style", "default"));
+        self.glass_style = match cfg.os("glass-style", "liquid").as_str() { "classic" => 1, "clear" => 2, _ => 0 };
+        self.glass_mul = match cfg.os("glass-opacity", "normal").as_str() { "low" => 0.55, "high" => 1.6, _ => 1.0 };
+        self.round_k = match cfg.os("dock-round", "normal").as_str() { "square" => 0.10, "soft" => 0.20, "round" => 0.42, _ => 0.30 };
+        self.show_ind = cfg.ob("dock-indicator", true);
+        self.show_div = cfg.ob("dock-divider", true);
+        let sp = match cfg.os("dock-spacing", "normal").as_str() { "compact" => 0.4, "roomy" => 1.8, _ => 1.0 };
+        self.gap = 6.0 * scale * sp;
         self.pad_x = 12.0 * scale;
         self.pad_y = 8.0 * scale;
         self.margin = 8.0 * scale;
@@ -868,6 +898,9 @@ impl Dock {
         self.hide.goal = want_hide;
         moving |= self.hide.step(dt, 220.0, 26.0);
         // keep running while the cursor is in the dock (magnify follows it)
+        if !moving && !self.need_draw && self.glass_pending {
+            self.need_draw = true;
+        }
         if !moving && !self.need_draw {
             self.timer_on = false;
             unsafe {
@@ -890,9 +923,27 @@ impl Dock {
         let Some(mut g) = self.gfx.take() else { return };
         g.clear(0);
         let (pl, pt, pw_, ph) = self.pill_rect;
-        let rr = (ph * 0.30).max(10.0 * self.s);
-        // thin highlight ring (the acrylic pill sits underneath)
-        g.stroke_round(pl + 0.5, pt + 0.5, pw_ - 1.0, ph - 1.0, rr, 1.0, if dark { argb(46, 255, 255, 255) } else { argb(90, 255, 255, 255) });
+        let rr = (ph * self.round_k).max(6.0 * self.s);
+        let t0 = std::time::Instant::now();
+        let (px, py) = (pl.round(), pt.round());
+        let (iw, ih, irr) = (pw_.round() as i32, ph.round() as i32, rr.round() as i32);
+        let key = (iw, ih, irr, dark, self.glass_style);
+        if self.glass_cache.as_ref().map(|c| c.0) != Some(key) {
+            let gs = self.glass_style;
+            self.glass_cache = Gfx::new(iw, ih).and_then(|mut cg| {
+                cg.clear(0);
+                let (w, h, r) = (iw as f32, ih as f32, irr as f32);
+                match gs {
+                    1 => cg.stroke_round(0.5, 0.5, w - 1.0, h - 1.0, r, 1.0, if dark { argb(46, 255, 255, 255) } else { argb(90, 255, 255, 255) }),
+                    2 => cg.liquid_glass(0.0, 0.0, w, h, r, dark, 0.7),
+                    _ => cg.liquid_glass(0.0, 0.0, w, h, r, dark, 1.0),
+                }
+                Img::from_gfx(&cg).map(|i| (key, i))
+            });
+        }
+        if let Some((_, img)) = &self.glass_cache {
+            g.blit_exact(img, px as i32, py as i32);
+        }
         // near-invisible fill so the whole pill (and the magnified zone while hovering) keeps receiving the mouse
         g.fill_round(pl, pt, pw_, ph, rr, argb(1, 0, 0, 0));
         if self.inside {
@@ -903,7 +954,7 @@ impl Dock {
         let mut prev: Option<(u8, f32)> = None;
         for it in self.items.iter() {
             if let Some((ps, _)) = prev {
-                if (ps != it.section || it.sep_before) && it.appear.v > 0.5 {
+                if self.show_div && (ps != it.section || it.sep_before) && it.appear.v > 0.5 {
                     let x = it.x - (self.gap + self.group_gap) / 2.0;
                     g.line(x, pt + ph * 0.2, x, pt + ph * 0.8, 1.0, if dark { argb(60, 255, 255, 255) } else { argb(70, 0, 0, 0) });
                 }
@@ -930,9 +981,22 @@ impl Dock {
         let (wx, wy) = (self.win_x(), self.win_y());
         // pill window follows
         let pr = (wx as f32 + pl, wy as f32 + pt, pw_, ph);
+        let t1 = std::time::Instant::now();
         self.position_pill(pr, rr);
+        let t2 = std::time::Instant::now();
         if !self.logged { self.logged = true; log(&format!("dock win {},{} {}x{} scr {:?} lift {}", wx, wy, self.win_w, self.win_h, (self.scr.left, self.scr.top, self.scr.right, self.scr.bottom), self.lift)); }
         g.present_layered(self.hwnd, wx, wy, 255);
+        self.draw_ms.0 += t0.elapsed().as_secs_f64() * 1000.0;
+        self.draw_ms.1 += 1;
+        self.seg_ms.0 += (t1 - t0).as_secs_f64() * 1000.0;
+        self.seg_ms.1 += (t2 - t1).as_secs_f64() * 1000.0;
+        self.seg_ms.2 += t2.elapsed().as_secs_f64() * 1000.0;
+        if self.draw_ms.1 >= 120 {
+            if std::env::var_os("MACDOCK_PERF").is_some() {
+                let n = self.draw_ms.1 as f64; log(&format!("dock draw avg {:.2} ms (paint {:.2} place {:.2} present {:.2})", self.draw_ms.0 / n, self.seg_ms.0 / n, self.seg_ms.1 / n, self.seg_ms.2 / n)); self.seg_ms = (0.0, 0.0, 0.0);
+            }
+            self.draw_ms = (0.0, 0);
+        }
         self.gfx = Some(g);
         self.update_tip();
     }
@@ -950,7 +1014,7 @@ impl Dock {
             g.image(img, x, top, it.sz, it.sz, alpha * it.appear.v.clamp(0.0, 1.0));
         }
         // running indicator
-        if !it.wins.is_empty() && it.appear.v > 0.6 && !matches!(it.kind, Kind::Minimized | Kind::Split) {
+        if self.show_ind && !it.wins.is_empty() && it.appear.v > 0.6 && !matches!(it.kind, Kind::Minimized | Kind::Split) {
             let cx = x + it.sz / 2.0;
             let cy = self.pill_rect.1 + self.pill_rect.3 - self.pad_y * 0.5 + 1.0 * self.s;
             let c = if dark { argb(215, 255, 255, 255) } else { argb(200, 30, 30, 30) };
@@ -964,6 +1028,16 @@ impl Dock {
     fn position_pill(&mut self, pr: (f32, f32, f32, f32), rr: f32) {
         let (x, y, w_, h_) = (pr.0.round() as i32, pr.1.round() as i32, pr.2.round() as i32, pr.3.round() as i32);
         let above = self.hwnd;
+        // Moving the acrylic pieces costs ~12 ms: while animating, refresh them at most every ~16 ms and
+        // make sure the final rect is applied once the animation settles (tick re-draws while pending).
+        let now = std::time::Instant::now();
+        if now.duration_since(self.glass_t).as_millis() < 16 && self.glass_ok {
+            self.glass_pending = true;
+            return;
+        }
+        self.glass_t = now;
+        self.glass_ok = true;
+        self.glass_pending = false;
         if let Some(g) = self.glass.as_mut() {
             g.place(x, y, w_, h_, rr as i32, above);
         }
@@ -971,7 +1045,10 @@ impl Dock {
 
     pub fn apply_theme(&mut self) {
         let dark = app().cfg.s.dark;
-        let tint = if dark { 0x5A1E1E1E } else { 0x66F5F5F5 };
+        let (base_a, rgb) = if dark { (0x5Au32, 0x1E1E1Eu32) } else { (0x66u32, 0xF5F5F5u32) };
+        let clear = if self.glass_style == 2 { 0.55 } else { 1.0 };
+        let a = ((base_a as f32 * self.glass_mul * clear).round() as u32).clamp(8, 0xE0);
+        let tint = (a << 24) | rgb;
         if let Some(g) = self.glass.as_mut() {
             g.set_tint(tint);
         }

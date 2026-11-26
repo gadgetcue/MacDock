@@ -1,5 +1,5 @@
-﻿# Builds the ONE installer: ..\release\MacDock-Setup.exe (C# v2.4 dock, icon embedded). Payload is gathered from the live mac-dock folder.
-param([string]$Exe = "$PSScriptRoot\..\mac-dock\MacDock.new.exe")
+﻿# Builds the ONE installer: ..\release\MacDock-Setup.exe (C# v3.0 dock, icon embedded). Payload is gathered from the live mac-dock folder.
+param([string]$Exe = "$env:LOCALAPPDATA\MacDock\MacDock.exe")
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $root = (Resolve-Path "$PSScriptRoot\..").Path; $md = "$root\mac-dock"
@@ -19,3 +19,4 @@ $z.Dispose()
 Remove-Item $tmp
 & "$md\check-icon.ps1" "$out\MacDock-Setup.exe"
 "{0} MB -> $out\MacDock-Setup.exe" -f [math]::Round((Get-Item "$out\MacDock-Setup.exe").Length/1MB,1)
+& "$PSScriptRoot\sign.ps1" "$out\MacDock-Setup.exe"
