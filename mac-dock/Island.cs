@@ -26,7 +26,7 @@ namespace MacDock
         // Idle: a round dot exactly as tall as the status bar.
         static readonly int IdleW = TopBar.BarHeight - 10, IdleH = TopBar.BarHeight - 10;
         // Island lives on the primary monitor: Ds follows that monitor's live DPI (fonts are in points, so text boxes must scale too).
-        static float Ds = Math.Max(1f, Dpi.Of(Screen.PrimaryScreen));
+        static float Ds = Math.Max(1f, Dpi.Of(TopBar.BarScreen()));
         static int HeaderH { get { return (int)(56 * Ds); } }
         static int MediaH { get { return (int)(46 * Ds); } }
         static int RowH { get { return (int)(44 * Ds); } }
@@ -149,7 +149,7 @@ namespace MacDock
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
 
-            Rectangle screen = Screen.PrimaryScreen.Bounds;
+            Rectangle screen = TopBar.BarScreen().Bounds;
             Bounds = new Rectangle(screen.Left + (screen.Width - CanvasW) / 2, screen.Top, CanvasW, CanvasH);
 
             Feed.Arrived += OnNotification;
@@ -305,7 +305,7 @@ namespace MacDock
         // Centred at the top of whichever display is the main one now.
         internal void Reposition()
         {
-            Rectangle screen = Screen.PrimaryScreen.Bounds;
+            Rectangle screen = TopBar.BarScreen().Bounds;
             float ns = Math.Max(1f, Dpi.Of(screen));
             if (Math.Abs(ns - Ds) > 0.001f)
             {

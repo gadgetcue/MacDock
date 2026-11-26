@@ -56,16 +56,48 @@ namespace MacDock
         static GenieOverlay overlay; // one overlay window, created once and reused, so an effect starts without delay
         static readonly uint self = (uint)Process.GetCurrentProcess().Id;
 
+        // The system's own minimize/restore animation plays under the effect and shows as extra frames. While the effect is on,
+        // switch it off for this session (not persisted, so a crash or logon puts the user's setting back); restore it on exit.
+        [StructLayout(LayoutKind.Sequential)] struct ANIMATIONINFO { public uint cbSize; public int iMinAnimate; }
+        [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action, uint param, ref ANIMATIONINFO info, uint winIni);
+        static bool animSuppressed; static int animOriginal = 1;
+
+        static void SyncSystemAnimation(bool want)
+        {
+            try
+            {
+                if (want == animSuppressed) return;
+                var ai = new ANIMATIONINFO { cbSize = (uint)Marshal.SizeOf(typeof(ANIMATIONINFO)) };
+                if (want)
+                {
+                    if (!SystemParametersInfo(0x48, ai.cbSize, ref ai, 0)) return; // SPI_GETANIMATION
+                    animOriginal = ai.iMinAnimate;
+                    if (animOriginal == 0) return; // the user already has it off
+                    ai.iMinAnimate = 0;
+                    if (SystemParametersInfo(0x49, ai.cbSize, ref ai, 0)) animSuppressed = true; // SPI_SETANIMATION, session only
+                }
+                else
+                {
+                    ai.iMinAnimate = animOriginal;
+                    SystemParametersInfo(0x49, ai.cbSize, ref ai, 0);
+                    animSuppressed = false;
+                }
+            }
+            catch { }
+        }
+
         public static void Install()
         {
             if (hook != IntPtr.Zero) return;
             proc = OnEvent;
+            SyncSystemAnimation(SetCfg.GetBool("genie", true));
             hook = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, IntPtr.Zero, proc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         }
 
         public static void Uninstall()
         {
             if (hook != IntPtr.Zero) { UnhookWinEvent(hook); hook = IntPtr.Zero; }
+            SyncSystemAnimation(false);
             GenieOverlay o = overlay;
             overlay = null;
             if (o != null) { try { o.Dispose(); } catch { } }
@@ -89,6 +121,7 @@ namespace MacDock
             try
             {
                 if (idObject != 0 || hwnd == IntPtr.Zero) return;
+                SyncSystemAnimation(SetCfg.GetBool("genie", true));
                 if (ev == EVENT_SYSTEM_MINIMIZESTART && MinimizedDock.On) MinimizedDock.Capture(hwnd);
                 { var d = DockForm.Instance; if (d != null && d.IsHandleCreated) d.RebuildSoon(); }
                 if (!SetCfg.GetBool("genie", true) || Fullscreen.Active) return;

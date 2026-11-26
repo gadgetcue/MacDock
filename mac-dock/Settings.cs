@@ -2679,6 +2679,7 @@ namespace MacDock
                     c = NewCard();
                     Toggle(c, "Show Dock", SetCfg.GetBool("show-dock", true), v => { SetCfg.SetBool("show-dock", v); DockForm.Instance.ApplyDockMode(); });
                     Toggle(c, "Auto-hide Dock", SetCfg.GetBool("auto-hide-dock", false), v => { SetCfg.SetBool("auto-hide-dock", v); DockForm.Instance.ApplyDockMode(); });
+                    Toggle(c, "Show Launchpad button in Dock", DockForm.Instance.LaunchpadPinned, v => DockForm.Instance.SetLaunchpadButton(v));
                     Toggle(c, "Show Start icon in Dock", SetCfg.GetBool("show-start-icon", true), v => DockForm.Instance.SetStartIcon(v));
                     Toggle(c, "Genie effect", SetCfg.GetBool("genie", true), v => SetCfg.SetBool("genie", v));
                     Toggle(c, "Minimize windows into the Dock (as thumbnails)", MinimizedDock.On, v => { SetCfg.SetBool("minimize-to-dock", v); DockForm.Instance.RebuildSoon(); });
@@ -2724,6 +2725,13 @@ namespace MacDock
                             string oid = order[oi];
                             PickerRow(c, names[oid], posOpts, oi, pos => { BarLayout.Move(oid, pos); BeginInvoke((Action)(() => BuildPage("menubar"))); return true; }, "Couldn't move that item.");
                         }
+                        { int[] tr = { 0, 2, 4, 6, 8, 10 }; int tc; int.TryParse(SetCfg.Get("bar-reserve-trim"), out tc); int ti = Array.IndexOf(tr, tc); if (ti < 0) ti = 0;
+                          PickerRow(c, "Space reserved under the menu bar", tr.Select(v => v == 0 ? "Full bar height (default)" : "Bar height minus " + v + " px").ToArray(), ti, i => { SetCfg.Set("bar-reserve-trim", tr[i].ToString(), false); TopBar.ReserveNow(); return true; }, "Couldn't change the reserved space."); }
+                        { var scr = Screen.AllScreens; string cm = SetCfg.Get("bar-monitor"); int mi = 0;
+                          for (int k = 0; k < scr.Length; k++) if (string.Equals(scr[k].DeviceName, cm, StringComparison.OrdinalIgnoreCase)) mi = k + 1;
+                          var mo = new List<string> { "Main display (default)" };
+                          for (int k = 0; k < scr.Length; k++) mo.Add("Display " + (k + 1) + " (" + scr[k].Bounds.Width + "x" + scr[k].Bounds.Height + ")" + (scr[k].Primary ? " - main" : ""));
+                          PickerRow(c, "Menu bar and island display", mo.ToArray(), mi, i => { SetCfg.Set("bar-monitor", i == 0 ? "" : scr[i - 1].DeviceName, false); return true; }, "Couldn't change the display."); }
                         { int[] sp = { 0, 2, 4, 6, 8, 10, 14, 18, 24 }; int cur; int.TryParse(SetCfg.Get("bar-spacing"), out cur); int si = Array.IndexOf(sp, cur); if (si < 0) si = 0;
                           PickerRow(c, "Extra spacing between items", sp.Select(v => v == 0 ? "None (default)" : v + " px").ToArray(), si, i => { SetCfg.Set("bar-spacing", sp[i].ToString(), false); return true; }, "Couldn't change the spacing."); }
                         Link(c, "Reset order", null, () => { SetCfg.Set("bar-order", string.Join(",", BarLayout.BarDefaultOrder), false); SetCfg.Set("bar-spacing", "0", false); BuildPage("menubar"); });

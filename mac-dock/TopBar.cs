@@ -326,6 +326,9 @@ namespace MacDock
     sealed class TopBar : Form
     {
         public const int BarHeight = 30;
+        // Screen space the bar reserves for maximized windows: the bar's height minus @bar-reserve-trim px (0-10), so a window can sit
+        // flush under the bar when the default leaves a wallpaper strip.
+        internal static int ReserveH { get { int t; int.TryParse(SetCfg.Get("bar-reserve-trim"), out t); return BarHeight - Math.Max(0, Math.Min(10, t)); } }
         const int LogoMenu = 0, AppMenu = 1;
 
         sealed class Hit
@@ -375,7 +378,7 @@ namespace MacDock
             StartPosition = FormStartPosition.Manual;
             using (Process me = Process.GetCurrentProcess()) self = (uint)me.Id;
 
-            Rectangle screen = Screen.PrimaryScreen.Bounds;
+            Rectangle screen = BarScreen().Bounds;
             Bounds = new Rectangle(screen.Left, screen.Top, screen.Width, BarHeight);
 
             Theme.Refresh();
@@ -441,6 +444,30 @@ namespace MacDock
 
         protected override bool ShowWithoutActivation { get { return true; } }
 
+        static readonly uint TaskbarCreatedMsg = Win32.RegisterWindowMessage("TaskbarCreated");
+
+        // Explorer restarted: the strip's registration died with the old Explorer, so maximized windows would slide under
+        // the bar. Register it again now and once more after Explorer settles.
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == (int)TaskbarCreatedMsg && IsHandleCreated)
+            {
+                BeginInvoke(new Action(ReRegisterScreenSpace));
+                var again = new Timer { Interval = 2000 };
+                again.Tick += (s, e) => { again.Stop(); again.Dispose(); ReRegisterScreenSpace(); };
+                again.Start();
+            }
+            base.WndProc(ref m);
+        }
+
+        internal static void ReserveNow() { var b = DockForm.Instance == null ? null : Application.OpenForms.OfType<TopBar>().FirstOrDefault(); if (b != null) b.BeginInvoke(new Action(b.ReRegisterScreenSpace)); }
+
+        void ReRegisterScreenSpace()
+        {
+            appBarRegistered = false; // ABM_NEW again; harmless if the registration still exists
+            ReserveScreenSpace();
+        }
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
@@ -448,12 +475,25 @@ namespace MacDock
             Redraw();
         }
 
+        // The display the menu bar and island live on: @bar-monitor in dock.txt (a display device name), else the main display.
+        internal static Screen BarScreen()
+        {
+            try
+            {
+                string want = SetCfg.Get("bar-monitor");
+                if (!string.IsNullOrEmpty(want))
+                    foreach (Screen sc in Screen.AllScreens) if (string.Equals(sc.DeviceName, want, StringComparison.OrdinalIgnoreCase)) return sc;
+            }
+            catch { }
+            return Screen.PrimaryScreen;
+        }
+
         // Registers the bar as a screen-edge toolbar so maximized windows start below it.
         void ReserveScreenSpace()
         {
             try
             {
-                Rectangle screen = Screen.PrimaryScreen.Bounds;
+                Rectangle screen = BarScreen().Bounds;
                 var data = new Win32.APPBARDATA();
                 data.cbSize = Marshal.SizeOf(typeof(Win32.APPBARDATA));
                 data.hWnd = Handle;
@@ -461,12 +501,12 @@ namespace MacDock
                 Win32.SHAppBarMessage(0, ref data); // ABM_NEW
 
                 data.uEdge = 1; // top
-                data.rc = new Win32.RECT { Left = screen.Left, Top = screen.Top, Right = screen.Right, Bottom = screen.Top + BarHeight };
+                data.rc = new Win32.RECT { Left = screen.Left, Top = screen.Top, Right = screen.Right, Bottom = screen.Top + ReserveH };
                 Win32.SHAppBarMessage(2, ref data); // ABM_QUERYPOS
-                data.rc.Bottom = data.rc.Top + BarHeight;
+                data.rc.Bottom = data.rc.Top + ReserveH;
                 Win32.SHAppBarMessage(3, ref data); // ABM_SETPOS
                 appBarRegistered = true;
-                DockClamp.BarBottom = screen.Top + BarHeight; DockClamp.Monitor = screen; DockClamp.Start(); // windows dragged up under the bar get slid back below it
+                DockClamp.BarBottom = screen.Top + ReserveH; DockClamp.Monitor = screen; DockClamp.Start(); // windows dragged up under the bar get slid back below it
             }
             catch { }
         }
@@ -501,7 +541,7 @@ namespace MacDock
         // resolution), and moves the screen-edge reservation with it.
         internal void Reposition()
         {
-            Rectangle screen = Screen.PrimaryScreen.Bounds;
+            Rectangle screen = BarScreen().Bounds;
             var want = new Rectangle(screen.Left, screen.Top, screen.Width, BarHeight);
             if (Bounds == want) return;
             ReleaseScreenSpace();
@@ -513,7 +553,7 @@ namespace MacDock
         void Tick()
         {
             tick++;
-            if (Screen.PrimaryScreen.Bounds.Width != Width || Screen.PrimaryScreen.Bounds.Left != Left) Reposition();
+            if (BarScreen().Bounds.Width != Width || BarScreen().Bounds.Left != Left) Reposition();
 
             // Step aside while a fullscreen app is in front (the dock does the same).
             bool away = Fullscreen.Active;
