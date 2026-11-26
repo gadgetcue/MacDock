@@ -78,9 +78,15 @@ You do not have to take our word for it:
 ## Screenshots (v3.0)
 ![Desktop with dock and menu bar](screenshots/v3.0/mockups/desktop-dock.png)
 
+![Control Center](screenshots/v3.0/mockups/control-center.png)
+
+![Bluetooth panel](screenshots/v3.0/mockups/bluetooth.png)
+
 ![Wi-Fi panel](screenshots/v3.0/mockups/wifi-panel.png)
 
 ![Settings: General](screenshots/v3.0/mockups/settings.png)
+
+![Settings: About, with support card](screenshots/v3.0/mockups/about.png)
 
 ![What's new in 3.0](screenshots/v3.0/mockups/whats-new.png)
 
