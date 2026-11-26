@@ -34,9 +34,9 @@ namespace MacDock
         static void Relaunch()
         {
             // Parent the new process to explorer.exe so it is outside the caller's process tree / job object.
-            // Via the MacDockGuard task (real path, outside any job); never explorer.exe with a path (packaged-shell popups). The task repeats every minute anyway.
+            // Via the MacDockGuard task (real path, outside any job); never explorer.exe with a path (packaged-shell popups). Without the task (start at login off) the exe is started directly.
             TaskbarControl.Handoff = true;
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c timeout /t 3 /nobreak >nul & schtasks /Run /TN MacDockGuard") { UseShellExecute = false, CreateNoWindow = true }); }
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c timeout /t 3 /nobreak >nul & schtasks /Run /TN MacDockGuard || start \"\" \"" + Application.ExecutablePath + "\" --detached") { UseShellExecute = false, CreateNoWindow = true }); }
             catch (Exception ex) { Program.Log(ex); }
         }
 
@@ -175,7 +175,7 @@ System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { var sw = Stopwatch.St
 try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.AboveNormal; } catch { } // stay responsive while builds load the PC
             // Keep up to 150 MB resident (hard minimum, soft maximum) so builds cannot page the dock out to disk.
             try { bool ok = SetProcessWorkingSetSizeEx(Process.GetCurrentProcess().Handle, (IntPtr)(150L << 20), (IntPtr)(768L << 20), 1 | 8); Log("working set minimum 150 MB: " + (ok ? "set" : "failed " + Marshal.GetLastWin32Error())); } catch (Exception ex) { Log(ex); }
-            SetUi.EnsureAutostart(); Program.T("autostart"); // rewritten every launch unless the user turned it off in Settings
+            SetUi.EnsureAutostart(); Program.T("autostart"); // only applies the choice made in the installer or Settings
 Typography.Configure(AppPaths.Config); Program.T("typo");
 
  T("pre-dock"); var dock = new DockForm(); T("dock-ctor"); try { dock.Show(); Application.DoEvents(); } catch (Exception exs) { Log(exs); } T("dock-shown");

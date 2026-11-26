@@ -12,7 +12,7 @@ See the [changelog](CHANGELOG.md) for what's new in v3.0.
 1. Download `MacDock-v3.0.zip` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest) and (optionally) check its SHA256 against the release notes: `certutil -hashfile MacDock-v3.0.zip SHA256`.
 2. Extract the zip to any folder (right-click > Extract All).
 3. Double-click `Install.bat`. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
-4. MacDock is copied to `%LOCALAPPDATA%\MacDock`, a Start Menu shortcut is created, and the dock starts. It also starts at login (toggle in MacDock Settings).
+4. MacDock is copied to `%LOCALAPPDATA%\MacDock`, a Start Menu shortcut is created, and the dock starts. It does not start at login until you turn that on in MacDock Settings.
 
 If Defender blocks or quarantines it, see [Why does Windows Defender flag MacDock?](#why-does-windows-defender-flag-macdock).
 
@@ -20,7 +20,7 @@ If Defender blocks or quarantines it, see [Why does Windows Defender flag MacDoc
 
 **Start / restart:** open *MacDock* from the Start Menu, or run `%LOCALAPPDATA%\MacDock\bin\MacDock.exe`. To restart it, exit MacDock and start it again from the Start Menu. If the taskbar stays hidden after a crash, run `MacDock.exe /restore` (or `mac-dock\restore-taskbar.bat` from the repo).
 
-**Uninstall:** run `Uninstall.bat` from the extracted folder (or `%LOCALAPPDATA%\MacDock\Uninstall.bat`). It restores the taskbar, stops MacDock, removes autostart, the optional guard task and the shortcut, and deletes the install folder. Pins and settings in `%APPDATA%\MacDock` are kept until you delete that folder.
+**Uninstall:** run `Uninstall.bat` from the extracted folder (or `%LOCALAPPDATA%\MacDock\Uninstall.bat`). It restores the taskbar, stops MacDock, removes autostart, the `MacDockGuard` task and the shortcut, and deletes the install folder. Pins and settings in `%APPDATA%\MacDock` are kept until you delete that folder.
 
 ## Why does Windows Defender flag MacDock?
 Short version: **it is a false positive**, but it is understandable why it happens.

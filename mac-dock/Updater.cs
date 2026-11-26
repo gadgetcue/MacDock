@@ -102,7 +102,7 @@ namespace MacDock
             try
             {
                 using (var en = Process.Start(new ProcessStartInfo("schtasks.exe", "/Change /TN MacDockGuard /ENABLE") { CreateNoWindow = true, UseShellExecute = false })) en.WaitForExit(8000);
-                Process.Start(new ProcessStartInfo("cmd.exe", "/c ping -n 4 127.0.0.1 >nul & schtasks /Run /TN MacDockGuard") { CreateNoWindow = true, UseShellExecute = false });
+                Process.Start(new ProcessStartInfo("cmd.exe", "/c ping -n 4 127.0.0.1 >nul & schtasks /Run /TN MacDockGuard || start \"\" \"" + exe + "\" --detached") { CreateNoWindow = true, UseShellExecute = false });
                 relaunch = true;
             }
             catch (Exception e) { MacDockProgram_Log(e); }

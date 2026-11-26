@@ -1,4 +1,4 @@
-﻿// MacDock single-file installer: one exe, per-user (no admin), payload embedded as a zip resource.
+// MacDock single-file installer: one exe, per-user (no admin), payload embedded as a zip resource.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -47,6 +47,7 @@ static class Setup
             Task("/Delete /TN MacDockGuard /F");
             try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)) k.DeleteValue("MacDock", false); } catch { }
             try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\MacDock", false); } catch { }
+            try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\MacDock", true)) k.DeleteValue("AutostartChoice", false); } catch { }
             try { using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\DirectX\UserGpuPreferences", true)) k.DeleteValue(ex, false); } catch { }
             try { File.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "MacDock.lnk")); } catch { }
             for (int i = 0; i < 10 && Directory.Exists(dest); i++) { try { Directory.Delete(dest, true); } catch { Thread.Sleep(500); } }
@@ -97,16 +98,19 @@ static class Setup
             }
             // Integrated GPU (power saving) for the dock, as Settings > System > Display > Graphics does.
             try { using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\DirectX\UserGpuPreferences")) k.SetValue(exe, "GpuPreference=1;"); } catch { }
-            // Start at login: ONE mechanism (a per-user, limited, at-logon task) and only if the person agrees.
-            // No Run key on top of it and no every-minute task: stacked persistence is what scanners treat as malware behaviour.
-            // The dock relaunches itself through this same task (schtasks /Run) after a crash.
-            bool auto = silent || MessageBox.Show("Start MacDock automatically when you sign in?\n(You can change this later in MacDock settings.)", "MacDock Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-            if (auto) { Task("/Create /F /SC ONLOGON /RL LIMITED /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\""); Log("scheduled task: MacDockGuard (at logon, limited)"); }
-            bool started = false;
-            if (auto) { try { Process.Start(new ProcessStartInfo("schtasks", "/Run /TN MacDockGuard") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit(10000); started = true; } catch { } }
-            if (!started) Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe) });
+            // Start at login is opt-in. Silent installs keep an earlier choice and never enable it on their own.
+            // The answer is stored for the app, which creates its one at-logon task (MacDockGuard) only when it is 1.
+            bool auto;
+            using (var k = Registry.CurrentUser.CreateSubKey(@"Software\MacDock"))
+            {
+                object prev = k.GetValue("AutostartChoice");
+                auto = silent ? (prev is int && (int)prev == 1) : MessageBox.Show("Start MacDock automatically when you sign in?\n(You can change this later in MacDock settings.)", "MacDock Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+                k.SetValue("AutostartChoice", auto ? 1 : 0, RegistryValueKind.DWord);
+            }
+            Log("start at sign-in: " + (auto ? "on" : "off"));
+            Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
             Log("install complete");
-            if (!silent) MessageBox.Show("MacDock is installed and running. It starts at login (toggle in Settings).", "MacDock Setup");
+            if (!silent) MessageBox.Show("MacDock is installed and running." + (auto ? " It starts when you sign in (toggle in Settings)." : ""), "MacDock Setup");
             return 0;
         }
         catch (Exception ex) { MessageBox.Show("Install failed: " + ex.Message, "MacDock Setup", MessageBoxButtons.OK, MessageBoxIcon.Error); return 2; }

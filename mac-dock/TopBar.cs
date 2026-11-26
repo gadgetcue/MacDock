@@ -545,6 +545,7 @@ namespace MacDock
                 volumePercent = volume < 0 ? 0 : (int)Math.Round(volume * 100);
             }
             if (tick % 50 == 0) SystemInfo.UpdateNet();
+            if (tick % 50 == 1) PollBluetooth();
             if (tick % 5 == 0)
             {
                 bool xd = SetCfg.GetBool("stats-disk", false), xn = SetCfg.GetBool("stats-net", false), xt = SetCfg.GetBool("stats-temp", false);
@@ -567,12 +568,30 @@ namespace MacDock
 
             string key = string.Join("|", DateTime.Now.ToString("ddd d MMM h:mm tt"), appName, hoverTitle, openMenu,
                 SystemInfo.Cpu, SystemInfo.Ram, SetCfg.GetBool("stats-cpu", true), SetCfg.GetBool("stats-ram", true), SystemInfo.BatteryPercent, SystemInfo.Charging, SystemInfo.OnAc,
-                SystemInfo.Net, ExtraStatsKey(), Feed.Unread, volumePercent, TrayIcons.BarOn ? TrayIcons.Cached.Count : -1, TrayIcons.Arrow, TrayIcons.Collapsible, TrayIcons.Collapsed);
+                SystemInfo.Net, ExtraStatsKey(), Feed.Unread, volumePercent, TrayIcons.BarOn ? TrayIcons.Cached.Count : -1, TrayIcons.Arrow, TrayIcons.Collapsible, TrayIcons.Collapsed, BtState);
             if (key != lastKey)
             {
                 lastKey = key;
                 Redraw();
             }
+        }
+
+        // Bluetooth status icon: 0 off (or no radio), 1 on, 2 a device is connected.
+        internal static volatile int BtState = 1;
+        int btPolling;
+
+        void PollBluetooth()
+        {
+            if (System.Threading.Interlocked.Exchange(ref btPolling, 1) == 1) return;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    bool on = DeviceFeed.RadioOn("Bluetooth") == true;
+                    BtState = !on ? 0 : BtClassic.Paired().Any(d => d.Connected) || DeviceFeed.ConnectedBluetooth().Count > 0 ? 2 : 1;
+                }
+                finally { btPolling = 0; }
+            });
         }
 
         void UpdateForeground()
@@ -1019,14 +1038,8 @@ namespace MacDock
 
         static void DrawBluetooth(Graphics g, float x, float y)
         {
-            using (var pen = new Pen(Color.FromArgb(240, 255, 255, 255), 1.5f) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
-            {
-                g.DrawLines(pen, new[]
-                {
-                    new PointF(x, y + 3.5f), new PointF(x + 8, y + 10.5f), new PointF(x + 4, y + 14),
-                    new PointF(x + 4, y), new PointF(x + 8, y + 3.5f), new PointF(x, y + 10.5f)
-                });
-            }
+            string glyph = BtState == 0 ? "bluetooth-off" : BtState == 2 ? "bluetooth-connected" : "bluetooth";
+            CcGlyphs.Draw(g, glyph, x + 4, y + 7, 0.74f, Color.FromArgb(240, 255, 255, 255));
         }
 
         static void DrawControlCenter(Graphics g, float x, float y)

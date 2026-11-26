@@ -27,6 +27,7 @@ namespace MacDock
         public bool Checked;
         public bool KeepOpen;            // item/button keeps the panel open after a click
         public bool? Toggle;             // non-null = draws a switch at the right edge
+        public bool Spin;                // item row: animated spinner at the right edge
         public double Value;             // slider position, 0..1
         public Action Click;
         public Action<bool> Toggled;
@@ -120,9 +121,6 @@ namespace MacDock
         readonly Font big = Typography.Display(26f, Weight.Semibold);
         readonly Font small = Typography.Caption();
         readonly Font tileTitle = Typography.Heading();
-        static readonly Font glyphFont = MakeGlyph();
-        static Font MakeGlyph() { var sw = System.Diagnostics.Stopwatch.StartNew(); Font f = null; try { string ff = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts", "segmdl2.ttf"); if (System.IO.File.Exists(ff)) { glyphPfc = new System.Drawing.Text.PrivateFontCollection(); glyphPfc.AddFontFile(ff); f = new Font(glyphPfc.Families[0], 12f, FontStyle.Regular, GraphicsUnit.Point); } } catch { f = null; } if (f == null) f = new Font("Segoe MDL2 Assets", 12f, FontStyle.Regular, GraphicsUnit.Point); Program.Slow("glyphFont", sw); return f; }
-        static System.Drawing.Text.PrivateFontCollection glyphPfc; // private copy: a lookup by name walks every installed font, which froze the UI for seconds
         readonly ImageAttributes fade = new ImageAttributes();
         readonly FrameClock clock = new FrameClock();
         readonly Stopwatch fadeWatch = Stopwatch.StartNew(); // times the menu-style fade; no blur window, the panel is opaque
@@ -504,12 +502,10 @@ namespace MacDock
             int icS = Sx(36), pad = Sx(14), tx0 = Sx(58);
             Rectangle ic = new Rectangle(rc.Left + pad, rc.Top + (rc.Height - icS) / 2, icS, icS);
             Color iconOff = light ? Color.FromArgb(48, 0, 0, 0) : Color.FromArgb(62, 255, 255, 255);
-            // As in the reference: an active toggle is a white circle with a blue glyph (the moon is dark on white);
-            // an inactive one is a grey circle with a light glyph.
-            Color iconFill = Lerp(iconOff, Color.White, t);
-            Color glyphOn = r.Glyph == "moon" ? Color.FromArgb(40, 40, 46) : Blue;
+            // As in macOS: an active toggle is an accent-coloured circle with a white glyph, an inactive one a grey circle.
+            Color iconFill = Lerp(iconOff, CcGlyphs.Accent(r.Glyph), t);
             using (var b = new SolidBrush(iconFill)) g.FillEllipse(b, ic);
-            DrawGlyph(g, r.Glyph, ic, Lerp(fg, glyphOn, t), iconFill);
+            DrawGlyph(g, r.Glyph, ic, Lerp(fg, Color.White, t));
 
             var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             bool noSub = string.IsNullOrEmpty(r.Sub);
@@ -537,39 +533,7 @@ namespace MacDock
             GlassBase(g, rc, rc.Height / 2f, hot);
             Color fg = Theme.Light ? Color.FromArgb(28, 28, 30) : Color.White;
             float cx = rc.Left + rc.Width / 2f, cy = rc.Top + rc.Height / 2f;
-            using (var pen = new Pen(fg, 1.9f) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
-            using (var b = new SolidBrush(fg))
-                DrawRoundGlyph(g, r.Glyph, pen, b, cx, cy);
-        }
-
-        static void DrawRoundGlyph(Graphics g, string glyph, Pen pen, Brush b, float cx, float cy)
-        {
-            switch (glyph)
-            {
-                case "stage": // two overlapping windows
-                    using (GraphicsPath p = Layered.RoundedRect(new RectangleF(cx - 4, cy - 12, 17, 17), 4)) g.DrawPath(pen, p);
-                    using (GraphicsPath p = Layered.RoundedRect(new RectangleF(cx - 13, cy - 4, 17, 17), 4)) g.DrawPath(pen, p);
-                    break;
-                case "mirror": // screen with an up arrow
-                    using (GraphicsPath p = Layered.RoundedRect(new RectangleF(cx - 12, cy - 10, 24, 20), 4.5f)) g.DrawPath(pen, p);
-                    g.DrawLine(pen, cx, cy + 3, cx, cy - 4);
-                    g.DrawLine(pen, cx - 4, cy - 1, cx, cy - 5);
-                    g.DrawLine(pen, cx + 4, cy - 1, cx, cy - 5);
-                    break;
-                case "grid": // 2x2 outlined rounded squares
-                    for (int i = 0; i < 2; i++)
-                        for (int j = 0; j < 2; j++)
-                            using (GraphicsPath p = Layered.RoundedRect(new RectangleF(cx - 11 + i * 12.5f, cy - 11 + j * 12.5f, 9.5f, 9.5f), 3f)) g.DrawPath(pen, p);
-                    break;
-                case "sidebar": // rounded window plus three dots on the left
-                    using (GraphicsPath p = Layered.RoundedRect(new RectangleF(cx - 3, cy - 9, 15, 18), 4)) g.DrawPath(pen, p);
-                    for (int i = 0; i < 3; i++) g.FillEllipse(b, cx - 12, cy - 8 + i * 6.5f, 3.2f, 3.2f);
-                    break;
-                case "airplay":
-                    using (GraphicsPath p = Layered.RoundedRect(new RectangleF(cx - 8, cy - 7, 16, 11), 2f)) g.DrawPath(pen, p);
-                    g.FillPolygon(b, new[] { new PointF(cx, cy + 1.5f), new PointF(cx + 5.5f, cy + 8), new PointF(cx - 5.5f, cy + 8) });
-                    break;
-            }
+            CcGlyphs.Draw(g, r.Glyph, cx, cy, PanelRow.Scale * 1.15f, fg);
         }
 
         void DrawGlassMedia(Graphics g, PanelRow r, bool hot)
@@ -610,20 +574,9 @@ namespace MacDock
             r.Hits.Clear();
             float by = rc.Bottom - 34, cx = rc.Left + rc.Width / 2f;
             bool playing = m != null && m.Playing;
-            using (var b = new SolidBrush(fg))
-            {
-                // previous
-                float px = cx - 42;
-                g.FillPolygon(b, new[] { new PointF(px + 3, by - 8), new PointF(px + 3, by + 8), new PointF(px - 9, by) });
-                g.FillPolygon(b, new[] { new PointF(px + 15, by - 8), new PointF(px + 15, by + 8), new PointF(px + 3, by) });
-                // play / pause
-                if (playing) { g.FillRectangle(b, cx - 7, by - 9, 5, 18); g.FillRectangle(b, cx + 2, by - 9, 5, 18); }
-                else g.FillPolygon(b, new[] { new PointF(cx - 7, by - 10), new PointF(cx - 7, by + 10), new PointF(cx + 11, by) });
-                // next
-                float nx = cx + 42;
-                g.FillPolygon(b, new[] { new PointF(nx - 3, by - 8), new PointF(nx - 3, by + 8), new PointF(nx + 9, by) });
-                g.FillPolygon(b, new[] { new PointF(nx - 15, by - 8), new PointF(nx - 15, by + 8), new PointF(nx - 3, by) });
-            }
+            CcGlyphs.Draw(g, "backward", cx - 42, by, 1f, fg);
+            CcGlyphs.Draw(g, playing ? "pause" : "play", cx, by, 1.05f, fg);
+            CcGlyphs.Draw(g, "forward", cx + 42, by, 1f, fg);
             r.Hits.Add(new KeyValuePair<Rectangle, Action>(new Rectangle((int)cx - 62, (int)by - 18, 40, 36), () => MediaFeed.Previous()));
             r.Hits.Add(new KeyValuePair<Rectangle, Action>(new Rectangle((int)cx - 20, (int)by - 18, 40, 36), () => MediaFeed.TogglePlayPause()));
             r.Hits.Add(new KeyValuePair<Rectangle, Action>(new Rectangle((int)cx + 22, (int)by - 18, 40, 36), () => MediaFeed.Next()));
@@ -646,33 +599,15 @@ namespace MacDock
                 FillRound(g, new Rectangle(tr.Left, tr.Top, Math.Max(tr.Height, filled), tr.Height), tr.Height / 2f, Color.White);
             // Thin track as in the reference: small icon before it, large icon after it.
             float cy = tr.Top + tr.Height / 2f;
-            using (var bl = new SolidBrush(fg))
-            {
-                if (r.Sun)
-                {
-                    g.FillEllipse(bl, rc.Left + 19, cy - 3.5f, 7, 7);
-                    g.FillEllipse(bl, tr.Right + 12, cy - 7, 14, 14);
-                }
-                else
-                {
-                    var speaker = new[] { new PointF(0, 4), new PointF(3.5f, 4), new PointF(7, 0.5f), new PointF(7, 11.5f), new PointF(3.5f, 8), new PointF(0, 8) };
-                    DrawPolygon(g, bl, speaker, rc.Left + 18, cy - 6);
-                    DrawPolygon(g, bl, speaker, tr.Right + 12, cy - 7.5f, 1.25f);
-                    using (var wp = new Pen(fg, 1.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                    {
-                        g.DrawArc(wp, tr.Right + 24, cy - 4, 8, 8, -50, 100);
-                        g.DrawArc(wp, tr.Right + 24, cy - 7, 14, 14, -50, 100);
-                    }
-                }
-            }
+            float gs = PanelRow.Scale * 0.72f;
+            CcGlyphs.Draw(g, r.Sun ? "sunmin" : "speaker", (rc.Left + tr.Left) / 2f + 1, cy, gs, fg);
+            CcGlyphs.Draw(g, r.Sun ? "warm" : "speakerwave", tr.Right + 19, cy, gs * 1.1f, fg);
             if (r.Extra != null)
             {
                 r.ExtraRect = new Rectangle(rc.Right - 14 - 30, (int)cy - 15, 30, 30);
                 using (var eb = new SolidBrush(light ? Color.FromArgb(48, 0, 0, 0) : Color.FromArgb(62, 255, 255, 255)))
                     g.FillEllipse(eb, r.ExtraRect);
-                using (var pen = new Pen(fg, 1.5f) { LineJoin = LineJoin.Round })
-                using (var b = new SolidBrush(fg))
-                    DrawRoundGlyph(g, "airplay", pen, b, r.ExtraRect.Left + 15, r.ExtraRect.Top + 14);
+                CcGlyphs.Draw(g, "airplay", r.ExtraRect.Left + 15, r.ExtraRect.Top + 15, 0.75f, fg);
             }
         }
 
@@ -804,6 +739,7 @@ namespace MacDock
                                 int subW = TextWidth(g, r.Sub, small, (rc.Width - 30) * 55 / 100);
                                 DrawSafe(g, r.Text, body, textBrush, new Rectangle(rc.Left + 30, rc.Top, rc.Width - 38 - (subW == 0 ? 0 : subW + 8), rc.Height), left);
                                 if (subW > 0) DrawSafe(g, r.Sub, small, mutedBrush, new Rectangle(rc.Right - 8 - subW, rc.Top, subW, rc.Height), right);
+                                if (r.Spin) DrawSpinner(g, rc.Right - 18, rc.Top + rc.Height / 2f, muted);
                                 break;
 
                             case RowKind.Button:
@@ -834,6 +770,23 @@ namespace MacDock
             using (GraphicsPath p = Layered.RoundedRect(r, radius))
             using (var b = new SolidBrush(c))
                 g.FillPath(b, p);
+        }
+
+        // macOS activity indicator: eight spokes, the bright one stepping round every 90 ms.
+        static int SpinFrame { get { return (int)(Stopwatch.GetTimestamp() / (Stopwatch.Frequency * 9 / 100) % 8); } }
+        int spinShown = -1;
+
+        static void DrawSpinner(Graphics g, float cx, float cy, Color c)
+        {
+            int frame = SpinFrame;
+            float k = PanelRow.Scale;
+            for (int i = 0; i < 8; i++)
+            {
+                double a = i * Math.PI / 4;
+                float dx = (float)Math.Cos(a) * k, dy = (float)Math.Sin(a) * k;
+                using (var pen = new Pen(Color.FromArgb(255 - ((frame - i + 8) % 8) * 28, c), 2f * k) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                    g.DrawLine(pen, cx + dx * 3.5f, cy + dy * 3.5f, cx + dx * 7f, cy + dy * 7f);
+            }
         }
 
         static void DrawSwitch(Graphics g, Rectangle r, bool on, bool light)
@@ -977,6 +930,8 @@ namespace MacDock
             if (settled && dragging == null && !tilesMoved) { if (vd.Active) vd.Sleep(); timer.Interval = 15; if (!timer.Enabled) timer.Start(); }
             else if (!vd.Active) { timer.Stop(); vd.Wake(); } // moving: one step per refresh of this monitor
 
+            if (settled && !closing && rows.Any(r => r.Spin) && spinShown != SpinFrame) { spinShown = SpinFrame; RenderContent(); Compose(); }
+
             if (settled || ticks % 2 == 0) PollInput(); // every tick once idle, so a quick tap outside is not missed
         }
 
@@ -1037,9 +992,8 @@ namespace MacDock
 
             Rectangle ic = new Rectangle(rc.Left + 14, rc.Top + (rc.Height - 36) / 2, 36, 36);
             Color iconOff = light ? Color.FromArgb(40, 0, 0, 0) : Color.FromArgb(60, 255, 255, 255);
-            Color iconOn = r.WhiteWhenOn && !light ? Color.FromArgb(255, 28, 28, 30) : Color.FromArgb(255, 255, 255, 255);
+            Color iconOn = CcGlyphs.Accent(r.Glyph);
             Color glyphOff = light ? Color.FromArgb(255, 28, 28, 30) : Color.FromArgb(255, 245, 245, 250);
-            Color glyphOn = r.WhiteWhenOn ? (light ? Color.FromArgb(255, 28, 28, 30) : Color.FromArgb(255, 255, 255, 255)) : Color.FromArgb(255, 10, 132, 255);
             Color textOff = light ? Color.FromArgb(255, 28, 28, 30) : Color.FromArgb(255, 245, 245, 250);
             Color textOn = r.WhiteWhenOn ? (light ? Color.FromArgb(255, 255, 255, 255) : Color.FromArgb(255, 28, 28, 30)) : textOff;
             Color subOff = light ? Color.FromArgb(150, 60, 60, 67) : Color.FromArgb(150, 235, 235, 245);
@@ -1047,7 +1001,7 @@ namespace MacDock
 
             Color iconFill = Lerp(iconOff, iconOn, t);
             using (var b = new SolidBrush(iconFill)) g.FillEllipse(b, ic);
-            DrawGlyph(g, r.Glyph, ic, Lerp(glyphOff, glyphOn, t), iconFill);
+            DrawGlyph(g, r.Glyph, ic, Lerp(glyphOff, Color.White, t));
 
             var left = new StringFormat(StringFormat.GenericTypographic) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
             using (var tb = new SolidBrush(Lerp(textOff, textOn, t)))
@@ -1056,102 +1010,9 @@ namespace MacDock
                 g.DrawString(r.Sub ?? "", small, sb, new Rectangle(rc.Left + 58, rc.Top + 32, rc.Width - 66, 18), left);
         }
 
-        static Bitmap lsLogo;
-
-        static void DrawGlyph(Graphics g, string glyph, Rectangle ic, Color c, Color cut)
+        static void DrawGlyph(Graphics g, string glyph, Rectangle ic, Color c)
         {
-            float cx = ic.Left + ic.Width / 2f, cy = ic.Top + ic.Height / 2f;
-            using (var b = new SolidBrush(c))
-            using (var pen = new Pen(c, 1.8f))
-            {
-                switch (glyph)
-                {
-                    case "wifi":
-                    case "bluetooth":
-                    case "airplane":
-                    {
-                        string ch = glyph == "wifi" ? "" : glyph == "bluetooth" ? "" : "";
-                        using (var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                            g.DrawString(ch, glyphFont, b, new RectangleF(ic.Left, ic.Top, ic.Width, ic.Height), center);
-                        break;
-                    }
-                    case "localsend":
-                    {
-                        // the real LocalSend logo (embedded resource), filling the icon circle
-                        if (lsLogo == null)
-                            try { using (var s = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("localsend.png")) lsLogo = new Bitmap(s); } catch { }
-                        if (lsLogo != null)
-                        {
-                            var old = g.InterpolationMode; g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                            // white monochrome logo, tinted to the glyph colour like the other icons
-                            var cm = new ColorMatrix(new float[][] {
-                                new float[] { 0, 0, 0, 0, 0 }, new float[] { 0, 0, 0, 0, 0 }, new float[] { 0, 0, 0, 0, 0 },
-                                new float[] { 0, 0, 0, c.A / 255f, 0 }, new float[] { c.R / 255f, c.G / 255f, c.B / 255f, 0, 1 } });
-                            using (var ia = new ImageAttributes())
-                            {
-                                ia.SetColorMatrix(cm);
-                                const int S = 24;
-                                g.DrawImage(lsLogo, new Rectangle(ic.Left + (ic.Width - S) / 2, ic.Top + (ic.Height - S) / 2, S, S), 0, 0, lsLogo.Width, lsLogo.Height, GraphicsUnit.Pixel, ia);
-                            }
-                            g.InterpolationMode = old;
-                        }
-                        break;
-                    }
-                    case "dark":
-                        g.DrawEllipse(pen, cx - 8, cy - 8, 16, 16);
-                        g.FillPie(b, cx - 8, cy - 8, 16, 16, 90, 180);
-                        break;
-                    case "moon":
-                        g.FillEllipse(b, cx - 8, cy - 8, 16, 16);
-                        using (var cutBrush = new SolidBrush(cut)) g.FillEllipse(cutBrush, cx - 4, cy - 10, 13, 13);
-                        break;
-                    case "warm":
-                    {
-                        // sun: disc with eight rays (Night light)
-                        g.FillEllipse(b, cx - 4.5f, cy - 4.5f, 9, 9);
-                        for (int k = 0; k < 8; k++)
-                        {
-                            double a = k * Math.PI / 4;
-                            g.DrawLine(pen, cx + (float)Math.Cos(a) * 7.5f, cy + (float)Math.Sin(a) * 7.5f, cx + (float)Math.Cos(a) * 10f, cy + (float)Math.Sin(a) * 10f);
-                        }
-                        break;
-                    }
-                    case "shot":
-                        g.DrawRectangle(pen, cx - 9, cy - 5, 18, 12);
-                        g.DrawEllipse(pen, cx - 3.5f, cy - 2.5f, 7, 7);
-                        g.FillRectangle(b, cx - 3, cy - 8, 6, 3);
-                        break;
-                    case "rec":
-                        g.DrawEllipse(pen, cx - 9, cy - 9, 18, 18);
-                        g.FillEllipse(b, cx - 4.5f, cy - 4.5f, 9, 9);
-                        break;
-                    case "project":
-                        // two overlapping screens
-                        g.DrawRectangle(pen, cx - 9, cy - 8, 12, 9);
-                        g.FillRectangle(b, cx - 3, cy - 3, 12, 9);
-                        break;
-                    case "mute":
-                        g.FillPolygon(b, new PointF[] { new PointF(cx - 9, cy - 3), new PointF(cx - 4, cy - 3), new PointF(cx + 1, cy - 8), new PointF(cx + 1, cy + 8), new PointF(cx - 4, cy + 3), new PointF(cx - 9, cy + 3) });
-                        g.DrawLine(pen, cx + 4, cy - 4, cx + 10, cy + 4);
-                        g.DrawLine(pen, cx + 10, cy - 4, cx + 4, cy + 4);
-                        break;
-                    case "lock":
-                        g.FillRectangle(b, cx - 7, cy - 1, 14, 10);
-                        g.DrawArc(pen, cx - 5, cy - 9, 10, 12, 180, 180);
-                        g.DrawLine(pen, cx - 5, cy - 3, cx - 5, cy);
-                        g.DrawLine(pen, cx + 5, cy - 3, cx + 5, cy);
-                        break;
-                    case "saver":
-                    {
-                        // battery with a plus
-                        g.DrawRectangle(pen, cx - 9, cy - 5, 16, 10);
-                        g.FillRectangle(b, cx + 8, cy - 2, 2, 4);
-                        using (var cutBrush = new SolidBrush(cut))
-                        { g.FillRectangle(cutBrush, cx - 6.5f, cy - 0.9f, 11, 1.8f); g.FillRectangle(cutBrush, cx - 1.9f, cy - 3.5f, 1.8f, 7); }
-                        break;
-                    }
-                }
-            }
+            CcGlyphs.Draw(g, glyph, ic.Left + ic.Width / 2f, ic.Top + ic.Height / 2f, ic.Width / 36f, c);
         }
 
         void PollInput()
@@ -1516,6 +1377,8 @@ namespace MacDock
             List<BtDevice> devices = radio == true ? BtClassic.Paired() : new List<BtDevice>();
             List<string> le = radio == true ? DeviceFeed.ConnectedBluetooth() : new List<string>();
 
+            if (radio.HasValue) TopBar.BtState = radio == false ? 0 : devices.Any(x => x.Connected) || le.Count > 0 ? 2 : 1;
+
             var rows = new List<PanelRow>();
             rows.Add(PanelRow.Title("Bluetooth", radio, on => Task.Run(() =>
             {
@@ -1554,10 +1417,63 @@ namespace MacDock
                     foreach (string n in le)
                         if (!devices.Any(x => x.Name == n)) rows.Add(PanelRow.Info(n, "Connected"));
                     if (devices.Count == 0 && le.Count == 0) rows.Add(PanelRow.Info("Devices", "None paired"));
+                    NearbyRows(panel, rows);
                 }
             }
             rows.Add(PanelRow.Separator());
+            rows.Add(PanelRow.Button("Bluetooth Settings...", Open("ms-settings:bluetooth")));
             return rows;
+        }
+
+        static void NearbyRows(GlassPanel panel, List<PanelRow> rows)
+        {
+            rows.Add(PanelRow.Separator());
+            rows.Add(PanelRow.Header("Nearby devices"));
+            foreach (string[] dev in BtScan.Devices().Take(8))
+            {
+                string[] d = dev;
+                bool busy = d[2] == "Pairing...";
+                PanelRow item = PanelRow.Item(d[1], busy ? PairingText : d[2], false, null);
+                item.KeepOpen = true;
+                item.Spin = busy;
+                item.Click = () =>
+                {
+                    if (item.Spin) return;
+                    item.Spin = true; item.Sub = PairingText;
+                    Task.Run(() =>
+                    {
+                        if (BtScan.Pair(d[0])) System.Threading.Thread.Sleep(1500);
+                        Background(panel, () => BluetoothRows(panel));
+                    });
+                };
+                rows.Add(item);
+            }
+            PanelRow scan = PanelRow.Item(BtScan.Scanning ? "Scanning..." : "Scan for devices", null, false, null);
+            scan.KeepOpen = true;
+            scan.Spin = BtScan.Scanning;
+            scan.Click = () =>
+            {
+                if (scan.Spin) return;
+                scan.Spin = true; scan.Text = "Scanning...";
+                Task.Run(() => ScanFor(panel, 30));
+            };
+            rows.Add(scan);
+        }
+
+        const string PairingText = "Pairing...        "; // trailing space leaves room for the spinner
+
+        // Runs one discovery pass, refreshing the panel as devices appear; ends early if the panel closes.
+        static void ScanFor(GlassPanel panel, int seconds)
+        {
+            int scan = BtScan.Start(), seen = -1;
+            var watch = Stopwatch.StartNew();
+            while (!panel.IsDisposed && BtScan.Current(scan) && watch.Elapsed.TotalSeconds < seconds)
+            {
+                if (seen != BtScan.Version) { seen = BtScan.Version; Background(panel, () => BluetoothRows(panel)); }
+                System.Threading.Thread.Sleep(700);
+            }
+            BtScan.Stop(scan);
+            if (!panel.IsDisposed) Background(panel, () => BluetoothRows(panel));
         }
 
         static List<PanelRow> SoundRows(List<string> outputs, string defaultName)

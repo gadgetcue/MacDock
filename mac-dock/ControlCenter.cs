@@ -95,11 +95,11 @@ namespace MacDock
         // Strength lives in the settings blob as a varint-like colour temperature after the 0xCF 0x28 marker:
         // kelvin = (b0 - 0x80) / 2 + b1 * 64. Returns 0..100 (6500 K = 0, 1200 K = 100) or -1 when the blob isn't recognised.
         const string CurrentKey = @"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\";
-        // Newer Windows 11 builds keep the live strength in the per-device copy; older ones in the default copy. Both are kept in step.
+        // Fallback for display only: the Strength slider writes the default copy; the per-device copy can lag behind.
         static readonly string[] SettingsPaths =
         {
-            CurrentKey + @"{31b4860e-ad92-48c8-929d-2808e44c7525}$windows.data.bluelightreduction.settingsperdevice\windows.data.bluelightreduction.settingsperdevice",
-            CurrentKey + @"default$windows.data.bluelightreduction.settings\windows.data.bluelightreduction.settings"
+            CurrentKey + @"default$windows.data.bluelightreduction.settings\windows.data.bluelightreduction.settings",
+            CurrentKey + @"{31b4860e-ad92-48c8-929d-2808e44c7525}$windows.data.bluelightreduction.settingsperdevice\windows.data.bluelightreduction.settingsperdevice"
         };
 
         static int TempIndex(byte[] d)
@@ -115,19 +115,19 @@ namespace MacDock
             return lastSet >= 0 ? lastSet : StrengthFromRegistry();
         }
 
-        // The stored registry copy goes stale on current Windows 11 builds, so the real slider value is read from Settings
-        // (hidden) once, in the background, the first time the panel opens. Returns the value or -1.
-        public static bool NeedsRead { get { return lastSet < 0; } }
+        // The real value is re-read from Windows, in the background, each time the panel opens (not during a drag).
+        public static bool NeedsRead { get { lock (sGate) return !sRunning; } }
         public static void ReadActual()
         {
-            StrengthSession ses = null;
-            try
+            lock (hGate)
             {
-                ses = OpenStrength();
-                if (ses != null && lastSet < 0) lastSet = (int)Math.Round(ses.Slider.Current.Value);
+                try
+                {
+                    int v = SettingHandler.Get();
+                    lock (sGate) if (!sRunning) lastSet = v;
+                }
+                catch (Exception e) { Log("read: " + e.Message); SettingHandler.Reset(); }
             }
-            catch (Exception e) { Log("read: " + e.Message); }
-            finally { CloseStrength(ses); }
         }
 
         static int StrengthFromRegistry()
@@ -152,91 +152,52 @@ namespace MacDock
         }
 
         static readonly object sGate = new object();
+        static readonly object hGate = new object();
         static int sWanted = -1;
         static bool sRunning;
         static int lastSet = -1;
 
-        // Drags are collapsed: the newest value wins. The hidden Settings window stays open while values keep arriving.
+        // Drags are collapsed: the newest value wins. A value that fails is retried until it sticks or a newer one replaces it.
         public static void SetStrengthLatest(int pct)
         {
-            lastSet = pct;
-            lock (sGate) { sWanted = pct; if (sRunning) return; sRunning = true; }
+            lock (sGate) { lastSet = pct; sWanted = pct; if (sRunning) return; sRunning = true; }
             Task.Run(() =>
             {
-                StrengthSession ses = null;
-                try
+                int failed = 0;
+                while (true)
                 {
-                    int idle = 0;
-                    while (true)
+                    int v;
+                    lock (sGate)
                     {
-                        System.Threading.Thread.Sleep(ses == null ? 450 : 60);
-                        int v;
+                        v = sWanted;
+                        sWanted = -1;
+                        if (v < 0) { sRunning = false; return; }
+                    }
+                    try
+                    {
+                        lock (hGate) SettingHandler.Set(v);
+                        Log("set " + v);
+                        failed = 0;
+                    }
+                    catch (Exception e)
+                    {
+                        Log("set " + v + " failed: " + e.Message);
+                        lock (hGate) SettingHandler.Reset();
                         lock (sGate)
                         {
-                            v = sWanted;
-                            if (v >= 0) sWanted = -1;
-                            else if (ses == null || idle >= 2000) { sRunning = false; return; }
+                            if (++failed < 5) { if (sWanted < 0) sWanted = v; }
+                            else { failed = 0; if (sWanted < 0) lastSet = -1; }
                         }
-                        if (v < 0) { idle += 60; continue; }
-                        idle = 0;
-                        try
-                        {
-                            if (ses == null) ses = OpenStrength();
-                            if (ses == null) { Log("gave up setting " + v); continue; }
-                            ses.Slider.SetValue(v);
-                            Log("set " + v + " -> " + ses.Slider.Current.Value);
-                        }
-                        catch (Exception e) { Log("retry: " + e.Message); CloseStrength(ses); ses = null; }
+                        System.Threading.Thread.Sleep(200);
                     }
+                    System.Threading.Thread.Sleep(30);
                 }
-                finally { CloseStrength(ses); }
             });
         }
-
-        sealed class StrengthSession
-        {
-            public System.Windows.Automation.AutomationElement Win;
-            public System.Windows.Automation.RangeValuePattern Slider;
-        }
-
-        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
         static void Log(string m)
         {
             try { System.IO.File.AppendAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "nightlight.log"), DateTime.Now.ToString("HH:mm:ss ") + m + "\r\n"); } catch { }
-        }
-
-        static void CloseStrength(StrengthSession s)
-        {
-            if (s == null) return;
-            try { ((System.Windows.Automation.WindowPattern)s.Win.GetCurrentPattern(System.Windows.Automation.WindowPattern.Pattern)).Close(); } catch { }
-        }
-
-        // Windows ignores edits to the stored strength, so the value is set the way the user would: on the Strength slider of
-        // Settings > Night light, through UI Automation, with that window parked off screen.
-        static StrengthSession OpenStrength()
-        {
-            var AE = System.Windows.Automation.AutomationElement.RootElement;
-            var byName = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Settings");
-            var strength = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Strength");
-            var isSlider = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Slider);
-            var both = new System.Windows.Automation.AndCondition(strength, isSlider);
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ms-settings:nightlight") { UseShellExecute = true });
-            for (int i = 0; i < 100; i++)
-            {
-                System.Threading.Thread.Sleep(100);
-                try
-                {
-                    System.Windows.Automation.AutomationElement w = AE.FindFirst(System.Windows.Automation.TreeScope.Children, byName);
-                    if (w == null) continue;
-                    try { SetWindowPos((IntPtr)w.Current.NativeWindowHandle, IntPtr.Zero, -32000, -32000, 0, 0, 0x0001 | 0x0004 | 0x0010); } catch { }
-                    System.Windows.Automation.AutomationElement slider = w.FindFirst(System.Windows.Automation.TreeScope.Descendants, both);
-                    if (slider == null) continue;
-                    return new StrengthSession { Win = w, Slider = (System.Windows.Automation.RangeValuePattern)slider.GetCurrentPattern(System.Windows.Automation.RangeValuePattern.Pattern) };
-                }
-                catch (Exception e) { Log("retry: " + e.Message); }
-            }
-            return null;
         }
 
         public static bool Set(bool on)

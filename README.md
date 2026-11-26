@@ -16,13 +16,13 @@ See the [changelog](CHANGELOG.md) for what's new in v3.0.
 ### Option A: single-file installer (easiest)
 1. Download `MacDock-Setup.exe` from the [Releases page](https://github.com/gadgetcue/MacDock/releases/latest). Optionally check its SHA256 against the release notes: `certutil -hashfile MacDock-Setup.exe SHA256`.
 2. Double-click it and press **OK** on the prompt. If SmartScreen says "Windows protected your PC", click **More info > Run anyway**.
-3. Setup stops any running MacDock, installs to `%LOCALAPPDATA%\MacDock`, adds a Start Menu shortcut and a *Settings > Apps > Installed apps* entry, sets the dock to use the integrated GPU, asks whether to start it at sign-in, and starts the dock. While start at login is on (toggle in MacDock Settings), MacDock keeps its sign-in entry and the `MacDockGuard` restart task.
-4. Silent install: `MacDock-Setup.exe /S`.
+3. Setup stops any running MacDock, installs to `%LOCALAPPDATA%\MacDock`, adds a Start Menu shortcut and a *Settings > Apps > Installed apps* entry, sets the dock to use the integrated GPU, asks whether to start it at sign-in, and starts the dock. Start at login is off unless you say yes (or turn it on in MacDock Settings); only then is one at-logon task, `MacDockGuard`, created. There is no every-minute task.
+4. Silent install: `MacDock-Setup.exe /S`. It never turns start at login on by itself (an earlier choice is kept).
 
 ### Option B: zip + `Install.bat`
 1. Download `MacDock-v3.0.zip` from the Releases page (check it with `certutil -hashfile MacDock-v3.0.zip SHA256`).
 2. Extract it to any folder (right-click > Extract All).
-3. Double-click `Install.bat`. It copies `bin`, `icons` and `dark-icons` to `%LOCALAPPDATA%\MacDock`, creates the Start Menu shortcut and starts the dock.
+3. Double-click `Install.bat`. It copies `bin`, `icons` and `dark-icons` to `%LOCALAPPDATA%\MacDock`, creates the Start Menu shortcut and starts the dock. It does not start at login until you turn that on in Settings.
 
 If Defender blocks or quarantines it, see [Why does Windows Defender flag MacDock?](#why-does-windows-defender-flag-macdock).
 

@@ -272,42 +272,15 @@ namespace MacDock
         }
 
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        public static bool GetAutostart()
-        {
-            try { using (var k = Registry.CurrentUser.OpenSubKey(RunKey)) return k != null && k.GetValue("MacDock") != null; }
-            catch { return false; }
-        }
         const string ChoiceKey = @"Software\MacDock";
+        // Autostart is opt-in: AutostartChoice is 1 only after the person chose it (installer or the Settings toggle).
+        public static bool GetAutostart() { return RegInt(ChoiceKey, "AutostartChoice", -1) == 1; }
         public static void SetAutostart(bool on)
         {
-            try
-            {
-                using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
-                {
-                    if (on) k.SetValue("MacDock", "\"" + AutoExe() + "\"");
-                    else k.DeleteValue("MacDock", false);
-                }
-                RegSet(ChoiceKey, "AutostartChoice", on ? 1 : 0); // remembered, so the default below never overrides the user
-            }
-            catch (Exception ex) { MessageBox.Show("Could not change startup setting:\n" + ex.Message, "MacDock"); }
+            RegSet(ChoiceKey, "AutostartChoice", on ? 1 : 0);
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => ApplyAutostart());
         }
 
-        // First run only: start MacDock at login by default. Once the toggle in Settings has been used (on or off), or this
-        // has run once, the user's choice stands and it is never switched on again. Only the per-user Run value is written.
-        public static void EnsureDefaultAutostart()
-        {
-            if (RegInt(ChoiceKey, "AutostartChoice", -1) != -1) return;
-            try
-            {
-                using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
-                    k.SetValue("MacDock", "\"" + AutoExe() + "\"");
-                RegSet(ChoiceKey, "AutostartChoice", 1);
-            }
-            catch (Exception ex) { Program.Log(ex); } // blocked: stay off, and try again next run
-        }
-
-        // Safety net: a per-user scheduled task starts MacDock every minute if it is not running (a second copy exits at the mutex).
-        // It lives in Task Scheduler, outside any parent process, so it brings the dock back even after a hard kill.
         static string AutoExe()
         {
             try
@@ -318,59 +291,82 @@ namespace MacDock
             catch (Exception ex) { Program.Log(ex); return Application.ExecutablePath; }
         }
 
-        // Repoints an existing MacDockGuard task (keeps its triggers) at the installed exe.
-        static void RepointGuardTask()
-        {
-            string exe = AutoExe();
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    var psi = new ProcessStartInfo("schtasks.exe", "/Change /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\"")
-                    { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
-                    using (var p = Process.Start(psi)) p.WaitForExit(15000);
-                }
-                catch { }
-            });
-        }
-
-        static void EnsureGuardTask()
-        {
-            string exe = AutoExe();
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    // A task that already runs this exe keeps its triggers (logon + every minute); only re-enable it.
-                    var q = new ProcessStartInfo("schtasks.exe", "/Query /TN MacDockGuard /XML") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true };
-                    string xml;
-                    using (var p = Process.Start(q)) { xml = p.StandardOutput.ReadToEnd(); p.WaitForExit(15000); }
-                    if (xml.IndexOf(exe, StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        using (var p = Process.Start(new ProcessStartInfo("schtasks.exe", "/Change /TN MacDockGuard /ENABLE") { CreateNoWindow = true, UseShellExecute = false })) p.WaitForExit(15000);
-                        return;
-                    }
-                    var psi = new ProcessStartInfo("schtasks.exe", "/Create /F /SC MINUTE /MO 1 /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\"")
-                    { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
-                    using (var p = Process.Start(psi)) p.WaitForExit(15000);
-                }
-                catch (Exception ex) { Program.Log(ex); }
-            });
-        }
-
-        // Every launch: rewrite the Run value unless the user switched autostart off.
+        // Every launch (and after the Settings toggle): make Windows match the person's choice.
         public static void EnsureAutostart()
         {
-            if (RegInt(ChoiceKey, "AutostartChoice", -1) == 0) return;
-            if (RegInt(ChoiceKey, "GuardTask", 0) == 1) EnsureGuardTask(); // opt-in only (default off)
-            EnsureGuardTask(); // /Create /F: repoints the task at the installed exe ("/Change /TR" prompts for a password and hangs)
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => ApplyAutostart());
+        }
+
+        static readonly object autoLock = new object();
+
+        // On: ONE mechanism, the per-user MacDockGuard task with an at-logon trigger (the Run key only if Task Scheduler refuses).
+        // Off: no Run value and no self-starting task. Never chosen: nothing is created. The dock never adds an every-minute task.
+        static void ApplyAutostart()
+        {
+            lock (autoLock)
+            {
+                try
+                {
+                    int choice = RegInt(ChoiceKey, "AutostartChoice", -1);
+                    if (choice == -1) return;
+                    string xml;
+                    bool exists = Schtasks("/Query /TN MacDockGuard /XML", out xml) == 0;
+                    bool atLogon = exists && xml.Contains("<LogonTrigger");
+                    if (choice == 0)
+                    {
+                        // A task without triggers only serves restarts, so it may stay.
+                        if (atLogon || (exists && xml.Contains("<TimeTrigger"))) Schtasks("/Delete /TN MacDockGuard /F", out xml);
+                        SetRunValue(null);
+                        return;
+                    }
+                    string exe = AutoExe();
+                    bool ok;
+                    // A logon task that already runs this exe is left as it is; anything else (older minute-only task) is replaced.
+                    if (atLogon && xml.IndexOf(System.Security.SecurityElement.Escape(exe), StringComparison.OrdinalIgnoreCase) >= 0)
+                        ok = Schtasks("/Change /TN MacDockGuard /ENABLE", out xml) == 0;
+                    else ok = CreateLogonTask(exe);
+                    SetRunValue(ok ? null : "\"" + exe + "\"");
+                }
+                catch (Exception ex) { Program.Log(ex); }
+            }
+        }
+
+        static void SetRunValue(string value)
+        {
+            using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
+            {
+                if (value != null) k.SetValue("MacDock", value);
+                else k.DeleteValue("MacDock", false);
+            }
+        }
+
+        static int Schtasks(string args, out string output)
+        {
+            var psi = new ProcessStartInfo("schtasks.exe", args) { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true };
+            using (var p = Process.Start(psi))
+            {
+                output = p.StandardOutput.ReadToEnd();
+                return p.WaitForExit(15000) ? p.ExitCode : -1;
+            }
+        }
+
+        // "schtasks /SC ONLOGON" needs admin rights; an XML task bound to this user does not.
+        static bool CreateLogonTask(string exe)
+        {
+            string user = System.Security.SecurityElement.Escape(System.Security.Principal.WindowsIdentity.GetCurrent().Name);
+            string x = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">"
+                + "<Triggers><LogonTrigger><UserId>" + user + "</UserId></LogonTrigger></Triggers>"
+                + "<Principals><Principal id=\"Author\"><UserId>" + user + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>"
+                + "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>"
+                + "<Actions Context=\"Author\"><Exec><Command>" + System.Security.SecurityElement.Escape(exe) + "</Command><WorkingDirectory>" + System.Security.SecurityElement.Escape(Path.GetDirectoryName(exe)) + "</WorkingDirectory></Exec></Actions></Task>";
+            string file = Path.Combine(Path.GetTempPath(), "MacDockGuard.xml");
             try
             {
-                using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
-                    k.SetValue("MacDock", "\"" + AutoExe() + "\"");
-                RegSet(ChoiceKey, "AutostartChoice", 1);
+                File.WriteAllText(file, x, System.Text.Encoding.Unicode);
+                string o;
+                return Schtasks("/Create /F /TN MacDockGuard /XML \"" + file + "\"", out o) == 0;
             }
-            catch (Exception ex) { Program.Log(ex); }
+            finally { try { File.Delete(file); } catch { } }
         }
 
         public static int RegInt(string path, string name, int def)
@@ -401,7 +397,7 @@ namespace MacDock
         }
 
         // Shuts MacDock down for good: disables only the MacDockGuard task, blocks self-relaunch, kills other MacDock.exe, exits.
-        // The next manual launch re-creates the guard task and the Run value as usual.
+        // The next launch re-enables the guard task if start at login is on.
         public static void ForceStop()
         {
             Program.QuitRequested = true;

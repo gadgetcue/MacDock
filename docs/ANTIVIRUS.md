@@ -5,7 +5,7 @@ What we do to look and behave like normal software:
 
 - Per-user install, no admin, no UAC prompt (`asInvoker` manifest). Files go to `%LOCALAPPDATA%\MacDock`.
 - Real exe metadata (company, description, product, version) and an icon in every build.
-- Setup asks before enabling start at sign-in and creates only a limited at-logon task (`MacDockGuard`). While start at login is on in Settings, the running app also keeps a Run entry and its restart task.
+- Start at sign-in is opt-in (setup question or Settings toggle; silent and zip installs leave it off). Only then does MacDock create one limited at-logon task (`MacDockGuard`); the Run key is used only if Task Scheduler refuses. No every-minute task. Turning it off removes both.
 - `install.log` in the install folder lists every file, registry and task change.
 - Uninstall from Settings > Apps (or `Setup.exe /uninstall`); it removes the task, registry entries and folder without `cmd`/`timeout` tricks.
 - No DLL injection, no remote threads, no packed or encrypted code. No PowerShell embedded in installers.

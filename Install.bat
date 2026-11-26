@@ -22,5 +22,5 @@ echo Creating Start Menu shortcut...
 rem Start Menu shortcut
 powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Programs')+'\MacDock.lnk');$s.TargetPath='%DEST%\bin\MacDock.exe';$s.WorkingDirectory='%DEST%\bin';$s.Save()" >nul 2>&1
 start "" "%DEST%\bin\MacDock.exe"
-echo MacDock installed to %DEST% and started. It starts at login by default (toggle in Settings).
+echo MacDock installed to %DEST% and started. To start it at sign-in, turn on Open MacDock at login in Settings.
 pause

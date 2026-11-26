@@ -57,8 +57,10 @@ try {
         # Guard: starts at logon and every minute, on battery too, no run time limit.
         $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
         $triggers = (New-ScheduledTaskTrigger -AtLogOn -User $me), (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1))
+        $off = (Get-ItemProperty 'HKCU:\Software\MacDock' -ea 0).AutostartChoice -eq 0
         $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName MacDockGuard -Force -Action (New-ScheduledTaskAction -Execute "`"$exe`"" -WorkingDirectory $live) -Trigger $triggers -Settings $set -Principal (New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive) | Out-Null
+        $when = @{}; if (-not $off) { $when.Trigger = $triggers }  # start at login off: restart-only task
+        Register-ScheduledTask -TaskName MacDockGuard -Force -Action (New-ScheduledTaskAction -Execute "`"$exe`"" -WorkingDirectory $live) @when -Settings $set -Principal (New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive) | Out-Null
         # Autostart value (only if present) and GPU preference follow the exe.
         $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
         if ((Get-ItemProperty $run).MacDock) { Set-ItemProperty $run MacDock "`"$exe`"" }

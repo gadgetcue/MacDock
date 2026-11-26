@@ -2,13 +2,19 @@
 
 ## v3.0
 ### Fixed
+- **Start at sign-in is now opt-in.** Answering *No* in setup, silent installs and zip installs no longer turn autostart on. The every-minute scheduled task is gone: when enabled, a single at-logon task (`MacDockGuard`) is used; older minute-only tasks are replaced or removed.
+- **Status bar popups.** Opening a menu or status panel closes the island, and a closing panel no longer disturbs the newer one.
+- **Night Light slider.** Strength is applied silently through Windows' own settings handler, with no hidden Settings window; the current value is re-read when the panel opens and failed changes are retried.
 - **Freezes and lag.** MacDock no longer waits on other apps' windows: focusing, minimizing, restoring and window repositioning are asynchronous, and window scanning runs on its own thread.
 - **Memory paging stalls.** The dock no longer trims its own working set. It keeps itself resident and runs at above-normal priority, so it stays responsive under heavy load.
 - **Screen flashing.** The menu bar and island are no longer re-raised when they are already on top.
 - **Wi-Fi panel.** Rebuilt on the native Windows Wi-Fi API: names with special characters display and connect correctly.
-- Menu bar panels: a closing panel no longer disturbs the newer one, clicking empty bar space closes menus, and quick taps outside are picked up.
+- Clicking empty menu bar space closes menus, and quick taps outside are picked up.
 
 ### Added
+- **Bluetooth scanning.** The Bluetooth panel finds and pairs new devices, with an activity spinner and a *Bluetooth Settings...* link.
+- **Bluetooth status icon** in the menu bar shows off, on or connected.
+- **Control Center icons** redrawn in the macOS 27 style: sharp vector glyphs and accent-coloured active toggles.
 - Wi-Fi password prompt for new networks, and again when a saved password no longer works.
 - The Wi-Fi panel shows the cached list at once, then a fresh scan; saved networks are marked, with a *Wi-Fi Settings...* link and a hint when Location access is off.
 - "What's new in 3.0" page in the welcome tour.
