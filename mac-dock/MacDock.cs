@@ -242,7 +242,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
                     { var lsT = new Timer { Interval = 4000 }; lsT.Tick += (s3, e3) => { lsT.Stop(); lsT.Dispose(); try { LocalSend.EnsureVerb(); LocalSend.EnsureSendTo(); } catch (Exception ex3) { Log(ex3); } }; lsT.Start(); } // shell integration: after the dock is up
                     LocalSend.WatchSends(id => bar.OpenPanel(id), bar);
                     T("pre-bar"); bar.Show(); T("bar-shown");
-                    if (IslandForm.Enabled) island.Show(); else { island.Show(); island.Hide(); } // handle must exist so it can be re-shown live
+                    island.Show(); if (!IslandForm.Enabled) island.ApplyEnabled(); // handle must exist so it can be re-shown live; ApplyEnabled hides it once the handle exists
                     T("island-shown"); Feed.Start(); T("feed-started");
                     Panels.WarmControlCenter();
                     var watchdog = new Timer { Interval = 2000 };
@@ -416,6 +416,19 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
         public static void EnsureHidden()
         {
             if (hidden) HideWindows();
+        }
+
+        // Explorer restarted (TaskbarCreated): the new taskbar forgot auto-hide. Put it back without re-reading the state,
+        // so previousState still holds the user's own setting for /restore.
+        public static void Reapply()
+        {
+            if (!hidden) return;
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            if (tray == IntPtr.Zero) return;
+            APPBARDATA set = NewData(tray);
+            set.lParam = (IntPtr)(previousState | ABS_AUTOHIDE);
+            SHAppBarMessage(ABM_SETSTATE, ref set);
+            HideWindows();
         }
 
         public static void Restore()
@@ -1037,7 +1050,32 @@ Theme.Refresh();
             if (m.Msg == 0x0312) { int id = m.WParam.ToInt32(); if (id == HK_TOGGLE) { if (kbIndex >= 0) KbExit(); else KbEnter(); } else KbKey(id); return; }
             if (dockReserved && m.Msg == (int)Win32.RegisterWindowMessage("MacDockDockBar") && IsHandleCreated) { BeginInvoke(new Action(UpdateReservation)); }
             if (m.Msg == 0x001A) { BeginInvoke(new Action(OnSystemSettingChanged)); }
+            if (m.Msg == (int)TaskbarCreatedMsg && IsHandleCreated) { BeginInvoke(new Action(OnExplorerRestarted)); }
             base.WndProc(ref m);
+        }
+
+        static readonly uint TaskbarCreatedMsg = Win32.RegisterWindowMessage("TaskbarCreated");
+
+        // Explorer restarted: appbar registrations and the taskbar's auto-hide died with it. Register the dock strip again
+        // and hide the taskbar again; a second pass 2 s later covers an Explorer that is still settling.
+        void OnExplorerRestarted()
+        {
+            Program.Log("TaskbarCreated: Explorer restarted, re-registering the dock strip");
+            ReassertAfterExplorer();
+            var again = new Timer { Interval = 2000 };
+            again.Tick += (s, e) => { again.Stop(); again.Dispose(); ReassertAfterExplorer(); };
+            again.Start();
+        }
+
+        void ReassertAfterExplorer()
+        {
+            try
+            {
+                dockReserved = false; // old registration is gone: ABM_NEW again
+                if (ShowDockOn && !AutoHideOn) ReserveBottom();
+                if (hideTaskbar) TaskbarControl.Reapply();
+            }
+            catch (Exception ex) { Program.Log(ex); }
         }
 
         protected override CreateParams CreateParams
@@ -1225,11 +1263,11 @@ Theme.Refresh();
         // rests on the bottom 3 px of the screen (about 150 ms) or while it stays over the dock. The cursor is
         // polled here, so the reveal works even while the dock window is hidden.
         bool revealed;
-        DateTime edgeSince = DateTime.MaxValue;
+        DateTime edgeSince = DateTime.MaxValue, leftSince = DateTime.MaxValue;
 
         bool AutoHideAway()
         {
-            if (!Fullscreen.AppInFront) { revealed = false; edgeSince = DateTime.MaxValue; return false; }
+            if (!Fullscreen.AppInFront) { revealed = false; edgeSince = leftSince = DateTime.MaxValue; return false; }
 
             NativeMethods.POINT p;
             NativeMethods.GetCursorPos(out p);
@@ -1250,7 +1288,9 @@ Theme.Refresh();
             {
                 // Stay while the cursor is over the pill (or the dock is being used), release when it leaves.
                 bool over = onDockScreen && p.X >= Left && p.X < Left + Width && p.Y >= Top + pillRect.Top - 8;
-                if (!over && !atEdge && dragItem == null && pressItem == null && popup == null) revealed = false;
+                if (over || atEdge || dragItem != null || pressItem != null || popup != null) leftSince = DateTime.MaxValue;
+                else if (leftSince == DateTime.MaxValue) leftSince = DateTime.Now;
+                else if ((DateTime.Now - leftSince).TotalMilliseconds >= 400) { revealed = false; leftSince = DateTime.MaxValue; } // short grace before sliding away
             }
             return !revealed;
         }
@@ -2494,6 +2534,14 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
         {
             SetCfg.SetBool("show-start-icon", on);
             RebuildItems();
+        }
+
+        // Launchpad (All Apps) button: the "[apps]" pin in dock.txt, switched from Settings.
+        internal bool LaunchpadPinned { get { return IsPinned("[apps]"); } }
+        internal void SetLaunchpadButton(bool on)
+        {
+            if (on && !IsPinned("[apps]")) AddPin("[apps]", "[apps]", 0);
+            else if (!on) RemoveApp("[apps]");
         }
 
         void ShowMenu(Item it, Point at)

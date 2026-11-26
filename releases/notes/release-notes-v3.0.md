@@ -1,5 +1,9 @@
 ## MacDock v3.0
 ### Fixed
+- **Explorer restarts** (Fixes #7): the dock and menu bar screen space and the taskbar auto-hide are registered again.
+- **Genie effect** (Fixes #8): the Windows minimize animation is suppressed while the genie effect is on (for the session only; restored on exit and at the next start). Not yet verified on a second display.
+- **Dynamic Island at startup** (Fixes #9): it stays hidden when switched off. The startup case is not yet verified.
+- **Auto-hide** (Fixes #19): a 0.4 s grace period before the dock slides away.
 - **Start at sign-in is now opt-in.** Answering *No* in setup, silent installs and zip installs no longer turn autostart on. The every-minute scheduled task is gone: when enabled, a single at-logon task (`MacDockGuard`) is used; older minute-only tasks are replaced or removed.
 - **Status bar popups.** Opening a menu or status panel closes the island, and a closing panel no longer disturbs the newer one.
 - **Night Light slider.** Strength is applied silently through Windows' own settings handler, with no hidden Settings window; the current value is re-read when the panel opens and failed changes are retried.
@@ -10,6 +14,11 @@
 - Clicking empty menu bar space closes menus, and quick taps outside are picked up.
 
 ### Added
+- **Menu bar and island display** setting (Fixes #10). Not yet verified on a second display.
+- **Show Launchpad button in Dock** switch (Fixes #13).
+- **Space reserved under the menu bar** setting (Fixes #14).
+- **What's new popup:** shown once after an update.
+- **Support card** (UPI QR) in the welcome tour's new *Follow and support* page and in Settings > About This PC.
 - **Bluetooth scanning.** The Bluetooth panel finds and pairs new devices, with an activity spinner and a *Bluetooth Settings...* link.
 - **Bluetooth status icon** in the menu bar shows off, on or connected.
 - **Control Center icons** redrawn in the macOS 27 style: sharp vector glyphs and accent-coloured active toggles.
@@ -26,8 +35,11 @@ Run `MacDock-Setup.exe` (per-user, no admin), or extract `MacDock-v3.0.zip` and 
 **Updated build:** if you already installed an earlier 3.0, run the new installer over it (*Check for Updates* only offers newer version numbers).
 The files are not code-signed, so SmartScreen may warn: *More info > Run anyway*.
 
+### Support
+If MacDock saves you time, see the [Support section](https://github.com/gadgetcue/MacDock#support).
+
 ### SHA256
 ```text
-9f7f37fb5e9fa930c0f9441abba9cd5bc99b768b4102f8042aadeb11d1612674  MacDock-Setup.exe
-fc97645f77797157c57f975a164eb606b519496ed52e37e55ffac8e4c57d261f  MacDock-v3.0.zip
+098905ce1743830e4dd1caae9e7b110bcdaae7e6d859a3f60c6c7ae82c10ee36  MacDock-Setup.exe
+ee00d37fce843925e2c4264a0fd1c9b3da09f5c741d271dbaf644f7f8cb8f52e  MacDock-v3.0.zip
 ```

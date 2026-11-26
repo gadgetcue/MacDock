@@ -30,9 +30,24 @@ namespace MacDock
         const string Flag = "onboarded";
         static OnboardingForm open;
 
+        // Bump for every release build, also when the version number stays the same: the "What's new" page shows once per value.
+        const string ReleaseBuild = "20261126.3";
+        const string SeenKey = "whatsnew-seen";
+
+        // Fresh install: the whole welcome tour. After an update: only the "What's new" page. Each at most once.
         public static void ShowIfFirstRun()
         {
-            try { if (SetCfg.GetBool(Flag, false)) return; SetCfg.SetBool(Flag, true); Open(); }
+            try
+            {
+                string build = Application.ProductVersion + "+" + ReleaseBuild;
+                bool first = !SetCfg.GetBool(Flag, false);
+                if (!first && SetCfg.Get(SeenKey) == build) return;
+                SetCfg.SetBool(Flag, true);
+                SetCfg.Set(SeenKey, build, false);
+                Program.Log((first ? "welcome tour" : "whats-new popup") + " shown for " + build);
+                if (first) Open();
+                else if (open == null || open.IsDisposed) { open = new OnboardingForm(); open.pages = new[] { Pages[1] }; open.Show(); }
+            }
             catch (Exception ex) { Program.Log(ex); }
         }
 
@@ -43,14 +58,15 @@ namespace MacDock
             open.Show();
         }
 
+        
         static readonly string[][] Pages =
         {
             new[] { "Welcome to MacDock", "A macOS-style Dock, menu bar and Launchpad for Windows.", "Take a quick look around. This takes under a minute." },
             new[] { "What's new in 3.0",
-                "No more freezes|Fixed the lag and freezes. MacDock no longer waits on other apps' windows, and memory is no longer trimmed.",
-                "No screen flashing|Fixed the flicker some screens showed while the dock redrew.",
-                "Safer installer|Installs per user, writes an install log and includes an uninstaller. Friendlier to Windows Defender.",
-                "Updating|Apple menu > Check for Updates... installs new releases automatically." },
+                "No more freezes|Fixed the lag, freezes and screen flashing. MacDock no longer waits on other apps' windows.",
+                "New Control Center|macOS 27 style icons and a Night Light slider that works without opening Settings.",
+                "Bluetooth and Wi-Fi|Find and pair Bluetooth devices, see their status in the menu bar, and join Wi-Fi from the panel.",
+                "Your choice at sign-in|MacDock starts with Windows only if you turn it on." },
             new[] { "What you get",
                 "Dock|Magnifying icons, genie minimize, folders that fan open.",
                 "Launchpad|Every app in one grid. Swipe with four fingers or use the shortcut.",
@@ -61,8 +77,11 @@ namespace MacDock
                 "Pin apps|Drag any app or folder onto the Dock. Right-click an icon for options.",
                 "Make it yours|Open MacDock Settings from the menu bar for size, theme and icons.",
                 "Start with Windows|Turn on Open MacDock at login in Settings > General.",
-                "Closing apps|Closing or force-quitting any app never closes MacDock." }
+                "Closing apps|Closing or force-quitting any app never closes MacDock." },
+            new[] { SupportTitle, "MacDock is free, with no ads and no tracking. If it saves you time, you can buy me a coffee.", DonationCard.Hint }
         };
+        const string SupportTitle = "Follow and support";
+        string[][] pages;
 
         const int BaseW = 560;
         int page;
@@ -75,6 +94,7 @@ namespace MacDock
         {
             SetUi.Apply(SetUi.WantDark());
             testScale = forceScale;
+            pages = Pages;
             Text = "Welcome to MacDock";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
@@ -121,7 +141,7 @@ namespace MacDock
         protected override void OnDpiChanged(DpiChangedEventArgs e) { base.OnDpiChanged(e); Invalidate(); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(); }
 
-        void Next() { if (page >= Pages.Length - 1) Close(); else { page++; Invalidate(); } }
+        void Next() { if (page >= pages.Length - 1) Close(); else { page++; Invalidate(); } }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
@@ -145,15 +165,19 @@ namespace MacDock
         float ptk = 0.75f; // points per pixel for the current graphics DPI
         static int I(float v) { return (int)Math.Round(v); }
 
+        static bool IsSplash(string[] p) { return p == Pages[0]; }
+
         // Natural (unstretched) content height at unit scale u; cardH gets each card's height.
         int Measure(float u, int W, out int[] cardH)
         {
             Font title = Typography.Text(22f * ptk * u, Weight.Semibold), head = Typography.Text(15f * ptk * u, Weight.Semibold),
                  body = Typography.Text(15f * ptk * u), small = Typography.Text(13f * ptk * u);
-            string[] p = Pages[page];
+            string[] p = pages[page];
             cardH = new int[Math.Max(0, p.Length - 1)];
             int h = 0;
-            if (page == 0)
+            if (p[0] == SupportTitle)
+                return TH(p[0], title, W - I(48 * u), CC) + I(10 * u) + TH(p[1], small, W - I(96 * u), CC) + I(18 * u) + I(DonationCard.Height * u) + I(12 * u) + TH(p[2], small, W - I(96 * u), CC);
+            if (IsSplash(p))
             {
                 if (logo != null) h += I(96 * u) + I(16 * u);
                 h += TH(p[0], title, W - I(48 * u), CC) + I(14 * u);
@@ -178,7 +202,7 @@ namespace MacDock
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             hits.Clear(); ptk = 72f / g.DpiY;
-            string[] p = Pages[page];
+            string[] p = pages[page];
             float s = Scale();
             int W = ClientSize.Width, H = ClientSize.Height;
             int top = I(28 * s), bottomZone = I(150 * s);
@@ -192,7 +216,18 @@ namespace MacDock
             Font bf = Typography.Text(15f * ptk * s, Weight.Semibold), sf = Typography.Text(13f * ptk * s);
             int extra = Math.Max(0, avail - nat);
             int y;
-            if (page == 0)
+            if (p[0] == SupportTitle)
+            {
+                y = top + extra / 2;
+                int th = TH(p[0], title, W - I(48 * u), CC);
+                TextRenderer.DrawText(g, p[0], title, new Rectangle(I(24 * u), y, W - I(48 * u), th), SetUi.Text, CC); y += th + I(10 * u);
+                th = TH(p[1], small, W - I(96 * u), CC);
+                TextRenderer.DrawText(g, p[1], small, new Rectangle(I(48 * u), y, W - I(96 * u), th), SetUi.Dim, CC); y += th + I(18 * u);
+                DonationCard.Draw(g, (W - I(DonationCard.Width * u)) / 2, y, u); y += I(DonationCard.Height * u) + I(12 * u);
+                th = TH(p[2], small, W - I(96 * u), CC);
+                TextRenderer.DrawText(g, p[2], small, new Rectangle(I(48 * u), y, W - I(96 * u), th), SetUi.Dim, CC);
+            }
+            else if (IsSplash(p))
             {
                 y = top + extra / 2;
                 if (logo != null) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; int ls = I(96 * u); g.DrawImage(logo, (W - ls) / 2, y, ls, ls); y += ls + I(16 * u); }
@@ -240,7 +275,7 @@ namespace MacDock
             int dsz = I(10 * s), dstep = I(16 * s);
             int lh = I(24 * s);
             int cy = dotY - I(70 * s);
-            if (page == Pages.Length - 1)
+            if (page == pages.Length - 1)
             {
                 TextRenderer.DrawText(g, Credits.Line, sf, new Rectangle(m, cy, W - 2 * m, lh), SetUi.Dim, CC);
                 string[][] L = Credits.Links;
@@ -260,18 +295,18 @@ namespace MacDock
             }
             else TextRenderer.DrawText(g, Credits.Line, sf, new Rectangle(m, cy + I(24 * s), W - 2 * m, lh), SetUi.Dim, CC);
 
-            int dx = (W - (Pages.Length * dstep - (dstep - dsz))) / 2;
-            for (int i = 0; i < Pages.Length; i++)
+            int dx = (W - (pages.Length * dstep - (dstep - dsz))) / 2;
+            for (int i = 0; i < pages.Length; i++)
                 using (var b = new SolidBrush(i == page ? SetUi.Accent : SetUi.Track)) g.FillEllipse(b, dx + i * dstep, dotY, dsz, dsz);
 
-            bool last = page == Pages.Length - 1;
+            bool last = page == pages.Length - 1;
             int nw = I(112 * s);
             Rectangle next = new Rectangle(W - m - nw, btnY, nw, btnH);
             Rectangle back = new Rectangle(m, btnY, I(80 * s), btnH);
-            Btn(g, next, last ? "Get Started" : "Next", true, bf, s);
+            Btn(g, next, !last ? "Next" : pages.Length == 1 ? "Done" : "Get Started", true, bf, s);
             hits.Add(Tuple.Create(next, (Action)Next));
             if (page > 0) { Btn(g, back, "Back", false, bf, s); hits.Add(Tuple.Create(back, (Action)(() => { page--; Invalidate(); }))); }
-            else
+            else if (!last)
             {
                 Rectangle skip = new Rectangle(m, btnY, I(60 * s), btnH);
                 TextRenderer.DrawText(g, "Skip", sf, skip, SetUi.Dim, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);

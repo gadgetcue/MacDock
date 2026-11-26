@@ -84,6 +84,8 @@ You do not have to take our word for it:
 
 ![What's new in 3.0](screenshots/v3.0/mockups/whats-new.png)
 
+![Follow and support](screenshots/v3.0/mockups/support.png)
+
 Older screenshots are in [`screenshots/v2.3`](screenshots/v2.3).
 
 ## Memory use
@@ -107,6 +109,13 @@ build.bat
 ## Configuration
 Edit `mac-dock/dock.txt`. Lines starting with `#` are ignored; `Label | target` sets a custom name; `---` starts the right-hand section; `@hide-taskbar on|off` toggles the taskbar.
 An optional macosicons.com API key goes in `dock.txt` as `@macosicons-key = YOUR_KEY` or in the `MACOSICONS_API_KEY` environment variable.
+
+## Support
+MacDock is free, with no ads and no tracking. If it saves you time, you can buy me a coffee: scan the QR with any UPI app.
+
+<img src="docs/support/donate-card.png" width="270" alt="UPI QR card of SIDDHANT RAMESH TAMGADGE">
+
+Account holder: **SIDDHANT RAMESH TAMGADGE**
 
 ## Credits
 Fonts: Inter (SIL Open Font License). Icons in `icons/` and `dark-icons/` belong to their respective authors.
