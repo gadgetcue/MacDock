@@ -846,7 +846,7 @@ namespace MacDock
                 for (int i = 0; i < n; i++) { double v = animDt[i] * 1000; if (v < min) min = v; if (v > max) max = v; sum += v; }
                 Array.Sort(animDt, 0, n);
                 double p99 = animDt[Math.Min(n - 1, (int)Math.Ceiling(n * 0.99) - 1)] * 1000;
-                System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\launchpad_anim.txt",
+                System.IO.File.AppendAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launchpad_anim.txt"),
                     string.Format("{0:s} {1} frames {2} dt ms min {3:0.0} avg {4:0.0} p99 {5:0.0} max {6:0.0}\r\n", DateTime.Now, closing ? "close" : "open", n, min, sum / n, p99, max));
             }
             catch { }
@@ -1015,7 +1015,7 @@ namespace MacDock
             if (!firstLogged && tTrig != 0 && !closing && prog > 0)
             {
                 firstLogged = true; double F = System.Diagnostics.Stopwatch.Frequency / 1000.0; long n = System.Diagnostics.Stopwatch.GetTimestamp();
-                if (PerfLog) try { System.IO.File.AppendAllText(@"D:\#AI workflows\Claude work\Windows Apps\MacDock\mac-dock\launchpad_anim.txt", string.Format("{0:s} trigger->first frame {1:0.0} ms (ctor shot+blur {2:0.0}, tiles+layout {3:0.0}, rest {4:0.0}) [tiles {5:0.0}, layout {6:0.0}, blurwait {7:0.0}, show->render {8:0.0}, render {9:0.0}{10} renders {11} firstPres->now {12:0.0} prog {13:0.00}{14}]\r\n", DateTime.Now, (n - tTrig) / F, (tShot - tTrig) / F, (tBuilt - tShot) / F, (n - tBuilt) / F, (tTiles - tShot) / F, (tLay - tTiles) / F, (tBuilt - tLay) / F, (tRend - tBuilt) / F, (n - tRend) / F, rdbg, nRender, (n - tFirstPres) / F, prog, stepLog)); } catch { }
+                if (PerfLog) try { System.IO.File.AppendAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launchpad_anim.txt"), string.Format("{0:s} trigger->first frame {1:0.0} ms (ctor shot+blur {2:0.0}, tiles+layout {3:0.0}, rest {4:0.0}) [tiles {5:0.0}, layout {6:0.0}, blurwait {7:0.0}, show->render {8:0.0}, render {9:0.0}{10} renders {11} firstPres->now {12:0.0} prog {13:0.00}{14}]\r\n", DateTime.Now, (n - tTrig) / F, (tShot - tTrig) / F, (tBuilt - tShot) / F, (n - tBuilt) / F, (tTiles - tShot) / F, (tLay - tTiles) / F, (tBuilt - tLay) / F, (tRend - tBuilt) / F, (n - tRend) / F, rdbg, nRender, (n - tFirstPres) / F, prog, stepLog)); } catch { }
             }
             double e = Eased;
             byte a = (byte)Math.Max(0, Math.Min(255, (int)Math.Round(FadeEased * 255)));

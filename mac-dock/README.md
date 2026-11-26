@@ -86,7 +86,7 @@ cd mac-dock
 build.bat
 ```
 
-This produces `MacDock.exe` in `mac-dock/`. To package your own build, put it in `bin/` next to `icons/` and `dark-icons/` and run `Install.bat`. Run `restore-taskbar.bat` if the taskbar stays hidden.
+`build.bat` builds and deploys the live copy to `%LOCALAPPDATA%\MacDock\MacDock.exe` (flat folder, started by the `MacDockGuard` task); no exe stays in `mac-dock/`. To package your own build, put it in `bin/` next to `icons/` and `dark-icons/` and run `Install.bat`. Run `restore-taskbar.bat` if the taskbar stays hidden.
 
 ## Configuration
 Edit `mac-dock/dock.txt`. Lines starting with `#` are ignored; `Label | target` sets a custom name; `---` starts the right-hand section; `@hide-taskbar on|off` toggles the taskbar.

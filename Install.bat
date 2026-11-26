@@ -7,6 +7,10 @@ if not exist "%SRC%bin\MacDock.exe" (
     echo Run this from the unzipped release folder: bin\MacDock.exe was not found.
     pause & exit /b 1
 )
+if exist "%DEST%\MacDock.exe" (
+    echo A developer install already exists in %DEST%. Update it with mac-dock\bi.ps1 instead.
+    pause & exit /b 1
+)
 echo Installing MacDock (open source, per-user, no admin) to %DEST%
 taskkill /f /im MacDock.exe >nul 2>&1
 mkdir "%DEST%" 2>nul

@@ -341,6 +341,15 @@ namespace MacDock
             {
                 try
                 {
+                    // A task that already runs this exe keeps its triggers (logon + every minute); only re-enable it.
+                    var q = new ProcessStartInfo("schtasks.exe", "/Query /TN MacDockGuard /XML") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true };
+                    string xml;
+                    using (var p = Process.Start(q)) { xml = p.StandardOutput.ReadToEnd(); p.WaitForExit(15000); }
+                    if (xml.IndexOf(exe, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        using (var p = Process.Start(new ProcessStartInfo("schtasks.exe", "/Change /TN MacDockGuard /ENABLE") { CreateNoWindow = true, UseShellExecute = false })) p.WaitForExit(15000);
+                        return;
+                    }
                     var psi = new ProcessStartInfo("schtasks.exe", "/Create /F /SC MINUTE /MO 1 /TN MacDockGuard /TR \"\\\"" + exe + "\\\"\"")
                     { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
                     using (var p = Process.Start(psi)) p.WaitForExit(15000);

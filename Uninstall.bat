@@ -3,6 +3,7 @@ rem Removes MacDock: restores the taskbar, stops it, removes autostart, the guar
 set "DEST=%LOCALAPPDATA%\MacDock"
 schtasks /Change /TN MacDockGuard /DISABLE >nul 2>&1
 if exist "%DEST%\bin\MacDock.exe" "%DEST%\bin\MacDock.exe" /restore
+if exist "%DEST%\MacDock.exe" "%DEST%\MacDock.exe" /restore
 taskkill /f /im MacDock.exe >nul 2>&1
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v MacDock /f >nul 2>&1
 schtasks /Delete /TN MacDockGuard /F >nul 2>&1

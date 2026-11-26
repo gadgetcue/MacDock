@@ -37,6 +37,12 @@ static class Setup
             return 0;
         }
         if (!silent && MessageBox.Show("Install MacDock for this user?\n\nNo admin rights needed. Installs to:\n" + dest, "MacDock Setup", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return 1;
+        // A developer "live" install (flat layout, deployed by mac-dock\bi.ps1) must stay the only copy.
+        if (File.Exists(Path.Combine(dest, "MacDock.exe")))
+        {
+            if (!silent) MessageBox.Show("A developer install already exists in " + dest + ".\nUpdate it with mac-dock\\bi.ps1 instead.", "MacDock Setup");
+            return 1;
+        }
         try
         {
             foreach (var p in Process.GetProcessesByName("MacDock")) { try { p.Kill(); p.WaitForExit(3000); } catch { } }
