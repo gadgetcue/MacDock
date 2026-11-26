@@ -72,15 +72,16 @@ namespace MacDock
                 {
                     if (!SystemParametersInfo(0x48, ai.cbSize, ref ai, 0)) return; // SPI_GETANIMATION
                     animOriginal = ai.iMinAnimate;
+                    if (animOriginal == 0 && SetCfg.GetBool("anim-suppressed", false)) { animOriginal = 1; animSuppressed = false; }
                     if (animOriginal == 0) return; // the user already has it off
                     ai.iMinAnimate = 0;
-                    if (SystemParametersInfo(0x49, ai.cbSize, ref ai, 0)) animSuppressed = true; // SPI_SETANIMATION, session only
+                    if (SystemParametersInfo(0x49, ai.cbSize, ref ai, 0)) { animSuppressed = true; SetCfg.SetBool("anim-suppressed", true); } // SPI_SETANIMATION, session only
                 }
                 else
                 {
                     ai.iMinAnimate = animOriginal;
                     SystemParametersInfo(0x49, ai.cbSize, ref ai, 0);
-                    animSuppressed = false;
+                    animSuppressed = false; SetCfg.SetBool("anim-suppressed", false);
                 }
             }
             catch { }
