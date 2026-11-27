@@ -31,7 +31,7 @@ namespace MacDock
         static OnboardingForm open;
 
         // Bump for every release build, also when the version number stays the same: the "What's new" page shows once per value.
-        const string ReleaseBuild = "20261127.2";
+        const string ReleaseBuild = "20261127.3";
         const string SeenKey = "whatsnew-seen";
 
         // Fresh install: the whole welcome tour. After an update: only the "What's new" page. Each at most once.
