@@ -694,16 +694,6 @@ namespace MacDock
             return bmp;
         }
 
-        // MacDock's own icon (from the exe), cached; used for MacDock's own island alerts.
-        Bitmap appIconBmp; bool appIconTried;
-        Bitmap AppIconBmp()
-        {
-            if (appIconTried) return appIconBmp;
-            appIconTried = true;
-            try { using (var ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath)) appIconBmp = new Bitmap(ic.ToBitmap(), 64, 64); } catch { appIconBmp = null; }
-            return appIconBmp;
-        }
-
         static Color AppColor(string app)
         {
             int hash = 17;

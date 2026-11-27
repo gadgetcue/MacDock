@@ -364,16 +364,7 @@ namespace MacDock
             var fmtR = new StringFormat(fmt) { Alignment = StringAlignment.Far };
             float ix = pill.Left + 18, cy = pill.Top + pill.Height / 2f;
             Color c = A(toastColor, alpha);
-            Bitmap appIcon = (toastKind == 1 || toastKind == 6) ? null : AppIconBmp(); // volume/brightness: glyph only, no MacDock icon
-            bool onlyIcon = appIcon != null && !(toastKind == 1 || toastKind == 2 || toastKind == 6);
-            if (appIcon != null)
-            {
-                var ia = new ImageAttributes();
-                ia.SetColorMatrix(new ColorMatrix { Matrix33 = alpha / 255f });
-                g.DrawImage(appIcon, new Rectangle((int)ix, (int)(cy - 14), 28, 28), 0, 0, appIcon.Width, appIcon.Height, GraphicsUnit.Pixel, ia);
-                ix += 36;
-            }
-            if (!onlyIcon)
+            // Action pop-ups show only their own glyph, never the MacDock icon.
             using (var pen = new Pen(c, 1.6f))
             using (var br = new SolidBrush(c))
             {
@@ -417,7 +408,7 @@ namespace MacDock
                         break;
                 }
             }
-            float tx = onlyIcon ? ix + 2 : ix + 32;
+            float tx = ix + 32;
             if (toastBar >= 0)
             {
                 g.DrawString(toastText ?? "", boldFont, white, new RectangleF(tx, pill.Top, 84, pill.Height), fmt);
