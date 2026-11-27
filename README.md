@@ -6,7 +6,7 @@ A macOS-style desktop shell for Windows 11, written in C# (WinForms). It builds 
 
 By [@gadgetcue](https://github.com/gadgetcue) · [YouTube](https://www.youtube.com/@gadgetcue) · [Instagram](https://www.instagram.com/gadgetcue) · Telegram
 
-See the [changelog](CHANGELOG.md) for what's new in v3.0.
+See the [changelog](CHANGELOG.md) for what's new in v3.1.
 
 ## Installation guide
 **Requirements:** Windows 11 (Windows 10 mostly works), x64, .NET Framework 4.x (already part of Windows). No admin rights and no SDK needed.
@@ -20,7 +20,7 @@ See the [changelog](CHANGELOG.md) for what's new in v3.0.
 4. Silent install: `MacDock-Setup.exe /S`. It never turns start at login on by itself (an earlier choice is kept).
 
 ### Option B: zip + `Install.bat`
-1. Download `MacDock-v3.0.zip` from the Releases page (check it with `certutil -hashfile MacDock-v3.0.zip SHA256`).
+1. Download `MacDock-v3.1.zip` from the Releases page (check it with `certutil -hashfile MacDock-v3.1.zip SHA256`).
 2. Extract it to any folder (right-click > Extract All).
 3. Double-click `Install.bat`. It copies `bin`, `icons` and `dark-icons` to `%LOCALAPPDATA%\MacDock`, creates the Start Menu shortcut and starts the dock. It does not start at login until you turn that on in Settings.
 
@@ -119,9 +119,7 @@ An optional macosicons.com API key goes in `dock.txt` as `@macosicons-key = YOUR
 ## Support
 MacDock is free, with no ads and no tracking. If it saves you time, you can buy me a coffee: scan the QR with any UPI app.
 
-<img src="docs/support/donate-card.png" width="270" alt="UPI QR card of SIDDHANT RAMESH TAMGADGE">
-
-Account holder: **SIDDHANT RAMESH TAMGADGE**
+<img src="docs/support/donate-card.png" width="270" alt="UPI QR support card">
 
 ## Credits
 Fonts: Inter (SIL Open Font License). Icons in `icons/` and `dark-icons/` belong to their respective authors.

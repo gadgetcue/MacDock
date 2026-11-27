@@ -69,30 +69,6 @@ namespace MacDock
             return names;
         }
 
-        // Output devices; "defaultName" is the one Windows is using now.
-        public static List<string> AudioOutputs(out string defaultName)
-        {
-            defaultName = null;
-            var names = new List<string>();
-            try
-            {
-                Type media = Rt.Winrt("Windows.Media.Devices.MediaDevice");
-                string selector = (string)Rt.CallStatic(media, "GetAudioRenderSelector");
-                Type role = Rt.Winrt("Windows.Media.Devices.AudioDeviceRole");
-                string defaultId = (string)Rt.CallStatic(media, "GetDefaultAudioRenderId", Enum.ToObject(role, 0));
-
-                Type info = Rt.Winrt("Windows.Devices.Enumeration.DeviceInformation");
-                foreach (object d in (IEnumerable)Rt.CallStaticAsync(info, "FindAllAsync", selector))
-                {
-                    string name = (string)Rt.Get(d, "Name");
-                    names.Add(name);
-                    if ((string)Rt.Get(d, "Id") == defaultId) defaultName = name;
-                }
-            }
-            catch { }
-            return names;
-        }
-
         static List<string> DeviceNames(string selector)
         {
             var names = new List<string>();
@@ -199,16 +175,21 @@ namespace MacDock
             return false;
         }
     }
+    static class CoreAudio
+    {
+        // One untyped wrapper for the device enumerator everywhere: Windows hands every caller the same COM object, so
+        // a second [ComImport] class for it makes the cast throw.
+        public static object NewEnumerator() { return Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"))); }
+    }
+
     // Master volume of the default output device (Core Audio).
     static class Audio
     {
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-        class MMDeviceEnumeratorCom { }
 
         [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IMMDeviceEnumerator
         {
-            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
             [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
         }
 
@@ -216,6 +197,43 @@ namespace MacDock
         interface IMMDevice
         {
             [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+            [PreserveSig] int OpenPropertyStore(int access, out IPropertyStore store);
+            [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        }
+
+        [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDeviceCollection
+        {
+            [PreserveSig] int GetCount(out int count);
+            [PreserveSig] int Item(int index, out IMMDevice device);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROPERTYKEY { public Guid fmtid; public int pid; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROPVARIANT { public ushort vt, r1, r2, r3; public IntPtr p1, p2; }
+
+        [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IPropertyStore
+        {
+            [PreserveSig] int GetCount(out int count);
+            [PreserveSig] int GetAt(int index, out PROPERTYKEY key);
+            [PreserveSig] int GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
+        }
+
+        [DllImport("ole32.dll")] static extern int PropVariantClear(ref PROPVARIANT value);
+
+        // Undocumented, but what the Sound control panel itself uses to switch the default device.
+        [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+        class PolicyConfigCom { }
+
+        [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IPolicyConfig
+        {
+            void GetMixFormat(); void GetDeviceFormat(); void ResetDeviceFormat(); void SetDeviceFormat(); void GetProcessingPeriod();
+            void SetProcessingPeriod(); void GetShareMode(); void SetShareMode(); void GetPropertyValue(); void SetPropertyValue();
+            [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string deviceId, int role);
         }
 
         [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -236,23 +254,74 @@ namespace MacDock
             [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
         }
 
-        static IAudioEndpointVolume endpoint;
+        // Cached per thread (the COM object can't cross from the UI thread to a worker), and re-checked so it
+        // follows the default device when that changes (headphones plugged in, output switched).
+        [ThreadStatic] static IAudioEndpointVolume endpoint;
+        [ThreadStatic] static string endpointId;
+        [ThreadStatic] static int checkedAt;
 
         static IAudioEndpointVolume Endpoint()
         {
-            if (endpoint != null) return endpoint;
+            if (endpoint != null && unchecked(Environment.TickCount - checkedAt) < 250) return endpoint;
             try
             {
-                var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+                var enumerator = (IMMDeviceEnumerator)CoreAudio.NewEnumerator();
                 IMMDevice device;
-                if (enumerator.GetDefaultAudioEndpoint(0, 1, out device) != 0) return null;
+                string id;
+                if (enumerator.GetDefaultAudioEndpoint(0, 1, out device) != 0 || device.GetId(out id) != 0) return endpoint = null;
+                checkedAt = Environment.TickCount;
+                if (endpoint != null && id == endpointId) return endpoint;
                 Guid iid = typeof(IAudioEndpointVolume).GUID;
                 object o;
-                if (device.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) return null;
+                if (device.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) return endpoint = null;
                 endpoint = (IAudioEndpointVolume)o;
+                endpointId = id;
             }
-            catch { endpoint = null; }
+            catch (Exception ex) { endpoint = null; Program.Log(ex); }
             return endpoint;
+        }
+
+        // Active output devices as (id, name); "defaultId" is the one Windows is using now.
+        public static List<KeyValuePair<string, string>> Outputs(out string defaultId)
+        {
+            defaultId = null;
+            var list = new List<KeyValuePair<string, string>>();
+            try
+            {
+                var enumerator = (IMMDeviceEnumerator)CoreAudio.NewEnumerator();
+                IMMDevice device;
+                if (enumerator.GetDefaultAudioEndpoint(0, 1, out device) == 0) device.GetId(out defaultId);
+                IMMDeviceCollection all;
+                int count;
+                if (enumerator.EnumAudioEndpoints(0, 1, out all) != 0 || all.GetCount(out count) != 0) return list;
+                for (int i = 0; i < count; i++)
+                {
+                    string id, name = null;
+                    IPropertyStore store;
+                    if (all.Item(i, out device) != 0 || device.GetId(out id) != 0) continue;
+                    var key = new PROPERTYKEY { fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), pid = 14 }; // friendly name
+                    PROPVARIANT v;
+                    if (device.OpenPropertyStore(0, out store) == 0 && store.GetValue(ref key, out v) == 0)
+                    {
+                        if (v.vt == 31) name = Marshal.PtrToStringUni(v.p1);
+                        PropVariantClear(ref v);
+                    }
+                    list.Add(new KeyValuePair<string, string>(id, name ?? "Output device"));
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        public static void SetDefault(string deviceId)
+        {
+            try
+            {
+                var policy = (IPolicyConfig)new PolicyConfigCom();
+                for (int role = 0; role < 3; role++) policy.SetDefaultEndpoint(deviceId, role);
+                checkedAt = unchecked(Environment.TickCount - 1000);
+            }
+            catch { }
         }
 
         // 0..1, or -1 if there is no output device.
@@ -266,7 +335,7 @@ namespace MacDock
                     float level;
                     if (e != null && e.GetMasterVolumeLevelScalar(out level) == 0) return level;
                 }
-                catch { endpoint = null; }
+                catch (Exception ex) { endpoint = null; Program.Log(ex); }
                 return -1;
             }
             set
@@ -277,7 +346,7 @@ namespace MacDock
                     Guid none = Guid.Empty;
                     if (e != null) e.SetMasterVolumeLevelScalar(Math.Max(0, Math.Min(1, value)), ref none);
                 }
-                catch { endpoint = null; }
+                catch (Exception ex) { endpoint = null; Program.Log(ex); }
             }
         }
 
@@ -291,7 +360,7 @@ namespace MacDock
                     bool m;
                     if (e != null && e.GetMute(out m) == 0) return m;
                 }
-                catch { endpoint = null; }
+                catch (Exception ex) { endpoint = null; Program.Log(ex); }
                 return false;
             }
             set
@@ -302,7 +371,7 @@ namespace MacDock
                     Guid none = Guid.Empty;
                     if (e != null) e.SetMute(value, ref none);
                 }
-                catch { endpoint = null; }
+                catch (Exception ex) { endpoint = null; Program.Log(ex); }
             }
         }
     }

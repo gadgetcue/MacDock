@@ -28,6 +28,7 @@ namespace MacDock
         internal static bool QuitRequested; // set only by the deliberate "Quit MacDock" menu item
 
         [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessWorkingSetSizeEx(IntPtr process, IntPtr min, IntPtr max, uint flags);
+        [DllImport("ntdll.dll")] static extern int NtSetInformationProcess(IntPtr process, int infoClass, ref int value, int size);
 
         [DllImport("user32.dll")] static extern void DisableProcessWindowsGhosting();
 
@@ -173,6 +174,8 @@ namespace MacDock
 System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { var sw = Stopwatch.StartNew(); var df = Control.DefaultFont; Log("DefaultFont warmed in " + sw.ElapsedMilliseconds + " ms"); } catch (Exception ex) { Log(ex); } }); Program.T("main-enter"); Theme.Refresh(); Program.T("theme");
                 Motion.Refresh();
 try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.AboveNormal; } catch { } // stay responsive while builds load the PC
+            // The MacDockGuard task starts the dock with low disk (1) and memory (2) priority, and every app launched from it inherits both: restore normal.
+            try { IntPtr me = Process.GetCurrentProcess().Handle; int io = 2, page = 5; int a = NtSetInformationProcess(me, 33, ref io, 4), b = NtSetInformationProcess(me, 39, ref page, 4); Log("io/page priority normal: " + a + "/" + b); } catch (Exception ex) { Log(ex); }
             // Keep up to 150 MB resident (hard minimum, soft maximum) so builds cannot page the dock out to disk.
             try { bool ok = SetProcessWorkingSetSizeEx(Process.GetCurrentProcess().Handle, (IntPtr)(150L << 20), (IntPtr)(768L << 20), 1 | 8); Log("working set minimum 150 MB: " + (ok ? "set" : "failed " + Marshal.GetLastWin32Error())); } catch (Exception ex) { Log(ex); }
             SetUi.EnsureAutostart(); Program.T("autostart"); // only applies the choice made in the installer or Settings
@@ -918,7 +921,7 @@ Typography.Configure(AppPaths.Config); Program.T("typo");
             refreshTimer.Tick += (s, e) => { MinimizedDock.Track(); RebuildItems(); };
             { var warm = new Timer { Interval = 4000 }; warm.Tick += (s, e) => { warm.Stop(); warm.Dispose(); Item fo = items.FirstOrDefault(x => x.Kind == Kind.Folder); if (fo != null) DownloadsFan.Warm(Environment.ExpandEnvironmentVariables(fo.Target)); }; warm.Start(); } // first folder click opens without a cold start
             // Test hook: a line in mac-dock\scratch\click.trigger names a dock item (part of its target); the dock clicks it, like the user would.
-            { var trig = new Timer { Interval = 400 }; trig.Tick += (s, e) => { try { string tf = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scratch", "click.trigger"); if (!File.Exists(tf)) return; string want = File.ReadAllText(tf).Trim(); File.Delete(tf); if (want == "@settings-close") { SettingsForm.CloseForTest(); return; } if (want.StartsWith("@settings:")) { Program.Log("TRIGGER settings page " + want.Substring(10)); SettingsForm.ShowSettings(want.Substring(10)); return; } if (want == "@settings") { Program.Log("TRIGGER settings"); SettingsForm.ShowSettings(); Program.Log("TRIGGER settings done"); return; } Item hit = items.FirstOrDefault(x => x.Target != null && x.Target.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0); Program.Log("TRIGGER click " + want + " -> " + (hit == null ? "none" : hit.Target)); if (hit != null) { var tsw = Stopwatch.StartNew(); Activate(hit); Program.Log("TRIGGER activate took " + tsw.ElapsedMilliseconds + " ms"); } } catch (Exception ex) { Program.Log(ex); } }; trig.Start(); }
+            { var trig = new Timer { Interval = 400 }; trig.Tick += (s, e) => { try { string tf = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scratch", "click.trigger"); if (!File.Exists(tf)) return; string want = File.ReadAllText(tf).Trim(); File.Delete(tf); if (want.StartsWith("@panel:")) { Program.Log("TRIGGER panel " + want.Substring(7)); foreach (var tb in Application.OpenForms.OfType<TopBar>().ToList()) { tb.OpenPanel(want.Substring(7)); break; } return; } if (want == "@settings-close") { SettingsForm.CloseForTest(); return; } if (want.StartsWith("@settings:")) { Program.Log("TRIGGER settings page " + want.Substring(10)); SettingsForm.ShowSettings(want.Substring(10)); return; } if (want == "@settings") { Program.Log("TRIGGER settings"); SettingsForm.ShowSettings(); Program.Log("TRIGGER settings done"); return; } Item hit = items.FirstOrDefault(x => x.Target != null && x.Target.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0); Program.Log("TRIGGER click " + want + " -> " + (hit == null ? "none" : hit.Target)); if (hit != null) { var tsw = Stopwatch.StartNew(); Activate(hit); Program.Log("TRIGGER activate took " + tsw.ElapsedMilliseconds + " ms"); } } catch (Exception ex) { Program.Log(ex); } }; trig.Start(); }
 
             Program.T("ctor-a"); LoadConfig(); Program.T("ctor-config");
             ApplyTaskbarSetting(); Program.T("ctor-taskbar");
@@ -1445,11 +1448,11 @@ Theme.Refresh();
             else if (hover >= 0 && preview != null && (previewItem == null || previewItem.Key != items[hover].Key) && !(preview is DownloadsFan && ((DownloadsFan)preview).Pinned) && popup == null && dragItem == null)
             {
                 preview.Close();
-                if (!FanClickMode(items[hover])) ShowPreview(items[hover]);
+                if (HoverOpens(items[hover])) ShowPreview(items[hover]);
             }
             else if (hover >= 0 && preview == null && popup == null && dragItem == null &&
                      ((DateTime.UtcNow - hoverSince).TotalMilliseconds > (items[hover].Kind == Kind.Folder ? 120 : 350) || (DateTime.UtcNow - lastPreviewClose).TotalMilliseconds < 120) && cursorSlow)
-                { if (!FanClickMode(items[hover])) ShowPreview(items[hover]); else hoverSince = DateTime.MaxValue; }
+                { if (HoverOpens(items[hover])) ShowPreview(items[hover]); else hoverSince = DateTime.MaxValue; }
             LayoutItems();
 
             if (busy || hoverChanged) Redraw();
@@ -2155,6 +2158,9 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
         }
 
         static bool FanClickMode(Item it) { return it.Kind == Kind.Folder && SetCfg.GetBool("fan-click", false); }
+        // Settings > Dock "Show previews: On click" (read on every use, so it applies without a restart).
+        static bool PreviewOnClick() { return SetCfg.Get("window-preview-trigger") == "click"; }
+        static bool HoverOpens(Item it) { return !FanClickMode(it) && !(it.Kind == Kind.App && PreviewOnClick()); }
 
         void ShowPreview(Item it)
         {
@@ -2211,6 +2217,15 @@ Program.Mark = "RebuildItems:layout"; items = list; Program.Slow("RebuildItems.A
                 bool wasOpen = preview is DownloadsFan && previewItem != null && previewItem.Key == it.Key;
                 Program.Mark = "Activate:closing-preview"; if (preview != null) preview.Close(); Program.Mark = "Activate:preview-closed";
                 if (!wasOpen) { ShowPreview(it); if (preview is DownloadsFan) ((DownloadsFan)preview).Pinned = true; }
+                return;
+            }
+            // Like the Windows taskbar: clicking an app with several windows shows its previews (pick one to bring it forward).
+            // In "On click" mode a single window is enough.
+            if (it.Kind == Kind.App && SetCfg.GetBool("window-previews", true) && it.Handles.Count(h => NativeMethods.IsWindow(h)) >= (PreviewOnClick() ? 1 : 2))
+            {
+                if (preview is WindowPreview && previewItem != null && previewItem.Key == it.Key) return;
+                if (preview != null) preview.Close();
+                ShowPreview(it);
                 return;
             }
             Program.Mark = "Activate:closing-preview"; if (preview != null) preview.Close(); Program.Mark = "Activate:preview-closed";

@@ -66,8 +66,8 @@ namespace MacDock
         }
     }
 
-    // Night Light has no public API. Windows keeps its switch in an undocumented registry value: a 43-byte blob with
-    // byte 18 = 0x15 when on, a 41-byte blob with byte 18 = 0x13 when off. Writing the blob flips the switch, but a
+    // Night Light has no public API. Its switch is read from an undocumented registry value: a 43-byte blob with
+    // byte 18 = 0x15 when on, a 41-byte blob with byte 18 = 0x13 when off. Changes go through SettingHandler. A
     // Windows update could change that format; IsOn() then returns null and the tile falls back to opening Settings.
     static class NightLight
     {
@@ -123,10 +123,10 @@ namespace MacDock
             {
                 try
                 {
-                    int v = SettingHandler.Get();
+                    int v = SettingHandler.Strength.GetNumber();
                     lock (sGate) if (!sRunning) lastSet = v;
                 }
-                catch (Exception e) { Log("read: " + e.Message); SettingHandler.Reset(); }
+                catch (Exception e) { Log("read: " + e.Message); SettingHandler.Strength.Reset(); }
             }
         }
 
@@ -158,12 +158,16 @@ namespace MacDock
         static int lastSet = -1;
 
         // Drags are collapsed: the newest value wins. A value that fails is retried until it sticks or a newer one replaces it.
+        // As in Windows Settings, the values are sent with the handler in "dragging" (live preview) mode, which is what makes
+        // the screen follow; the mode ends once no new value has arrived for a second, so the last one has been applied.
         public static void SetStrengthLatest(int pct)
         {
             lock (sGate) { lastSet = pct; sWanted = pct; if (sRunning) return; sRunning = true; }
             Task.Run(() =>
             {
-                int failed = 0;
+                int failed = 0, sent = -1;
+                bool dragging = false;
+                var quiet = new System.Diagnostics.Stopwatch();
                 while (true)
                 {
                     int v;
@@ -171,18 +175,35 @@ namespace MacDock
                     {
                         v = sWanted;
                         sWanted = -1;
-                        if (v < 0) { sRunning = false; return; }
+                        if (v < 0 && !dragging) { sRunning = false; return; }
+                    }
+                    if (v < 0)
+                    {
+                        if (quiet.ElapsedMilliseconds >= 1000)
+                        {
+                            dragging = false;
+                            try { lock (hGate) SettingHandler.Strength.SetDragging(false); Log("set " + sent + " applied"); }
+                            catch (Exception e) { Log("end preview failed: " + e.Message); lock (hGate) SettingHandler.Strength.Reset(); }
+                        }
+                        else System.Threading.Thread.Sleep(30);
+                        continue;
                     }
                     try
                     {
-                        lock (hGate) SettingHandler.Set(v);
-                        Log("set " + v);
+                        lock (hGate)
+                        {
+                            if (!dragging) { SettingHandler.Strength.SetDragging(true); dragging = true; }
+                            SettingHandler.Strength.SetNumber(v);
+                        }
+                        sent = v;
+                        quiet.Restart();
                         failed = 0;
                     }
                     catch (Exception e)
                     {
                         Log("set " + v + " failed: " + e.Message);
-                        lock (hGate) SettingHandler.Reset();
+                        dragging = false;
+                        lock (hGate) SettingHandler.Strength.Reset();
                         lock (sGate)
                         {
                             if (++failed < 5) { if (sWanted < 0) sWanted = v; }
@@ -200,40 +221,22 @@ namespace MacDock
             try { System.IO.File.AppendAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "nightlight.log"), DateTime.Now.ToString("HH:mm:ss ") + m + "\r\n"); } catch { }
         }
 
+        // Switched through Windows' own handler: a hand-written registry blob keeps its old timestamp, so Windows
+        // never applies it to the screen. Waits (up to 3 s) for the stored switch to follow.
         public static bool Set(bool on)
         {
-            try
+            lock (hGate)
             {
-                byte[] d = Read();
-                bool? now = IsOn();
-                if (d == null || now == null) return false;
-                if (now.Value == on) return true;
-
-                byte[] next;
-                if (on)
+                try
                 {
-                    next = new byte[d.Length + 2];
-                    Array.Copy(d, 0, next, 0, 23);
-                    next[23] = 0x10;
-                    next[24] = 0x00;
-                    Array.Copy(d, 23, next, 25, d.Length - 23);
-                    next[18] = 0x15;
+                    SettingHandler.Switch.SetBoolean(on);
+                    for (int i = 0; i < 60 && IsOn() != on; i++) System.Threading.Thread.Sleep(50);
+                    bool done = IsOn() == on;
+                    Log("switch " + (on ? "on" : "off") + (done ? "" : " not confirmed"));
+                    return done;
                 }
-                else
-                {
-                    next = new byte[d.Length - 2];
-                    Array.Copy(d, 0, next, 0, 23);
-                    Array.Copy(d, 25, next, 23, d.Length - 25);
-                    next[18] = 0x13;
-                }
-                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(KeyPath, true))
-                {
-                    if (k == null) return false;
-                    k.SetValue("Data", next, RegistryValueKind.Binary);
-                }
-                return true;
+                catch (Exception e) { Log("switch failed: " + e.Message); SettingHandler.Switch.Reset(); return false; }
             }
-            catch { return false; }
         }
     }
 

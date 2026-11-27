@@ -31,7 +31,7 @@ namespace MacDock
         static OnboardingForm open;
 
         // Bump for every release build, also when the version number stays the same: the "What's new" page shows once per value.
-        const string ReleaseBuild = "20261126.3";
+        const string ReleaseBuild = "20261127.2";
         const string SeenKey = "whatsnew-seen";
 
         // Fresh install: the whole welcome tour. After an update: only the "What's new" page. Each at most once.
@@ -46,7 +46,7 @@ namespace MacDock
                 SetCfg.Set(SeenKey, build, false);
                 Program.Log((first ? "welcome tour" : "whats-new popup") + " shown for " + build);
                 if (first) Open();
-                else if (open == null || open.IsDisposed) { open = new OnboardingForm(); open.pages = new[] { Pages[1] }; open.Show(); }
+                else if (open == null || open.IsDisposed) { open = new OnboardingForm(); open.pages = new[] { Pages[1], Pages[4] }; open.Show(); }
             }
             catch (Exception ex) { Program.Log(ex); }
         }
@@ -62,11 +62,11 @@ namespace MacDock
         static readonly string[][] Pages =
         {
             new[] { "Welcome to MacDock", "A macOS-style Dock, menu bar and Launchpad for Windows.", "Take a quick look around. This takes under a minute." },
-            new[] { "What's new in 3.0",
-                "No more freezes|Fixed the lag, freezes and screen flashing. MacDock no longer waits on other apps' windows.",
-                "New Control Center|macOS 27 style icons and a Night Light slider that works without opening Settings.",
-                "Bluetooth and Wi-Fi|Find and pair Bluetooth devices, see their status in the menu bar, and join Wi-Fi from the panel.",
-                "Your choice at sign-in|MacDock starts with Windows only if you turn it on." },
+            new[] { "What's new in 3.1",
+                "Window previews|Close a window from its preview, and choose whether previews open on hover or on click.",
+                "Settings, regrouped|Clearer categories, search that jumps to the setting, and macOS style pop-up menus.",
+                "Sound and Night Light|Switch the output device from the Sound panel. Night Light now changes the screen as you drag.",
+                "Faster and steadier|Apps open at normal speed from the dock, and Send with LocalSend also takes folders." },
             new[] { "What you get",
                 "Dock|Magnifying icons, genie minimize, folders that fan open.",
                 "Launchpad|Every app in one grid. Swipe with four fingers or use the shortcut.",
@@ -303,7 +303,7 @@ namespace MacDock
             int nw = I(112 * s);
             Rectangle next = new Rectangle(W - m - nw, btnY, nw, btnH);
             Rectangle back = new Rectangle(m, btnY, I(80 * s), btnH);
-            Btn(g, next, !last ? "Next" : pages.Length == 1 ? "Done" : "Get Started", true, bf, s);
+            Btn(g, next, !last ? "Next" : pages[0] != Pages[0] ? "Done" : "Get Started", true, bf, s);
             hits.Add(Tuple.Create(next, (Action)Next));
             if (page > 0) { Btn(g, back, "Back", false, bf, s); hits.Add(Tuple.Create(back, (Action)(() => { page--; Invalidate(); }))); }
             else if (!last)

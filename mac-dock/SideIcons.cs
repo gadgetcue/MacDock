@@ -15,7 +15,7 @@ namespace MacDock
             c = Blue;
             switch (key)
             {
-                case "general": case "dock": case "menubar": case "sys-about": c = Grey; return true;
+                case "general": case "dock": case "menubar": case "sys-about": case "windows": case "island": case "controlcenter": case "shortcuts": case "advanced": case "about": c = Grey; return true;
                 case "appearance": c = White; return true;
                 case "icons": c = Orange; return true;
                 case "sys-power": case "sys-time": c = Green; return true;

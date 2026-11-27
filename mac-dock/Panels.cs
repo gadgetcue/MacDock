@@ -37,6 +37,7 @@ namespace MacDock
         public double Anim;              // 0..1 eased toward Active, drives the tile colours
 
         public string Key;               // glass layout: identity across rebuilds, so a row glides from its old place
+        public Func<bool> Sync;          // polled while the panel is open: pulls outside changes into the row, true if it changed
         public string DragId;            // glass layout, edit mode: dragging this row onto another with a DragId reorders them
         public Action<int, int, bool> Resize; // edit mode resize grip: (dx, dy since press, released); (0,0,false) marks the start
         public Action<string> Drop;      // called with the DragId of the row it was dropped on
@@ -135,6 +136,7 @@ namespace MacDock
         int panelHeight;
         int hover = -1;
         PanelRow dragging;
+        int syncedAt;
         PanelRow dragRow;                 // edit mode: tile being dragged to a new place
         Point dragFrom, dragNow;
         bool dragActive;
@@ -226,6 +228,13 @@ namespace MacDock
                     n.Shown = n.Key != null && old.TryGetValue(n.Key, out s) ? s : (RectangleF)n.Fixed;
                     n.HasShown = true;
                 }
+            }
+            if (dragging != null && rows.Contains(dragging))
+            {
+                // A background refresh must not drop the slider being dragged: carry the drag to its replacement.
+                PanelRow was = dragging;
+                dragging = newRows.FirstOrDefault(n => n.Kind == RowKind.Slider && n.Text == was.Text && n.Card == was.Card);
+                if (dragging != null) dragging.Value = was.Value;
             }
             rows = newRows;
             hover = -1;
@@ -1030,6 +1039,13 @@ namespace MacDock
             wasDown = down;
 
             if (dragging != null) return;
+            if (!closing && unchecked(Environment.TickCount - syncedAt) >= 200)
+            {
+                syncedAt = Environment.TickCount;
+                bool changed = false;
+                foreach (PanelRow r in rows) if (r.Sync != null) changed |= r.Sync();
+                if (changed) { RenderContent(); Compose(); }
+            }
             int index = -1;
             if (Bounds.Contains(screen) && open.Value > 0.9)
             {
@@ -1207,7 +1223,7 @@ namespace MacDock
             {
                 case "wifi": rows = new List<PanelRow> { PanelRow.Title("Wi-Fi"), PanelRow.Info("Status", "Scanning...") }; break;
                 case "bluetooth": rows = new List<PanelRow> { PanelRow.Title("Bluetooth"), PanelRow.Info("Status", "Checking...") }; break;
-                case "sound": rows = SoundRows(null, null); break;
+                case "sound": rows = SoundRows(null, null, null); break;
                 case "battery": rows = BatteryRows(); break;
                 case "control": rows = new List<PanelRow>(); break;
                 case "localsend": rows = new List<PanelRow> { PanelRow.Title("LocalSend"), PanelRow.Info("Status", "Looking for devices...") }; break;
@@ -1221,7 +1237,7 @@ namespace MacDock
             if (id == "wifi") { Background(panel, () => WifiRows(panel)); Background(panel, () => WifiRows(panel, true)); } // cached list at once, fresh scan after
             else if (id == "bluetooth") Background(panel, () => BluetoothRows(panel));
             else if (id == "nightlight" && NightLight.NeedsRead) Background(panel, () => { NightLight.ReadActual(); return NightLightRows(); });
-            else if (id == "sound") Background(panel, () => { string def; List<string> outs = DeviceFeed.AudioOutputs(out def); return SoundRows(outs, def); });
+            else if (id == "sound") Background(panel, () => SoundDeviceRows(panel));
             else if (id == "control")
             {
                 ccEdit = false;
@@ -1238,7 +1254,7 @@ namespace MacDock
             Task.Run(() =>
             {
                 List<PanelRow> rows;
-                try { rows = build(); } catch { return; }
+                try { rows = build(); } catch (Exception ex) { Program.Log(ex); return; }
                 try
                 {
                     if (!panel.IsDisposed) panel.BeginInvoke(new Action(() => panel.SetRows(rows)));
@@ -1476,7 +1492,30 @@ namespace MacDock
             if (!panel.IsDisposed) Background(panel, () => BluetoothRows(panel));
         }
 
-        static List<PanelRow> SoundRows(List<string> outputs, string defaultName)
+        // Worker thread: lists the output devices, giving up after 4 s so the panel never sits on "Loading...".
+        static List<PanelRow> SoundDeviceRows(GlassPanel panel)
+        {
+            var task = Task.Run(() => { string d; var l = Audio.Outputs(out d); return Tuple.Create(l, d); });
+            bool done = false;
+            try { done = task.Wait(4000); } catch { }
+            return done ? SoundRows(panel, task.Result.Item1, task.Result.Item2)
+                        : SoundRows(panel, new List<KeyValuePair<string, string>>(), null);
+        }
+
+        static PanelRow VolumeSlider(float volume)
+        {
+            PanelRow s = PanelRow.Slider(volume, v => { Audio.Volume = (float)v; if (Audio.Muted) Audio.Muted = false; });
+            s.Sync = () =>
+            {
+                float now = Audio.Volume;
+                if (now < 0 || Math.Abs(now - s.Value) < 0.004) return false;
+                s.Value = now;
+                return true;
+            };
+            return s;
+        }
+
+        static List<PanelRow> SoundRows(GlassPanel panel, List<KeyValuePair<string, string>> outputs, string defaultId)
         {
             float volume = Audio.Volume;
             var rows = new List<PanelRow>();
@@ -1488,10 +1527,11 @@ namespace MacDock
             }
             else
             {
-                rows.Add(PanelRow.Slider(volume, v => { Audio.Volume = (float)v; if (Audio.Muted) Audio.Muted = false; }));
+                rows.Add(VolumeSlider(volume));
                 PanelRow mute = PanelRow.Item("Mute", null, Audio.Muted, null);
                 mute.KeepOpen = true;
                 mute.Click = () => { Audio.Muted = !Audio.Muted; mute.Checked = Audio.Muted; };
+                mute.Sync = () => { bool m = Audio.Muted; if (m == mute.Checked) return false; mute.Checked = m; return true; };
                 rows.Add(mute);
             }
 
@@ -1510,7 +1550,14 @@ namespace MacDock
             if (outputs == null) rows.Add(PanelRow.Info("Devices", "Loading..."));
             else
             {
-                foreach (string o in outputs.Take(6)) rows.Add(PanelRow.Item(o, null, o == defaultName, Open("ms-settings:sound")));
+                foreach (var o in outputs.Take(6))
+                {
+                    string deviceId = o.Key;
+                    PanelRow dev = PanelRow.Item(o.Value, null, deviceId == defaultId, null);
+                    dev.KeepOpen = true;
+                    dev.Click = () => { Audio.SetDefault(deviceId); Background(panel, () => SoundDeviceRows(panel)); };
+                    rows.Add(dev);
+                }
                 if (outputs.Count == 0) rows.Add(PanelRow.Info("Devices", "None found"));
             }
             rows.Add(PanelRow.Separator());
@@ -1809,7 +1856,7 @@ namespace MacDock
             }
             if (volume >= 0)
             {
-                PanelRow sound = PanelRow.Slider(volume, v => { Audio.Volume = (float)v; if (Audio.Muted) Audio.Muted = false; });
+                PanelRow sound = VolumeSlider(volume);
                 sound.Card = true; sound.Text = "Sound";
                 sound.Extra = Open("ms-settings:sound");
                 rows.Add(PanelRow.At(sound, 0, y5, W, Row));

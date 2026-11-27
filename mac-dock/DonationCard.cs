@@ -1,5 +1,5 @@
-// The owner's donation card: UPI payment QR on white, holder name and masked UPI ID on a crimson card.
-// QR rows, name and ID are copied from the owner's existing card; never edit them by guesswork.
+// The owner's donation card: UPI payment QR on white, masked UPI ID on a crimson card.
+// QR rows and ID are copied from the owner's existing card; never edit them by guesswork.
 
 using System;
 using System.Drawing;
@@ -10,7 +10,6 @@ namespace MacDock
 {
     static class DonationCard
     {
-        public const string Name = "SIDDHANT RAMESH TAMGADGE";
         public const string UpiMasked = "\u00B7\u00B7\u00B7\u00B71936@kotakbank";
         public const string Bank = "Kotak811";
         public const string Hint = "Scan to pay with any UPI app";
@@ -96,9 +95,8 @@ namespace MacDock
                     for (int c = 0; c < n; c++)
                         if (Qr[r][c] == '#') g.FillRectangle(Brushes.Black, ox + c * m, oy + r * m, m, m);
                 float ty = plate.Bottom + 14 * u;
-                g.DrawString(Name, Typography.Text(11.5f * u * k, Weight.Semibold), Brushes.White, x + 18 * u, ty, left);
                 using (var b = new SolidBrush(Color.FromArgb(225, 255, 255, 255)))
-                    g.DrawString("UPI ID:  " + UpiMasked, Typography.Text(12f * u * k), b, x + 18 * u, ty + 22 * u, left);
+                    g.DrawString("UPI ID:  " + UpiMasked, Typography.Text(12f * u * k), b, x + 18 * u, ty + 8 * u, left);
             }
             g.Restore(state);
         }

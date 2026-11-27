@@ -29,8 +29,11 @@ namespace MacDock
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
         [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
 
-        const int XSize = 28, XInset = 8;
-        const int TileW = 260, ThumbH = 160, TitleH = 26, Pad = 12, Gap = 10, Radius = 14;
+        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
+        [DllImport("dwmapi.dll", EntryPoint = "#113")] static extern int DwmpActivateLivePreview(bool enable, IntPtr peekWnd, IntPtr topmostWnd, int type, IntPtr reserved);
+
+        const int XSize = 24;
+        const int TileW = 260, ThumbH = 150, TitleH = 30, Pad = 10, Gap = 8, Radius = 14;
 
         sealed class Tile { public IntPtr Window, Thumb; public Rectangle Cell, Box; public string Title; public bool Minimized; }
 
@@ -51,6 +54,9 @@ namespace MacDock
         bool dragMode;                  // opened while a file drag was in progress (button held)
         int dwellIdx = -1; DateTime dwellSince;
         DateTime leftSince = DateTime.MinValue, lastPrune = DateTime.UtcNow;
+        int curAlpha;            // fade level, 0..255 (fade in on open, out on leave)
+        bool closing;            // fading out; Close() once invisible
+        IntPtr peeked; DateTime peekSince = DateTime.MaxValue; // Aero Peek of the hovered tile's window
 
         public WindowPreview(List<IntPtr> windows, Bitmap icon, Point anchorTopCenter, Action<IntPtr> focus, Func<Point, bool> keepOpen, Action closed)
         {
@@ -79,7 +85,7 @@ namespace MacDock
             Rectangle area = Screen.FromPoint(anchor).Bounds;
             int perRow = Math.Max(1, Math.Min(n, (area.Width - 40 - Pad * 2 + Gap) / (TileW + Gap)));
             int rowsN = (n + perRow - 1) / perRow;
-            int cellH = ThumbH + TitleH;
+            int cellH = TitleH + ThumbH;
             int width = Pad * 2 + perRow * TileW + (perRow - 1) * Gap;
             int height = Pad * 2 + rowsN * cellH + (rowsN - 1) * Gap;
             for (int i = 0; i < tiles.Count; i++)
@@ -95,17 +101,44 @@ namespace MacDock
             Bounds = new Rectangle(left, top, width, height);
         }
 
+        // Close button: right end of the tile's title row, like the Windows taskbar preview.
         Rectangle XRect(Tile t)
         {
-            Rectangle r = t.Thumb != IntPtr.Zero ? t.Box : t.Cell;
-            int inset = t.Thumb != IntPtr.Zero ? XInset : 8;
-            return new Rectangle(r.Left + inset, r.Top + inset, XSize, XSize);
+            return new Rectangle(t.Cell.Right - XSize - 6, t.Cell.Top + (TitleH - XSize) / 2 + 2, XSize, XSize);
+        }
+
+        static void NoPeek(IntPtr h) { try { int v = 1; DwmSetWindowAttribute(h, 12, ref v, 4); } catch { } } // DWMWA_EXCLUDED_FROM_PEEK
+
+        delegate bool PeekEnumProc(IntPtr h, IntPtr l);
+        [DllImport("user32.dll", EntryPoint = "EnumWindows")] static extern bool PeekEnumWindows(PeekEnumProc proc, IntPtr l);
+        [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")] static extern uint PeekWindowPid(IntPtr h, out uint pid);
+
+        // Aero Peek hides every top-level window not excluded from it, so exclude all of ours (dock, top bar, island,
+        // popups, fans) each time a peek starts; windows can be created at any time.
+        static void KeepOwnWindows(IntPtr target)
+        {
+            uint me = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+            PeekEnumWindows((h, l) => { uint pid; PeekWindowPid(h, out pid); if (pid == me && h != target) NoPeek(h); return true; }, IntPtr.Zero);
+        }
+
+        void SetPeek(IntPtr w)
+        {
+            if (w == peeked) return;
+            try
+            {
+                if (w != IntPtr.Zero) KeepOwnWindows(w);
+                if (w == IntPtr.Zero) DwmpActivateLivePreview(false, IntPtr.Zero, Handle, 1, IntPtr.Zero);
+                else DwmpActivateLivePreview(true, w, Handle, 1, IntPtr.Zero);
+            }
+            catch { }
+            peeked = w;
         }
 
         // Closes the window politely (WM_CLOSE, like its own X button) and drops its tile; the card hides when none remain.
         void CloseTile(int i)
         {
             Tile t = tiles[i];
+            SetPeek(IntPtr.Zero); peekSince = DateTime.MaxValue;
             try { Win32.PostMessage(t.Window, WinUtil.WM_CLOSE, IntPtr.Zero, IntPtr.Zero); } catch { }
             RemoveDead(i);
         }
@@ -167,11 +200,13 @@ namespace MacDock
             }
             catch { backdrop = null; }
             dragMode = (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0;
+            curAlpha = 0;
             base.Show();
             host.Bounds = Bounds;
             host.Show();
             xo = new ThumbHost(true); xo.Bounds = new Rectangle(Left, Top, XSize + 2, XSize + 2);
             xo.Show();
+            NoPeek(Handle); NoPeek(host.Handle); NoPeek(xo.Handle);
             SetupThumbs();
             Redraw();
             timer.Start();
@@ -198,7 +233,7 @@ namespace MacDock
                 {
                     dwFlags = 0x1 | 0x4 | 0x8, // destination, opacity, visible
                     rcDestination = new Win32.RECT { Left = t.Box.Left, Top = t.Box.Top, Right = t.Box.Right, Bottom = t.Box.Bottom },
-                    opacity = 255, fVisible = 1
+                    opacity = (byte)curAlpha, fVisible = 1
                 };
                 DwmUpdateThumbnailProperties(th, ref p);
                 IntPtr r = CreateRoundRectRgn(t.Box.Left, t.Box.Top, t.Box.Right + 1, t.Box.Bottom + 1, 10, 10);
@@ -211,10 +246,10 @@ namespace MacDock
         // Fits the window's picture inside the tile's thumbnail area, keeping its aspect ratio.
         static Rectangle Box(Tile t, int sw, int sh)
         {
-            int areaW = TileW - 12, areaH = ThumbH - 12;
+            int areaW = TileW - 20, areaH = ThumbH - 10;
             double s = Math.Min(Math.Min((double)areaW / sw, (double)areaH / sh), 1.0);
             int w = Math.Max(1, (int)(sw * s)), h = Math.Max(1, (int)(sh * s));
-            return new Rectangle(t.Cell.Left + (TileW - w) / 2, t.Cell.Top + 6 + (areaH - h) / 2, w, h);
+            return new Rectangle(t.Cell.Left + (TileW - w) / 2, t.Cell.Top + TitleH + (areaH - h) / 2, w, h);
         }
 
         DateTime lastX = DateTime.MinValue;
@@ -228,9 +263,17 @@ namespace MacDock
             if (!over && !keepOpen(sp) && !zone.Contains(sp))
             {
                 if (leftSince == DateTime.MinValue) leftSince = DateTime.UtcNow;
-                if ((DateTime.UtcNow - leftSince).TotalMilliseconds >= 150) { Close(); return; }
+                if ((DateTime.UtcNow - leftSince).TotalMilliseconds >= 150) closing = true;
             }
-            else leftSince = DateTime.MinValue;
+            else { leftSince = DateTime.MinValue; closing = false; }
+            if (closing) SetPeek(IntPtr.Zero);
+            int target = closing ? 0 : 255;
+            if (curAlpha != target)
+            {
+                curAlpha = target > curAlpha ? Math.Min(255, curAlpha + 100) : Math.Max(0, curAlpha - 130);
+                ApplyFade();
+                if (closing && curAlpha == 0) { Close(); return; }
+            }
             if ((DateTime.UtcNow - lastPrune).TotalMilliseconds >= 400)
             {
                 lastPrune = DateTime.UtcNow;
@@ -245,10 +288,12 @@ namespace MacDock
                 for (int i = 0; i < tiles.Count; i++) if (tiles[i].Cell.Contains(c)) { idx = i; break; }
             }
             bool onX = idx >= 0 && !dragMode && XRect(tiles[idx]).Contains(PointToClient(sp));
-            if (idx != hover) { hover = idx; xHot = onX; SetupThumbs(); Redraw(); }
+            if (idx != hover) { hover = idx; xHot = onX; peekSince = idx >= 0 && !dragMode ? DateTime.UtcNow : DateTime.MaxValue; SetPeek(IntPtr.Zero); SetupThumbs(); Redraw(); }
             else if (onX != xHot) { xHot = onX; Redraw(); }
 
             if (hover >= 0 && (DateTime.UtcNow - lastX).TotalMilliseconds >= 120) { lastX = DateTime.UtcNow; DrawX(); } // re-assert the X; closing a window can push it behind the thumbnails
+            if (hover >= 0 && hover < tiles.Count && !closing && (DateTime.UtcNow - peekSince).TotalMilliseconds >= 450 && !xHot) SetPeek(tiles[hover].Window);
+            else if (xHot) SetPeek(IntPtr.Zero);
             bool down = (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0;
             if (dragMode)
             {
@@ -267,12 +312,24 @@ namespace MacDock
             if (down && !wasDown && idx >= 0)
             {
                 IntPtr w = tiles[idx].Window;
+                SetPeek(IntPtr.Zero);
                 Close();
                 focus(w);
                 return;
             }
             wasDown = down;
             if ((Win32.GetAsyncKeyState(0x1B) & 0x8000) != 0) Close();
+        }
+
+        void ApplyFade()
+        {
+            foreach (Tile t in tiles)
+            {
+                if (t.Thumb == IntPtr.Zero) continue;
+                var p = new THUMBPROPS { dwFlags = 0x4, opacity = (byte)curAlpha };
+                DwmUpdateThumbnailProperties(t.Thumb, ref p);
+            }
+            Redraw();
         }
 
         void Redraw()
@@ -297,12 +354,14 @@ namespace MacDock
                     using (var b = new SolidBrush(i == hover ? hotFill : tileFill))
                         g.FillPath(b, gp);
                     if (t.Minimized && appIcon != null) // nothing to mirror while minimized: show the app icon instead
-                        g.DrawImage(appIcon, new Rectangle(t.Cell.Left + (TileW - 56) / 2, t.Cell.Top + (ThumbH - 56) / 2, 56, 56));
+                        g.DrawImage(appIcon, new Rectangle(t.Cell.Left + (TileW - 56) / 2, t.Cell.Top + TitleH + (ThumbH - 56) / 2, 56, 56));
+                    int tx = t.Cell.Left + 10;
+                    if (appIcon != null) { g.DrawImage(appIcon, new Rectangle(tx, t.Cell.Top + (TitleH - 16) / 2 + 2, 16, 16)); tx += 24; }
                     using (var tb = new SolidBrush(text))
-                        g.DrawString(t.Title, font, tb, new RectangleF(t.Cell.Left + 10, t.Cell.Top + ThumbH - 2, TileW - 20, TitleH), fmt);
+                        g.DrawString(t.Title, font, tb, new RectangleF(tx, t.Cell.Top + 2, t.Cell.Right - tx - (i == hover && !dragMode ? XSize + 10 : 8), TitleH), fmt);
                 }
             }
-            surface.Present(Handle, Left, Top, 255);
+            surface.Present(Handle, Left, Top, (byte)curAlpha);
             DrawX();
         }
 
@@ -318,16 +377,18 @@ namespace MacDock
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 var r = new Rectangle(1, 1, XSize, XSize);
-                using (var xb = new SolidBrush(xHot ? Color.FromArgb(255, 215, 30, 30) : Color.FromArgb(255, 255, 59, 48)))
-                    { g.FillEllipse(xb, r); using (var op = new Pen(Color.FromArgb(200, 255, 255, 255), 1.5f)) g.DrawEllipse(op, r.Left + 0.5f, r.Top + 0.5f, r.Width - 1, r.Height - 1); }
-                using (var xp = new Pen(Color.White, 2.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                if (xHot)
+                    using (GraphicsPath gp = Layered.RoundedRect(new RectangleF(r.Left, r.Top, r.Width, r.Height), 6))
+                    using (var xb = new SolidBrush(Color.FromArgb(255, 232, 17, 35))) g.FillPath(xb, gp);
+                Color gc = xHot ? Color.White : (Theme.Light ? Color.FromArgb(28, 28, 30) : Color.FromArgb(240, 240, 244));
+                using (var xp = new Pen(gc, 1.4f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 {
-                    float m = XSize * 0.30f;
+                    float m = XSize * 0.33f;
                     g.DrawLine(xp, r.Left + m, r.Top + m, r.Right - m, r.Bottom - m);
                     g.DrawLine(xp, r.Right - m, r.Top + m, r.Left + m, r.Bottom - m);
                 }
             }
-            xs.Present(xo.Handle, Left + x.Left - 1, Top + x.Top - 1, 255);
+            xs.Present(xo.Handle, Left + x.Left - 1, Top + x.Top - 1, (byte)curAlpha);
             // Keep the X above the thumbnail host, which can be re-raised after a relayout.
             SetWindowPos(xo.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
         }
@@ -335,7 +396,7 @@ namespace MacDock
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            timer.Stop();
+            timer.Stop(); SetPeek(IntPtr.Zero);
             foreach (Tile t in tiles) if (t.Thumb != IntPtr.Zero) { DwmUnregisterThumbnail(t.Thumb); t.Thumb = IntPtr.Zero; }
             host.Close(); if (xo != null) xo.Close();
             base.OnFormClosed(e);

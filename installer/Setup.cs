@@ -14,8 +14,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("MacDock Project")]
 [assembly: AssemblyProduct("MacDock")]
 [assembly: AssemblyCopyright("Copyright (c) MacDock contributors")]
-[assembly: AssemblyVersion("3.0.0.0")]
-[assembly: AssemblyFileVersion("3.0.0.0")]
+[assembly: AssemblyVersion("3.1.0.0")]
+[assembly: AssemblyFileVersion("3.1.0.0")]
 
 static class Setup
 {
@@ -91,7 +91,7 @@ static class Setup
             // Settings > Apps > Installed apps entry (per-user)
             using (var k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\MacDock"))
             {
-                k.SetValue("DisplayName", "MacDock"); k.SetValue("DisplayVersion", "3.0.0"); k.SetValue("Publisher", "MacDock Project");
+                k.SetValue("DisplayName", "MacDock"); k.SetValue("DisplayVersion", "3.1.0"); k.SetValue("Publisher", "MacDock Project");
                 k.SetValue("DisplayIcon", exe); k.SetValue("InstallLocation", dest);
                 k.SetValue("UninstallString", "\"" + Path.Combine(dest, "Setup.exe") + "\" /uninstall");
                 k.SetValue("NoModify", 1, RegistryValueKind.DWord); k.SetValue("NoRepair", 1, RegistryValueKind.DWord);

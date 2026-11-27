@@ -21,7 +21,7 @@ namespace MacDock
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
 
-        readonly string[] files;
+        string[] files;
         readonly Form dim;
         readonly Timer poll = new Timer { Interval = 700 };
         readonly Timer anim = new Timer { Interval = 140 };
@@ -38,9 +38,16 @@ namespace MacDock
 
         public static void Open(string[] paths)
         {
-            paths = (paths ?? new string[0]).Where(File.Exists).ToArray();
+            paths = (paths ?? new string[0]).Where(x => File.Exists(x) || Directory.Exists(x)).ToArray();
             if (paths.Length == 0) return;
-            if (current != null && !current.IsDisposed) current.Close();
+            if (current != null && !current.IsDisposed && !current.sending) // add to the open popup, never drop what is already listed
+            {
+                current.files = current.files.Union(paths, StringComparer.OrdinalIgnoreCase).ToArray();
+                current.Invalidate(); current.Raise();
+                Program.Log("localsend send: added to the open popup, now " + current.files.Length + " item(s)");
+                return;
+            }
+            if (current != null && !current.IsDisposed) current.Close(); // a running transfer carries on in the background
             current = new LocalSendPopup(paths);
             current.ShowAll();
         }
@@ -89,11 +96,16 @@ namespace MacDock
 
         void ShowAll()
         {
-            dim.Show(); Show(); Activate();
-            try { SetWindowPos(dim.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); } catch { } // dim just under the card, both above other topmost windows
-            try { SetForegroundWindow(Handle); } catch { }
+            dim.Show(); Show(); Raise();
             poll.Start(); anim.Start();
             AutoScan();
+        }
+
+        void Raise()
+        {
+            Activate();
+            try { SetWindowPos(dim.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); } catch { } // dim just under the card, both above other topmost windows
+            try { SetForegroundWindow(Handle); } catch { }
         }
 
         // Quick multicast now, a full subnet scan right after, then a light re-announce every ~6 s while the popup is open.
@@ -141,7 +153,7 @@ namespace MacDock
             // header
             using (Font tf = Typography.Copy(13.5f, Weight.Semibold))
                 TextRenderer.DrawText(g, "Send with LocalSend", tf, new Rectangle(0, V(18), Width, V(28)), Txt, Panel, flagsC);
-            string what = files.Length == 1 ? Path.GetFileName(files[0]) : files.Length + " files";
+            string what = files.Length == 1 ? Path.GetFileName(files[0].TrimEnd('\\')) : files.Length + (files.Any(Directory.Exists) ? " items" : " files");
             using (Font sf = Typography.Copy(10f))
                 TextRenderer.DrawText(g, what, sf, new Rectangle(V(24), V(48), Width - V(48), V(20)), Sub, Panel, flagsC);
             bool anim3 = !sending && scanning;

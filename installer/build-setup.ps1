@@ -1,4 +1,4 @@
-﻿# Builds the ONE installer: ..\release\MacDock-Setup.exe (C# v3.0 dock, icon embedded). Payload is gathered from the live mac-dock folder.
+﻿# Builds the ONE installer: ..\release\MacDock-Setup.exe (C# v3.1 dock, icon embedded). Payload is gathered from the live mac-dock folder.
 param([string]$Exe = "$env:LOCALAPPDATA\MacDock\MacDock.exe")
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem

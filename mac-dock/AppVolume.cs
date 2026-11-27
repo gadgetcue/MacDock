@@ -25,7 +25,6 @@ namespace MacDock
 
     static class AppVolume
     {
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class Enumerator { }
 
         [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IEnum { [PreserveSig] int EnumAudioEndpoints(int f, int m, out IntPtr d); [PreserveSig] int GetDefaultAudioEndpoint(int f, int r, out IDev d); }
@@ -68,7 +67,7 @@ namespace MacDock
             var res = new List<AppSession>();
             try
             {
-                var en = (IEnum)new Enumerator();
+                var en = (IEnum)CoreAudio.NewEnumerator();
                 IDev dev;
                 if (en.GetDefaultAudioEndpoint(0, 1, out dev) != 0) return res;
                 Guid iid = typeof(IMgr2).GUID; object o;

@@ -517,6 +517,7 @@ namespace MacDock
         public bool Chevron;
         public Control Widget;
         public Action Click;
+        public bool Highlight; // set briefly when a search result jumps here
         int widgetW;
 
         public SetRow(string label)
@@ -558,6 +559,9 @@ namespace MacDock
             var g = e.Graphics;
             const TextFormatFlags f = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding;
             int right = Width - 12;
+            if (Highlight)
+                using (var path = SetUi.Round(new RectangleF(4.5f, 3.5f, Width - 9, Height - 7), 10))
+                using (var b = new SolidBrush(Color.FromArgb(90, 59, 130, 246))) g.FillPath(b, path);
             if (Chevron)
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -595,6 +599,8 @@ namespace MacDock
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BackColor = SetUi.Content;
         }
+
+        public IEnumerable<SetRow> Rows { get { return rows; } }
 
         public SetRow Add(SetRow r)
         {
@@ -945,28 +951,215 @@ namespace MacDock
         }
     }
 
-    // Dark/light themed colours for the picker's drop-down menu.
-    sealed class SetMenuColors : ProfessionalColorTable
+    // The list behind a SetPicker, drawn like a macOS pop-up menu: rounded glass, soft shadow, a check on the current
+    // choice, accent highlight. Never takes focus; the settings window forwards arrows, Return and Esc to it.
+    sealed class SetPopup : Form
     {
-        public override Color ToolStripDropDownBackground { get { return SetUi.Card; } }
-        public override Color ImageMarginGradientBegin { get { return SetUi.Card; } }
-        public override Color ImageMarginGradientMiddle { get { return SetUi.Card; } }
-        public override Color ImageMarginGradientEnd { get { return SetUi.Card; } }
-        public override Color MenuBorder { get { return SetUi.CardLine; } }
-        public override Color MenuItemBorder { get { return SetUi.Accent; } }
-        public override Color MenuItemSelected { get { return SetUi.Accent; } }
-        public override Color MenuItemSelectedGradientBegin { get { return SetUi.Accent; } }
-        public override Color MenuItemSelectedGradientEnd { get { return SetUi.Accent; } }
-        public override Color CheckBackground { get { return SetUi.Accent; } }
-        public override Color CheckSelectedBackground { get { return SetUi.Accent; } }
-        public override Color CheckPressedBackground { get { return SetUi.Accent; } }
+        const int RowH = 28, Pad = 5, Radius = 13, M = 22; // M: transparent margin that holds the shadow
+
+        public static SetPopup Current;
+        public readonly Control Owner_;
+        readonly string[] options;
+        readonly int selected;
+        readonly Action<int> picked;
+        readonly Rectangle menu; // screen rectangle of the glass itself
+        readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 15 };
+        readonly Stopwatch clock = Stopwatch.StartNew();
+        Surface surface;
+        Bitmap backdrop;
+        int hover;
+        Point lastMouse;
+        bool wasDown, closing, shownFully;
+
+        public static void Open(Control owner, Rectangle button, string[] options, int selected, Action<int> picked)
+        {
+            if (Current != null) Current.Close();
+            Current = new SetPopup(owner, button, options, selected, picked);
+            Current.Show(owner.FindForm()); // owned: always above the settings window
+        }
+
+        public static void Dismiss() { if (Current != null) Current.FadeOut(); }
+
+        SetPopup(Control owner, Rectangle button, string[] options, int selected, Action<int> picked)
+        {
+            Owner_ = owner; this.options = options; this.selected = selected; this.picked = picked;
+            hover = selected;
+            lastMouse = Cursor.Position;
+            int textW = 0;
+            foreach (string o in options) textW = Math.Max(textW, SetText.MeasureText(o, Typography.Secondary(), new Size(int.MaxValue, RowH), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width);
+            int w = Math.Max(button.Width + 8, textW + 62), h = options.Length * RowH + 2 * Pad;
+            Rectangle area = Screen.FromRectangle(button).WorkingArea;
+            // As on macOS, the current choice sits over the button; the list is then kept on screen.
+            int x = Math.Max(area.Left + 6, Math.Min(button.Right + 4 - w, area.Right - w - 6));
+            int y = button.Top + button.Height / 2 - (Pad + Math.Max(0, selected) * RowH + RowH / 2);
+            y = Math.Max(area.Top + 6, Math.Min(y, area.Bottom - h - 6));
+            menu = new Rectangle(x, y, w, h);
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            Bounds = Rectangle.Inflate(menu, M, M);
+            timer.Tick += (s, e) => Poll();
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x80000 | 0x80 | 0x08000000 | 0x8; // layered, tool window, no-activate, topmost (the TopMost property would activate it and close the list)
+                return cp;
+            }
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                // Blurred snapshot of what is behind the list, taken before it becomes visible.
+                using (var shot = new Bitmap(menu.Width, menu.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(shot)) g.CopyFromScreen(menu.Location, Point.Empty, menu.Size);
+                    backdrop = GlassPanel.BlurBitmap(shot, 16);
+                }
+            }
+            catch { backdrop = null; }
+            surface = new Surface(Width, Height);
+            Redraw();
+            timer.Start();
+        }
+
+        int RowAt(Point screen)
+        {
+            if (!menu.Contains(screen)) return -1;
+            int i = (screen.Y - menu.Top - Pad) / RowH;
+            return screen.Y >= menu.Top + Pad && i < options.Length ? i : -1;
+        }
+
+        void Poll()
+        {
+            Point p = Cursor.Position;
+            if (p != lastMouse)
+            {
+                lastMouse = p;
+                int i = RowAt(p);
+                if (i != hover) { hover = i; Redraw(); }
+            }
+            bool down = (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0 || (Win32.GetAsyncKeyState(0x02) & 0x8000) != 0;
+            if (down && !wasDown && !menu.Contains(p)) FadeOut();
+            wasDown = down;
+            double t = clock.Elapsed.TotalMilliseconds;
+            if (closing) { if (t >= 90) Close(); else surface.Present(Handle, Left, Top, (byte)(255 * (1 - t / 90))); }
+            else if (!shownFully) { shownFully = t >= 110; surface.Present(Handle, Left, Top, Opacity255()); } // always ends on a fully opaque frame, however late the tick
+        }
+
+        byte Opacity255() { double k = Math.Min(1, clock.Elapsed.TotalMilliseconds / 110); return (byte)(255 * (1 - Math.Pow(1 - k, 3))); }
+
+        void FadeOut() { if (closing) return; closing = true; clock.Restart(); }
+
+        void Pick(int i)
+        {
+            Close();
+            if (i >= 0 && i < options.Length) picked(i);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            int i = RowAt(PointToScreen(e.Location));
+            if (!closing && e.Button == MouseButtons.Left && i >= 0) Pick(i);
+        }
+
+        // Keyboard while the list is open. Returns true when the key was used.
+        public bool Key(Keys k)
+        {
+            if (closing) return false;
+            if (k == Keys.Escape) FadeOut();
+            else if (k == Keys.Up || k == Keys.Down)
+            {
+                int n = options.Length;
+                hover = hover < 0 ? (k == Keys.Down ? 0 : n - 1) : Math.Max(0, Math.Min(n - 1, hover + (k == Keys.Down ? 1 : -1)));
+                Redraw();
+            }
+            else if (k == Keys.Enter || k == Keys.Space) { if (hover >= 0) Pick(hover); else FadeOut(); }
+            else return false;
+            return true;
+        }
+
+        void Redraw()
+        {
+            if (surface == null) return;
+            bool dark = SetUi.Dark;
+            var glass = new RectangleF(M + 0.5f, M + 0.5f, menu.Width - 1, menu.Height - 1);
+            using (Graphics g = surface.Begin())
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Typography.Prepare(g);
+                using (var path = SetUi.Round(glass, Radius))
+                {
+                    GraphicsState state = g.Save();
+                    g.SetClip(path, CombineMode.Exclude);
+                    for (int i = 16; i >= 1; i--)
+                    {
+                        RectangleF s = glass; s.Inflate(i, i); s.Offset(0, 5);
+                        using (var sp = SetUi.Round(s, Radius + i))
+                        using (var b = new SolidBrush(Color.FromArgb(dark ? 7 : 3, 0, 0, 0))) g.FillPath(b, sp);
+                    }
+                    g.Restore(state);
+                    if (backdrop != null)
+                        using (var tex = new TextureBrush(backdrop, WrapMode.TileFlipXY))
+                        {
+                            tex.TranslateTransform(M, M);
+                            g.FillPath(tex, path);
+                        }
+                    Color tint = dark ? Color.FromArgb(backdrop != null ? 218 : 255, 44, 44, 49) : Color.FromArgb(backdrop != null ? 218 : 255, 250, 250, 252);
+                    using (var b = new SolidBrush(tint)) g.FillPath(b, path);
+                    using (var p = new Pen(dark ? Color.FromArgb(52, 255, 255, 255) : Color.FromArgb(38, 0, 0, 0))) g.DrawPath(p, path);
+                }
+                using (var middle = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
+                    for (int i = 0; i < options.Length; i++)
+                    {
+                        var row = new RectangleF(M + Pad, M + Pad + i * RowH, menu.Width - 2 * Pad, RowH);
+                        bool hot = i == hover;
+                        if (hot)
+                            using (var hp = SetUi.Round(row, Radius - Pad))
+                            using (var b = new SolidBrush(SetUi.Accent)) g.FillPath(b, hp);
+                        Color fg = hot ? Color.White : SetUi.Text;
+                        if (i == selected)
+                            using (var p = new Pen(fg, 1.8f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                            {
+                                float cx = row.Left + 13, cy = row.Top + row.Height / 2f;
+                                g.DrawLines(p, new[] { new PointF(cx - 4.5f, cy + 0.5f), new PointF(cx - 1.5f, cy + 3.5f), new PointF(cx + 4.5f, cy - 4f) });
+                            }
+                        using (var b = new SolidBrush(fg)) g.DrawString(options[i], Typography.Secondary(), b, new RectangleF(row.Left + 24, row.Top, row.Width - 26, row.Height), middle);
+                    }
+            }
+            surface.Present(Handle, Left, Top, shownFully || closing ? (byte)255 : Opacity255());
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            timer.Stop();
+            if (Current == this) Current = null;
+            if (Owner_ != null && !Owner_.IsDisposed) Owner_.Invalidate();
+            base.OnFormClosed(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { timer.Dispose(); if (surface != null) surface.Dispose(); if (backdrop != null) backdrop.Dispose(); surface = null; backdrop = null; }
+            base.Dispose(disposing);
+        }
     }
 
-    // Drop-down picker: shows the current choice, opens a themed menu on click.
+    // macOS pop-up button: a capsule with the current choice and up/down chevrons; opens a SetPopup.
     sealed class SetPicker : Control
     {
         string[] options = new string[0];
         int index;
+        bool hover, closedByPress;
         public event Action<int> Changed;
 
         public SetPicker()
@@ -974,52 +1167,68 @@ namespace MacDock
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
             BackColor = Color.Transparent;
             Size = new Size(210, 30);
-            Cursor = Cursors.Hand;
         }
 
         public string[] Options { get { return options; } set { options = value ?? new string[0]; Invalidate(); } }
         public int Index { get { return index; } set { index = value; Invalidate(); } }
 
-        protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); }
+        protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hover = false; Invalidate(); }
+
+        // A second press on the button closes its open list instead of reopening it.
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            closedByPress = SetPopup.Current != null && SetPopup.Current.Owner_ == this;
+            if (closedByPress) SetPopup.Dismiss();
+        }
+
+        Rectangle Capsule()
+        {
+            string text = index >= 0 && index < options.Length ? options[index] : "";
+            int tw = SetText.MeasureText(text, Typography.Secondary(), new Size(int.MaxValue, Height), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            int w = Math.Min(Width, Math.Max(64, tw + 46));
+            return new Rectangle(Width - w, (Height - 28) / 2, w, 28);
+        }
 
         protected override void OnClick(EventArgs e)
         {
             base.OnClick(e);
+            if (closedByPress) { closedByPress = false; return; }
             if (!Enabled || options.Length == 0) return;
-            var menu = new ContextMenuStrip();
-            menu.Renderer = new ToolStripProfessionalRenderer(new SetMenuColors());
-            menu.BackColor = SetUi.Card;
-            menu.ForeColor = SetUi.Text;
-            menu.Font = Typography.Secondary();
-            menu.ShowImageMargin = false;
-            menu.ShowCheckMargin = true;
-            for (int i = 0; i < options.Length; i++)
-            {
-                int n = i;
-                var item = new ToolStripMenuItem(options[i]);
-                item.Checked = i == index;
-                item.ForeColor = SetUi.Text;
-                item.Click += (s, ev) => { index = n; Invalidate(); if (Changed != null) Changed(n); };
-                menu.Items.Add(item);
-            }
-            menu.Closed += (s, ev) => menu.BeginInvoke((Action)menu.Dispose);
-            menu.Show(this, new Point(0, Height + 2));
+            SetPopup.Open(this, RectangleToScreen(Capsule()), options, index, n => { if (IsDisposed) return; index = n; Invalidate(); if (Changed != null) Changed(n); });
+            Invalidate();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && SetPopup.Current != null && SetPopup.Current.Owner_ == this) SetPopup.Current.Close();
+            base.Dispose(disposing);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            
+            bool dark = SetUi.Dark, lit = Enabled && (hover || (SetPopup.Current != null && SetPopup.Current.Owner_ == this));
+            Rectangle c = Capsule();
+            var r = new RectangleF(c.X + 0.5f, c.Y + 0.5f, c.Width - 1, c.Height - 1);
+            using (var path = SetUi.Round(r, r.Height / 2))
+            {
+                Color fill = dark ? Color.FromArgb(lit ? 40 : 22, 255, 255, 255) : (lit ? Color.FromArgb(238, 238, 242) : Color.White);
+                using (var b = new SolidBrush(fill)) g.FillPath(b, path);
+                using (var p = new Pen(dark ? Color.FromArgb(30, 255, 255, 255) : Color.FromArgb(32, 0, 0, 0))) g.DrawPath(p, path);
+            }
             string text = index >= 0 && index < options.Length ? options[index] : "";
             Color fg = Enabled ? SetUi.Text : SetUi.Dim;
-            SetText.DrawText(g, text, Typography.Secondary(), new Rectangle(0, 0, Width - 30, Height), fg, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-            using (var pen = new Pen(SetUi.Chevron, 1.6f))
+            SetText.DrawText(g, text, Typography.Secondary(), new Rectangle(c.X + 12, c.Y, c.Width - 42, c.Height), fg, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            float cx = c.Right - 14, cy = c.Y + c.Height / 2f;
+            using (var b = new SolidBrush(dark ? Color.FromArgb(34, 255, 255, 255) : Color.FromArgb(18, 0, 0, 0))) g.FillEllipse(b, cx - 10, cy - 10, 20, 20);
+            using (var pen = new Pen(fg, 1.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
             {
-                pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
-                float cx = Width - 16, cy = Height / 2f;
-                g.DrawLines(pen, new[] { new PointF(cx - 3.5f, cy - 2.5f), new PointF(cx, cy - 6), new PointF(cx + 3.5f, cy - 2.5f) });
-                g.DrawLines(pen, new[] { new PointF(cx - 3.5f, cy + 2.5f), new PointF(cx, cy + 6), new PointF(cx + 3.5f, cy + 2.5f) });
+                g.DrawLines(pen, new[] { new PointF(cx - 3.2f, cy - 2), new PointF(cx, cy - 5.2f), new PointF(cx + 3.2f, cy - 2) });
+                g.DrawLines(pen, new[] { new PointF(cx - 3.2f, cy + 2), new PointF(cx, cy + 5.2f), new PointF(cx + 3.2f, cy + 2) });
             }
         }
     }
@@ -1224,10 +1433,24 @@ namespace MacDock
             iconFont = SetUi.HasFont("Segoe Fluent Icons") ? "Segoe Fluent Icons" : (SetUi.HasFont("Segoe MDL2 Assets") ? "Segoe MDL2 Assets" : null);
         }
 
-        public void Filter(string q)
+        // keys == null shows everything; otherwise only those pages, each under its section label.
+        public void Filter(ICollection<string> keys)
         {
-            q = (q ?? "").Trim();
-            shown = q.Length == 0 ? new List<Item>(All) : All.Where(i => i.Kind == 0 && i.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+            if (keys == null) shown = new List<Item>(All);
+            else
+            {
+                shown = new List<Item>();
+                Item label = null;
+                foreach (Item i in All)
+                {
+                    if (i.Kind == 3) label = i;
+                    else if (i.Kind == 0 && keys.Contains(i.Key))
+                    {
+                        if (label != null) { shown.Add(label); label = null; }
+                        shown.Add(i);
+                    }
+                }
+            }
             off = 0; offF = 0; offTarget = 0;
             if (vsync != null) vsync.Sleep();
             Invalidate();
@@ -1544,17 +1767,28 @@ namespace MacDock
                     using (var b = new SolidBrush(SetUi.SearchFill)) e.Graphics.FillPath(b, path);
                     using (var p = new Pen(SetUi.SearchLine)) e.Graphics.DrawPath(p, path);
                 }
+                using (var p = new Pen(SetUi.Dim, 1.6f))
+                {
+                    p.StartCap = LineCap.Round; p.EndCap = LineCap.Round;
+                    e.Graphics.DrawEllipse(p, 15, 11, 9, 9); e.Graphics.DrawLine(p, 23, 19, 27, 23); // magnifier
+                    if (Query.Length > 0) { int x = searchHost.Width - 19; e.Graphics.DrawLine(p, x - 4, 13, x + 4, 21); e.Graphics.DrawLine(p, x + 4, 13, x - 4, 21); } // clear
+                }
+            };
+            searchHost.MouseDown += (s, e) =>
+            {
+                if (Query.Length > 0 && e.X >= searchHost.Width - 32) search.Text = "";
+                search.Focus();
             };
             search.BorderStyle = BorderStyle.None;
             search.BackColor = SetUi.SearchFill;
             search.ForeColor = SetUi.Dim;
             Program.Mark = "SET search-font"; search.Font = Typography.Body(); Program.Mark = "SET search-done";
             search.Text = "Search";
-            search.SetBounds(34, 0, searchHost.Width - 46, search.Height);
+            search.SetBounds(34, 0, searchHost.Width - 68, search.Height);
             search.Top = (searchHost.Height - search.Height) / 2 + 1;
             search.GotFocus += (s, e) => { if (searchPlaceholder) { search.Text = ""; search.ForeColor = SetUi.Text; searchPlaceholder = false; } };
             search.LostFocus += (s, e) => { if (search.Text.Length == 0) { searchPlaceholder = true; search.Text = "Search"; search.ForeColor = SetUi.Dim; } };
-            search.TextChanged += (s, e) => { if (!searchPlaceholder) side.Filter(search.Text); };
+            search.TextChanged += (s, e) => { if (!searchPlaceholder && !resettingSearch) ApplySearch(); };
             searchHost.Controls.Add(search);
             Controls.Add(searchHost);
 
@@ -1583,13 +1817,23 @@ namespace MacDock
 
             string user = Environment.UserName;
             side.All.Add(new SetSide.Item { Kind = 2, Name = user, Key = "Launcher settings", Glyph = user.Length > 0 ? user.Substring(0, 1).ToUpperInvariant() : "M" });
-            side.All.Add(new SetSide.Item { Kind = 3, Name = "MACDOCK" });
+            Action<string> section = name => side.All.Add(new SetSide.Item { Kind = 3, Name = name });
+            section("MACDOCK");
             page("general", "General", "", Color.FromArgb(142, 142, 147));
             page("appearance", "Appearance", "", Color.FromArgb(99, 99, 106));
-            page("dock", "Dock", "", Color.FromArgb(90, 90, 96));
-            page("menubar", "Menu Bar & Island", "", Color.FromArgb(120, 120, 128));
-            page("launchpad", "Launchpad", "", Color.FromArgb(94, 92, 230));
             page("icons", "Icons", "", Color.FromArgb(255, 149, 0));
+            section("DOCK & DESKTOP");
+            page("dock", "Dock", "", Color.FromArgb(90, 90, 96));
+            page("windows", "Windows & Previews", "\uE737", Color.FromArgb(10, 132, 255));
+            page("launchpad", "Launchpad", "", Color.FromArgb(94, 92, 230));
+            section("TOP BAR");
+            page("menubar", "Menu Bar", "", Color.FromArgb(120, 120, 128));
+            page("island", "Dynamic Island", "\uEA8F", Color.FromArgb(90, 90, 96));
+            page("controlcenter", "Control Center", "\uE9E9", Color.FromArgb(120, 120, 128));
+            section("MORE");
+            page("shortcuts", "Shortcuts & Gestures", "\uE765", Color.FromArgb(99, 99, 106));
+            page("advanced", "Advanced", "\uE90F", Color.FromArgb(142, 142, 147));
+            page("about", "About MacDock", "\uE946", Color.FromArgb(10, 132, 255));
             side.All.Add(new SetSide.Item { Kind = 1 });
             side.All.Add(new SetSide.Item { Kind = 3, Name = "SYSTEM" });
             Color[] colors = { Color.FromArgb(10, 132, 255), Color.FromArgb(10, 132, 255), Color.FromArgb(48, 209, 88), Color.FromArgb(0, 122, 255), Color.FromArgb(255, 69, 58), Color.FromArgb(142, 142, 147), Color.FromArgb(10, 132, 255), Color.FromArgb(142, 142, 147), Color.FromArgb(255, 159, 10), Color.FromArgb(142, 142, 147) };
@@ -1597,13 +1841,14 @@ namespace MacDock
                 page(SystemPages[i][0], SystemPages[i][1], SystemPages[i][2], colors[i % colors.Length]);
             page("sys-files", "File Explorer", "", Color.FromArgb(10, 132, 255));
             page("sys-about", "About This PC", "", Color.FromArgb(142, 142, 147));
-            side.Filter("");
+            side.Filter(null);
         }
 
         // ----- navigation -----
 
         public void GoTo(string key, bool record)
         {
+            if (key != "search") ResetSearch();
             if (record)
             {
                 while (history.Count > historyAt + 1) history.RemoveAt(history.Count - 1);
@@ -1699,8 +1944,6 @@ namespace MacDock
             using (var b = new SolidBrush(SetUi.Side)) g.FillRectangle(b, 0, 0, SideW, Height);
             using (var p = new Pen(SetUi.EdgeLine)) g.DrawLine(p, SideW, 0, SideW, Height);
 
-            using (var p = new Pen(SetUi.Dim, 1.6f)) { p.EndCap = LineCap.Round; g.DrawEllipse(p, 30, 66, 9, 9); g.DrawLine(p, 38, 74, 42, 78); } // magnifier in the search pill
-
             // back / forward pill
             var pill = new RectangleF(SideW + 14, 17, 58, 28);
             using (var path = SetUi.Round(pill, 13))
@@ -1713,7 +1956,7 @@ namespace MacDock
             using (var p = new Pen(backC, 1.8f)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; g.DrawLines(p, new[] { new PointF(SideW + 31f, 24.5f), new PointF(SideW + 26f, 31f), new PointF(SideW + 31f, 37.5f) }); }
             using (var p = new Pen(fwdC, 1.8f)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; using (var sp = new Pen(SetUi.PillLine)) g.DrawLine(sp, SideW + 43, 23, SideW + 43, 39); g.DrawLines(p, new[] { new PointF(SideW + 55f, 24.5f), new PointF(SideW + 60f, 31f), new PointF(SideW + 55f, 37.5f) }); }
 
-            SetText.DrawText(g, TitleOf(current == "tray" ? "tray" : side.Selected), Typography.Title(), new Rectangle(SideW + 90, 0, Math.Max(0, Width - SideW - 104), TopH), SetUi.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            SetText.DrawText(g, current == "search" ? "Search results" : TitleOf(current == "tray" ? "tray" : side.Selected), Typography.Title(), new Rectangle(SideW + 90, 0, Math.Max(0, Width - SideW - 104), TopH), SetUi.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -1733,10 +1976,27 @@ namespace MacDock
             }
         }
 
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (SetPopup.Current != null && SetPopup.Current.Key(keyData)) return true;
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override void OnMove(EventArgs e) { base.OnMove(e); SetPopup.Dismiss(); }
+
         protected override void OnKeyDown(KeyEventArgs e)
         {
             base.OnKeyDown(e);
-            if (e.KeyCode == Keys.Escape) Close();
+            if (e.KeyCode == Keys.Escape)
+            {
+                e.SuppressKeyPress = true;
+                if (Query.Length > 0) search.Text = ""; else Close();
+            }
+            else if (e.KeyCode == Keys.Enter && search.Focused)
+            {
+                e.SuppressKeyPress = true;
+                if (Query.Length > 0 && firstHit != null) OpenHit(firstHit);
+            }
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -1853,7 +2113,9 @@ namespace MacDock
         // Mouse wheel scrolls the page wherever the pointer is over the window.
         public bool PreFilterMessage(ref Message m)
         {
-            if (m.Msg != 0x020A || !Visible || !Bounds.Contains(Cursor.Position)) return false;
+            if (m.Msg != 0x020A || !Visible) return false;
+            if (SetPopup.Current != null) { SetPopup.Dismiss(); return true; }
+            if (!Bounds.Contains(Cursor.Position)) return false;
             int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
             if (side.RectangleToScreen(side.ClientRectangle).Contains(Cursor.Position)) { side.Scroll(-delta * 60 / 120); return true; }
             Wheel(delta);
@@ -1890,7 +2152,7 @@ namespace MacDock
             lines.Add("refresh interval ms: " + refMs.ToString("0.00") + " (" + (1000.0 / refMs).ToString("0") + " Hz); window " + f.Width + "x" + f.Height);
             benching = true;
             foreach (bool nosnap in new[] { true, false })
-                foreach (string page in new[] { "general", "appearance", "dock", "menubar", "launchpad", "icons" })
+                foreach (string page in new[] { "general", "appearance", "dock", "menubar", "island", "icons" })
                 {
                     NoSnap = nosnap;
                     f.GoTo(page, false); pump(500);
@@ -2402,7 +2664,7 @@ namespace MacDock
             if (cancelCapture != null) { var a = cancelCapture; cancelCapture = null; a(); }
         }
 
-        protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); CancelCapture(); }
+        protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); CancelCapture(); SetPopup.Dismiss(); }
 
         static readonly string[][] HotkeySlots =
         {
@@ -2574,6 +2836,14 @@ namespace MacDock
                 }
                 return;
             }
+            if (key == "search") { BuildSearch(); return; }
+            FillPage(key);
+            Relayout();
+            FocusPendingHit();
+        }
+
+        void FillPage(string key)
+        {
             SetCard c;
             switch (key)
             {
@@ -2585,16 +2855,27 @@ namespace MacDock
                     c = NewCard();
                     RestartRow(c);
                     Link(c, "Show welcome tour...", null, () => OnboardingForm.Open());
-                    Link(c, "Force stop MacDock", null, () =>
-                    {
-                        if (MessageBox.Show("Stop MacDock completely?\n\nThe dock will close and will not come back on its own until you start MacDock yourself.", "MacDock", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-                            SetUi.ForceStop();
-                    });
+                    Head("Backup & Restore");
+                    c = NewCard();
+                    Link(c, "Back up settings...", null, DoBackup);
+                    Link(c, "Restore from backup...", null, DoRestore);
+                    Note("A backup is a .zip of dock.txt, iconmap.txt and the icons folder from " + AppPaths.DataDir + ". Restoring first saves your current files to a backups folder there, then offers to restart MacDock.");
+                    break;
+
+                case "advanced":
                     Head("Files");
                     c = NewCard();
                     Link(c, "Configuration file", "dock.txt", () => Process.Start("notepad.exe", "\"" + AppPaths.Config + "\""));
                     Link(c, "Open data folder", null, () => SetUi.OpenTarget(AppPaths.DataDir));
                     Note("Settings are saved to dock.txt in " + AppPaths.DataDir + ". Dock pins, the icon map and downloaded icons live there too.");
+                    Head("Stop or restart");
+                    c = NewCard();
+                    RestartRow(c);
+                    Link(c, "Force stop MacDock", null, () =>
+                    {
+                        if (MessageBox.Show("Stop MacDock completely?\n\nThe dock will close and will not come back on its own until you start MacDock yourself.", "MacDock", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                            SetUi.ForceStop();
+                    });
                     break;
 
                 case "tray":
@@ -2620,11 +2901,6 @@ namespace MacDock
                     grid.Changed += () => side.Invalidate();
                     Add(grid);
                     Note("Pick an avatar. It is shown at the top of the sidebar and saved as @avatar in dock.txt.");
-                    Head("Backup & Restore");
-                    c = NewCard();
-                    Link(c, "Back up settings...", null, DoBackup);
-                    Link(c, "Restore from backup...", null, DoRestore);
-                    Note("A backup is a .zip of dock.txt, iconmap.txt and the icons folder from " + AppPaths.DataDir + ". Restoring first saves your current files to a backups folder there, then offers to restart MacDock.");
                     break;
 
                 case "appearance":
@@ -2634,10 +2910,6 @@ namespace MacDock
                     Toggle(c, "Match Windows appearance", theme == "system", v => { SetCfg.Set("theme", v ? "system" : (SetUi.Dark ? "dark" : "light"), false); ReapplyTheme(); });
                     Toggle(c, "Dark mode", SetUi.Dark, v => { SetCfg.Set("theme", v ? "dark" : "light", false); DarkMode.Set(v); ReapplyTheme(); });
                     Note("Dark mode also switches Windows apps to dark or light. This window, its sidebar icons and the colours follow it. Saved as @theme dark, light or system in dock.txt.");
-                    Head("Icons");
-                    c = NewCard();
-                    Toggle(c, "Use original app icons", SetCfg.GetBool("original-icons", false), v => { SetCfg.SetBool("original-icons", v); IconChoice.Changed(); });
-                    Note("Shows each app's own icon instead of MacDock's replacement icon pack. Right-click an app in the dock or Launchpad to choose per app or pick a custom icon. Saved as @original-icons in dock.txt.");
                     Head("Typography");
                     c = NewCard();
                     Field(c, "Font", SetCfg.Get("font"), null, false, v => SetCfg.Set("font", v.Length == 0 ? null : v, true));
@@ -2681,10 +2953,6 @@ namespace MacDock
                     Toggle(c, "Auto-hide Dock", SetCfg.GetBool("auto-hide-dock", false), v => { SetCfg.SetBool("auto-hide-dock", v); DockForm.Instance.ApplyDockMode(); });
                     Toggle(c, "Show Launchpad button in Dock", DockForm.Instance.LaunchpadPinned, v => DockForm.Instance.SetLaunchpadButton(v));
                     Toggle(c, "Show Start icon in Dock", SetCfg.GetBool("show-start-icon", true), v => DockForm.Instance.SetStartIcon(v));
-                    Toggle(c, "Genie effect", SetCfg.GetBool("genie", true), v => SetCfg.SetBool("genie", v));
-                    Toggle(c, "Minimize windows into the Dock (as thumbnails)", MinimizedDock.On, v => { SetCfg.SetBool("minimize-to-dock", v); DockForm.Instance.RebuildSoon(); });
-                    Toggle(c, "Show window previews on hover", SetCfg.GetBool("window-previews", true), v => SetCfg.SetBool("window-previews", v));
-                    { string[] gfx = { "genie", "scale", "fade" }; int gi = Array.IndexOf(gfx, SetCfg.Get("genie-style") ?? "genie"); PickerRow(c, "Minimize effect", new[] { "Genie", "Scale", "Fade" }, gi < 0 ? 0 : gi, i => { SetCfg.Set("genie-style", gfx[i], false); return true; }, "Couldn't change the minimize effect."); }
                     Toggle(c, "Open folder fans on click instead of hover", SetCfg.GetBool("fan-click", false), v => SetCfg.SetBool("fan-click", v));
                     Note("With auto-hide off, the dock stays and maximized windows stop above it. With it on, the dock slides away while an app is in front and returns when the pointer reaches the bottom edge. Full-screen apps always hide it.");
                     Head("Windows taskbar");
@@ -2698,6 +2966,24 @@ namespace MacDock
                     Link(c, "Add website to Dock...", null, () => DockForm.Instance.PromptAddWebsite());
                     Link(c, "Edit Dock items...", "dock.txt", () => Process.Start("notepad.exe", "\"" + AppPaths.Config + "\""));
                     Note("Drag an app onto the dock to pin it, or right-click an icon for more options.");
+                    break;
+
+                case "windows":
+                    Head("Minimizing");
+                    c = NewCard();
+                    Toggle(c, "Genie effect", SetCfg.GetBool("genie", true), v => SetCfg.SetBool("genie", v));
+                    { string[] gfx = { "genie", "scale", "fade" }; int gi = Array.IndexOf(gfx, SetCfg.Get("genie-style") ?? "genie"); PickerRow(c, "Minimize effect", new[] { "Genie", "Scale", "Fade" }, gi < 0 ? 0 : gi, i => { SetCfg.Set("genie-style", gfx[i], false); return true; }, "Couldn't change the minimize effect."); }
+                    Toggle(c, "Minimize windows into the Dock (as thumbnails)", MinimizedDock.On, v => { SetCfg.SetBool("minimize-to-dock", v); DockForm.Instance.RebuildSoon(); });
+                    Head("Window previews");
+                    c = NewCard();
+                    {
+                        SetRow when = null;
+                        Toggle(c, "Show window previews", SetCfg.GetBool("window-previews", true), v => { SetCfg.SetBool("window-previews", v); if (when != null) when.Widget.Enabled = v; });
+                        string[] wtv = { "hover", "click" };
+                        when = PickerRow(c, "Show previews", new[] { "On hover", "On click" }, SetCfg.Get("window-preview-trigger") == "click" ? 1 : 0, i => { SetCfg.Set("window-preview-trigger", wtv[i], false); return true; }, "Couldn't change when previews appear.");
+                        when.Widget.Enabled = SetCfg.GetBool("window-previews", true);
+                    }
+                    Note("Previews show the open windows of an app from its Dock icon.");
                     break;
 
                 case "menubar":
@@ -2752,18 +3038,28 @@ namespace MacDock
                     Link(c, "Choose tray icons", TrayIcons.Selected().Count + " shown", () => GoTo("tray", true));
                     Note("Pick which Windows tray icons appear in the menu bar, including the ones Windows hides in its overflow. Click an icon to send a left click to the original app, right-click for its menu. Windows 11 only exposes its tray through the on-screen icons, so scanning briefly opens the hidden-icons flyout; clicking an icon does the same for an instant.");
 
+                    break;
+
+                case "controlcenter":
                     Head("Control Center");
                     c = NewCard();
                     Toggle(c, "Screenshot tile", ScreenCapture.TileShot, v => Panels.CcSetMember("shot", v));
                     Toggle(c, "Screen record tile", ScreenCapture.TileRec, v => Panels.CcSetMember("rec", v));
+                    Note("Choose which capture tiles appear in Control Center.");
+                    break;
 
-                    Head("Dynamic Island & notifications");
+                case "island":
+                    Head("Dynamic Island");
                     c = NewCard();
                     Toggle(c, "Show Dynamic Island", SetCfg.GetBool("island", true), v => { SetCfg.SetBool("island", v); IslandForm.SetEnabled(v); });
+                    Head("Pop-ups and alerts");
+                    c = NewCard();
                     Toggle(c, "Volume pop-up", SetCfg.GetBool("island-volume", true), v => SetCfg.SetBool("island-volume", v));
                     Toggle(c, "Brightness pop-up", SetCfg.GetBool("island-brightness", true), v => SetCfg.SetBool("island-brightness", v));
                     Toggle(c, "Mic and camera in-use dots", SetCfg.GetBool("island-privacy", true), v => SetCfg.SetBool("island-privacy", v));
                     Toggle(c, "Caps Lock and Num Lock alerts", SetCfg.GetBool("island-locks", true), v => SetCfg.SetBool("island-locks", v));
+                    Head("Focus and health reminders");
+                    c = NewCard();
                     Toggle(c, "Water reminders", SetCfg.GetBool("island-water", true), v => SetCfg.SetBool("island-water", v));
                     Toggle(c, "Stand-up reminders", SetCfg.GetBool("island-stand", true), v => SetCfg.SetBool("island-stand", v));
                     CycleRow(c, "Focus length", "island-pomo-focus", new[] { 15, 25, 30, 45, 50, 60 }, 25, " min");
@@ -2771,27 +3067,35 @@ namespace MacDock
                     CycleRow(c, "Daily water goal", "island-water-goal", new[] { 4, 6, 8, 10, 12 }, 8, " glasses");
                     CycleRow(c, "Water reminder every", "island-water-every", new[] { 30, 45, 60, 90, 120 }, 60, " min");
                     CycleRow(c, "Stand-up reminder every", "island-stand-every", new[] { 30, 45, 60, 90 }, 45, " min");
+                    Head("Notifications");
+                    c = NewCard();
                     Link(c, "Windows notification settings", null, () => SetUi.OpenTarget("ms-settings:notifications"));
                     Link(c, "Focus settings", null, () => SetUi.OpenTarget("ms-settings:quiethours"));
                     Note("The island shows notifications, media and power events, and follows your Windows notification and Focus settings. Hover it and open the Focus tab for the Pomodoro timer and water and stand-up trackers; click a row's value to step through presets.");
+                    break;
 
+                case "shortcuts":
                     Head("Keyboard shortcuts");
                     c = NewCard();
                     HotkeyRow(c, "Search (Spotlight)", "hotkey-spotlight", HotkeyHook.DefaultSpotlight);
                     HotkeyRow(c, "Launchpad", "hotkey-launchpad", HotkeyHook.DefaultLaunchpad);
                     Info(c, "Lock screen", "Win + L");
                     Note("Click a shortcut, then press the new combination. It needs a modifier (Win, Ctrl, Alt or Shift). Two shortcuts can't share a combination.");
-                    break;
-
-                case "launchpad":
                     Head("Trackpad gestures");
                     c = NewCard();
                     Toggle(c, "Four- and five-finger swipes", SetCfg.GetBool("gestures", true), v => SetCfg.SetBool("gestures", v));
                     RestartRow(c);
                     Note("Swipe down closes Launchpad. Needs a precision touchpad. Restart MacDock to apply.");
+                    break;
+
+                case "launchpad":
                     Head("Open now");
                     c = NewCard();
                     Link(c, "Launchpad (all apps)", null, () => MissionControl.Toggle(true));
+                    Head("Related settings");
+                    c = NewCard();
+                    Link(c, "Launchpad shortcut and trackpad gestures", null, () => GoTo("shortcuts", true));
+                    Link(c, "Launchpad button in the Dock", null, () => GoTo("dock", true));
                     break;
 
                 case "icons":
@@ -2855,6 +3159,9 @@ namespace MacDock
                     c = NewCard();
                     Open(c, "About (Windows Settings)", "ms-settings:about");
                     Link(c, "Task Manager", "Ctrl + Shift + Esc", () => Process.Start("taskmgr.exe"));
+                    break;
+
+                case "about":
                     Head("About MacDock");
                     c = NewCard();
                     Info(c, "Credits", Credits.Line);
@@ -2871,7 +3178,191 @@ namespace MacDock
                     BuildSystemLinks(key);
                     break;
             }
+        }
+
+        // ----- search -----
+
+        sealed class Hit { public string Page, PageName, Section, Label, Note = ""; public int Rank; }
+        List<Hit> index;
+        Hit firstHit, pendingHit;
+        string beforeSearch = "general";
+        bool resettingSearch;
+
+        string Query { get { return searchPlaceholder ? "" : search.Text.Trim(); } }
+
+        static readonly string[] OwnPages = { "general", "appearance", "icons", "dock", "windows", "launchpad", "menubar", "tray", "island", "controlcenter", "shortcuts", "advanced", "about", "profile", "sys-files", "sys-about" };
+
+        // Rows of the Windows pages that are built from live queries, listed here so searching never has to run those queries.
+        static readonly string[] LiveRows = {
+            "sys-display|Display|Brightness", "sys-display|Display|Night light", "sys-display|Sound|Output volume", "sys-display|Sound|Mute",
+            "sys-network|Wireless|Wi-Fi", "sys-network|Wireless|Bluetooth", "sys-network|Wireless|Airplane mode",
+            "sys-power|Battery|Battery level", "sys-power|Battery|Turn on Battery Saver automatically", "sys-power|Power mode|Power mode",
+            "sys-power|Screen and sleep|Turn screen off - plugged in", "sys-power|Screen and sleep|Sleep - plugged in",
+            "sys-power|Power|Sleep", "sys-power|Power|Lock screen", "sys-power|Power|Restart...", "sys-power|Power|Shut down...",
+            "sys-personal|Appearance|Dark mode", "sys-personal|Appearance|Transparency effects", "sys-personal|Wallpaper|Picture style", "sys-personal|Wallpaper|Choose from file..." };
+
+        // Built from the pages themselves (once per window), so a newly added setting is searchable without extra bookkeeping.
+        void BuildIndex()
+        {
+            var sw = Stopwatch.StartNew();
+            index = new List<Hit>();
+            foreach (string page in OwnPages)
+            {
+                ClearBody();
+                current = page;
+                try { FillPage(page); }
+                catch (Exception ex) { Program.Log(ex); }
+                string section = "";
+                var last = new List<Hit>();
+                foreach (Control ctl in flow)
+                {
+                    var card = ctl as SetCard;
+                    if ((ctl.Tag as string) == "head") { section = ctl.Text; last.Clear(); }
+                    else if (card != null)
+                    {
+                        last.Clear();
+                        foreach (SetRow r in card.Rows) last.Add(new Hit { Page = page, PageName = TitleOf(page), Section = section, Label = r.Label });
+                        index.AddRange(last);
+                    }
+                    else if (ctl is Label) { foreach (Hit h in last) h.Note += " " + ctl.Text; }
+                    else if (ctl is SetAvatarGrid || ctl is DonationBox) index.Add(new Hit { Page = page, PageName = TitleOf(page), Section = section, Label = section });
+                }
+            }
+            foreach (string row in LiveRows)
+            {
+                string[] p = row.Split('|');
+                index.Add(new Hit { Page = p[0], PageName = TitleOf(p[0]), Section = p[1], Label = p[2] });
+            }
+            foreach (string[] p in SystemPages)
+            {
+                bool live = p[0] == "sys-display" || p[0] == "sys-network" || p[0] == "sys-power" || p[0] == "sys-personal";
+                for (int i = 3; i < p.Length; i++)
+                    index.Add(new Hit { Page = p[0], PageName = p[1], Section = live ? "More..." : p[1], Label = p[i].Substring(0, p[i].IndexOf('|')) });
+            }
+            ClearBody();
+            current = "search";
+            Program.Log("SET search index " + index.Count + " entries in " + sw.ElapsedMilliseconds + " ms");
+        }
+
+        static bool HasAll(string text, string[] words)
+        {
+            foreach (string w in words) if (text.IndexOf(w, StringComparison.OrdinalIgnoreCase) < 0) return false;
+            return true;
+        }
+
+        // Best matches first: the label itself, then section / category names, then the description under the card.
+        List<Hit> FindHits(string q)
+        {
+            string[] words = q.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var hits = new List<Hit>();
+            foreach (Hit h in index)
+            {
+                string named = h.Label + " " + h.Section + " " + h.PageName;
+                if (HasAll(h.Label, words)) h.Rank = 0;
+                else if (HasAll(named, words)) h.Rank = 1;
+                else if (HasAll(named + " " + h.Note, words)) h.Rank = 2;
+                else continue;
+                hits.Add(h);
+            }
+            if (hits.Any(h => h.Rank < 2)) hits.RemoveAll(h => h.Rank == 2); // description matches only when nothing is named that way
+            return hits.OrderBy(h => h.Rank).ToList(); // stable: page order is kept inside a rank
+        }
+
+        void ApplySearch()
+        {
+            searchHost.Invalidate();
+            if (Query.Length == 0)
+            {
+                if (current != "search") return;
+                side.Filter(null);
+                GoTo(beforeSearch, false);
+                return;
+            }
+            if (current != "search") beforeSearch = current;
+            if (fadeCover != null) { Controls.Remove(fadeCover); fadeCover.Dispose(); fadeCover = null; }
+            SendMessage(viewport.Handle, 0x000B, IntPtr.Zero, IntPtr.Zero); // WM_SETREDRAW off: build without flicker
+            try { side.Selected = null; BuildPage("search"); }
+            finally { SendMessage(viewport.Handle, 0x000B, (IntPtr)1, IntPtr.Zero); viewport.Invalidate(true); }
+            Invalidate(new Rectangle(SideW, 0, Width - SideW, TopH));
+        }
+
+        void BuildSearch()
+        {
+            const int Max = 60;
+            if (index == null) BuildIndex();
+            string q = Query;
+            List<Hit> hits = FindHits(q);
+            side.Filter(new HashSet<string>(hits.Select(h => h.Page == "tray" ? "menubar" : h.Page)));
+            firstHit = hits.Count > 0 ? hits[0] : null;
+            if (hits.Count == 0)
+            {
+                Head("No results");
+                Note("No settings match \"" + q + "\". Try a shorter word, such as dock, icon or island. Press Esc to clear the search.");
+            }
+            else
+                foreach (var group in hits.Take(Max).GroupBy(h => h.Page))
+                {
+                    Head(group.First().PageName);
+                    SetCard c = NewCard();
+                    foreach (Hit h in group)
+                    {
+                        Hit hit = h;
+                        Link(c, h.Label, h.Section == h.Label || h.Section == h.PageName ? null : h.Section, () => BeginInvoke((Action)(() => OpenHit(hit))));
+                    }
+                }
+            if (hits.Count > Max) Note((hits.Count - Max) + " more results. Type more to narrow them down.");
             Relayout();
+        }
+
+        void OpenHit(Hit hit)
+        {
+            pendingHit = hit;
+            GoTo(hit.Page, true);
+        }
+
+        void ResetSearch()
+        {
+            if (Query.Length == 0) return;
+            resettingSearch = true;
+            searchPlaceholder = !search.Focused;
+            search.Text = searchPlaceholder ? "Search" : "";
+            search.ForeColor = searchPlaceholder ? SetUi.Dim : SetUi.Text;
+            resettingSearch = false;
+            side.Filter(null);
+            searchHost.Invalidate();
+        }
+
+        // Scrolls a freshly built page to the row a search result pointed at, and flashes it.
+        void FocusPendingHit()
+        {
+            Hit hit = pendingHit;
+            if (hit == null || hit.Page != current) return;
+            string section = "";
+            Control target = null;
+            SetRow row = null;
+            foreach (Control ctl in flow)
+            {
+                if ((ctl.Tag as string) == "head")
+                {
+                    section = ctl.Text;
+                    if (section == hit.Section && target == null) target = ctl; // fallback: picture grids, live values
+                    continue;
+                }
+                var card = ctl as SetCard;
+                if (card == null || section != hit.Section) continue;
+                row = card.Rows.FirstOrDefault(r => r.Label == hit.Label);
+                if (row != null) { target = card; break; }
+            }
+            if (target == null) return;
+            pendingHit = null;
+            scroll = Math.Max(0, row != null ? target.Top + row.Top - viewport.Height / 3 : target.Top - 6);
+            ApplyScroll();
+            scrollF = scrollTarget = scroll; scrollS.Snap(scroll);
+            if (row == null) return;
+            row.Highlight = true;
+            var t = new System.Windows.Forms.Timer { Interval = 2500 };
+            t.Tick += (s, e) => { t.Dispose(); if (!row.IsDisposed) { row.Highlight = false; row.Invalidate(true); } };
+            t.Start();
         }
 
         void BuildSystemLinks(string key)
