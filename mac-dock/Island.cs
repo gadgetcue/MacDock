@@ -396,7 +396,8 @@ namespace MacDock
             if (springH.Value < IdleH) { springH.Value = IdleH; if (springH.Velocity < 0) springH.Velocity = 0; }
 
             bool swipeBusy = StepSwipe(dt);
-            bool settled = springW.IsSettled(targetW, 0.3) && springH.IsSettled(targetH, 0.3) && !swipeBusy;
+            bool iconBusy = StepToast(dt);
+            bool settled = !iconBusy && springW.IsSettled(targetW, 0.3) && springH.IsSettled(targetH, 0.3) && !swipeBusy;
             if (settled) { springW.Snap(targetW); springH.Snap(targetH); }
             wasBusy = !settled;
 

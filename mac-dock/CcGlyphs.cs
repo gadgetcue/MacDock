@@ -38,6 +38,103 @@ namespace MacDock
             g.Restore(state);
         }
 
+        static float Clamp01(double v) { return (float)Math.Max(0, Math.Min(1, v)); }
+        static Color Fade(Color c, float k) { return Color.FromArgb((int)(c.A * Clamp01(k)), c); }
+
+        // Animated variants for the Dynamic Island. v: speaker = wave count 0..3, "mute" = slash progress, "sun" = level,
+        // "capslock"/"number" = fill progress, "timer" = hand turn 0..1.
+        public static void DrawAnimated(Graphics g, string name, float cx, float cy, float scale, Color c, double v)
+        {
+            GraphicsState state = g.Save();
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.TranslateTransform(cx, cy);
+            g.ScaleTransform(scale, scale);
+            using (var b = new SolidBrush(c))
+            using (var p = new Pen(c, 1.9f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            {
+                switch (name)
+                {
+                    case "speaker":
+                        Speaker(g, b, p, -4f);
+                        for (int i = 0; i < 3; i++)
+                        {
+                            float k = Clamp01(v - i), r = (3.6f + i * 3.5f) * (0.6f + 0.4f * k);
+                            if (k < 0.02f) continue;
+                            using (var wave = new Pen(Fade(c, k), 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                                Arc(g, wave, -0.6f, 0, r, -48, 96);
+                        }
+                        break;
+                    case "mute": // the slash draws itself across the speaker
+                    {
+                        float k = Math.Max(0.02f, Clamp01(v)), ex = -8.4f + 17f * k, ey = -9f + 18.4f * k;
+                        GraphicsState s = g.Save();
+                        using (var cut = new GraphicsPath())
+                        {
+                            cut.AddPolygon(Pts(-8.4f, -11f, -5f, -11f, ex + 3f, ey - 0.4f, ex - 0.4f, ey - 0.4f));
+                            g.SetClip(cut, CombineMode.Exclude);
+                        }
+                        Speaker(g, b, p, -2f);
+                        p.Width = 1.8f;
+                        Arc(g, p, 1.2f, 0, 5.2f, -48, 96);
+                        g.Restore(s);
+                        p.Width = 1.9f;
+                        g.DrawLine(p, -8.4f, -9f, ex, ey);
+                        break;
+                    }
+                    case "sun": // rays grow and turn with the level
+                    {
+                        float k = Clamp01(v), disc = 3.2f + 1.5f * k, from = disc + 2.8f, to = from + 0.6f + 2.3f * k;
+                        g.RotateTransform(90f * k);
+                        Sun(g, b, p, disc, from, to);
+                        break;
+                    }
+                    case "capslock": // outline that fills from the bottom
+                    {
+                        Paint(g, "capslock", b, p);
+                        float k = Clamp01(v);
+                        if (k > 0.01f)
+                        {
+                            g.SetClip(new RectangleF(-12f, 11f - 22f * k, 24f, 22f * k), CombineMode.Intersect);
+                            Paint(g, "capslock.fill", b, p);
+                        }
+                        break;
+                    }
+                    case "number": // crossfade between outline and filled
+                    {
+                        float k = Clamp01(v);
+                        if (k < 0.99f)
+                            using (var ob = new SolidBrush(Fade(c, 1 - k)))
+                            using (var op = (Pen)p.Clone()) { op.Color = ob.Color; Paint(g, "number", ob, op); }
+                        if (k > 0.01f)
+                            using (var fb = new SolidBrush(Fade(c, k)))
+                            using (var fp = (Pen)p.Clone()) { fp.Color = fb.Color; Paint(g, "number.fill", fb, fp); }
+                        break;
+                    }
+                    case "timer": // the hand makes one turn
+                    {
+                        p.Width = 1.8f;
+                        g.DrawEllipse(p, -9.6f, -9.6f, 19.2f, 19.2f);
+                        g.FillEllipse(b, -1.7f, -1.7f, 3.4f, 3.4f);
+                        p.Width = 1.4f;
+                        for (int i = 0; i < 4; i++) { g.DrawLine(p, 0, -6.8f, 0, -5.6f); g.RotateTransform(90); }
+                        g.RotateTransform((float)(360 * v));
+                        p.Width = 1.8f;
+                        g.DrawLine(p, 0, 0, -3.8f, -3.8f);
+                        break;
+                    }
+                    case "moon": // swings up into its resting angle
+                        g.RotateTransform((float)(-70 * (1 - v)));
+                        Paint(g, name, b, p);
+                        break;
+                    default:
+                        Paint(g, name, b, p);
+                        break;
+                }
+            }
+            g.Restore(state);
+        }
+
         static void Paint(Graphics g, string name, SolidBrush b, Pen p)
         {
             switch (name)

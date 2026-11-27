@@ -110,6 +110,8 @@ namespace MacDock
         // ---------- background poller: mic/camera use (registry) and panel brightness (WMI, slow so off the UI thread) ----------
         volatile bool micOn, camOn;
         volatile int bright = -2;
+        volatile int dnd = -1;      // Do Not Disturb: -1 unknown, 0 off, 1 on
+        int lastDnd = -1;
         bool pollStarted;
 
         static bool CapInUse(string cap)
@@ -170,6 +172,7 @@ namespace MacDock
                         }
                     }
                     catch { }
+                    dnd = DoNotDisturb.IsOn() ? 1 : 0; // one registry read, never throws
                     tick++;
                     System.Threading.Thread.Sleep(400);
                 }
@@ -185,18 +188,95 @@ namespace MacDock
         // ---------- generic toast ----------
         string toastText, toastSub, toastGlyph;
         Color toastColor = Color.White;
-        int toastKind;          // 0 none, 1 volume, 2 key, 3 water, 4 stand, 5 timer
+        int toastKind;          // 0 none, 1 volume, 2 key, 3 water, 4 stand, 5 timer, 6 brightness, 7 focus / do not disturb
         double toastBar = -1;   // 0..1, or -1 for no bar
         Action toastClick;
 
         void ShowToast(string text, string sub, Color color, int kind, double bar, double seconds, string glyph, Action click)
         {
             if (!Enabled || mode == Mode.Panel || mode == Mode.Notif) return;
+            StartToastAnim(text, kind, bar, glyph);
             toastText = text; toastSub = sub; toastColor = color; toastKind = kind; toastBar = bar; toastGlyph = glyph; toastClick = click;
             mode = Mode.Toast;
             until = DateTime.Now.AddSeconds(seconds);
             Wake();
             Redraw(); // show the new value now, not at the next slow repaint
+        }
+
+        // ---------- icon animation (runs on the island's vsync frames, only while a pop-up is up and moving) ----------
+        Spring aPop = new Spring(1), aLevel = new Spring(0), aIcon = new Spring(0);
+        double aIconTo;         // speaker wave count, mute slash or caps/num fill
+        double toastAge;        // seconds since this pop-up's icon started moving
+        bool toastMoving;
+        const double ReminderAnim = 2.4;
+
+        void StartToastAnim(string text, int kind, double bar, string glyph)
+        {
+            bool key = kind == 2, on = key && glyph.EndsWith(".fill");
+            bool muted = kind == 1 && text == "Muted";
+            bool fresh = kind == 7 || mode != Mode.Toast || toastKind != kind || (key && toastGlyph.Split('.')[0] != glyph.Split('.')[0])
+                || (kind == 1 && muted != (toastText == "Muted"));
+            double level = Math.Max(0, bar);
+            aIconTo = key ? (on ? 1 : 0) : muted || kind == 7 ? 1 : kind == 1 ? (level <= 0.001 ? 0 : level < 1 / 3.0 ? 1 : level < 2 / 3.0 ? 2 : 3) : 0;
+            if (fresh)
+            {
+                aPop.Snap(0.55);
+                aIcon.Snap(key ? 1 - aIconTo : 0);
+                aLevel.Snap(kind == 1 ? level * 0.7 : kind == 6 ? level * 0.4 : 0);
+                toastAge = 0;
+            }
+            else if (key) { aPop.Snap(0.7); toastAge = 0; }
+            else if (kind >= 3 && kind <= 5) toastAge = 0;
+            toastMoving = true;
+        }
+
+        // True while the icon is still moving (and for the one frame that draws its resting state).
+        bool StepToast(double dt)
+        {
+            if (mode != Mode.Toast || !toastMoving) return false;
+            toastAge += dt;
+            double level = Math.Max(0, toastBar);
+            aPop.Step(1, 24, 0.5, dt);
+            aLevel.Step(level, 22, 1.0, dt);
+            aIcon.Step(aIconTo, 18, 0.9, dt);
+            bool looping = toastKind >= 3 && toastKind <= 5 && toastAge < ReminderAnim;
+            if (!looping && aPop.IsSettled(1, 0.004) && aLevel.IsSettled(level, 0.003) && aIcon.IsSettled(aIconTo, 0.01))
+            {
+                aPop.Snap(1); aLevel.Snap(level); aIcon.Snap(aIconTo);
+                toastMoving = false;
+            }
+            return true;
+        }
+
+        void DrawToastIcon(Graphics g, float cx, float cy, Color c)
+        {
+            float scale = 0.95f * (float)Math.Max(0.1, aPop.Value);
+            double t = Math.Min(toastAge, ReminderAnim), fade = 1 - t / ReminderAnim; // 1 -> 0, so reminders come to rest
+            switch (toastKind)
+            {
+                case 1:
+                    CcGlyphs.DrawAnimated(g, toastText == "Muted" ? "mute" : "speaker", cx, cy, scale, c, aIcon.Value);
+                    break;
+                case 2:
+                    CcGlyphs.DrawAnimated(g, toastGlyph.Split('.')[0], cx, cy, scale, c, aIcon.Value);
+                    break;
+                case 3: // drop: bounces
+                case 4: // figure: bounces
+                    float hop = (float)(6 * fade * Math.Abs(Math.Sin(t * Math.PI * 2)));
+                    CcGlyphs.DrawAnimated(g, toastKind == 3 ? "drop" : "stand", cx, cy + 2 * (float)fade - hop, scale, c, 0);
+                    break;
+                case 7: // moon swings into place
+                    CcGlyphs.DrawAnimated(g, "moon", cx, cy, scale, c, aIcon.Value);
+                    break;
+                case 6:
+                    CcGlyphs.DrawAnimated(g, "sun", cx, cy, scale, c, aLevel.Value);
+                    break;
+                default: // timer: hand turns once, with a soft pulse
+                    double turn = Math.Min(1, t / 1.2);
+                    turn = 1 - Math.Pow(1 - turn, 3);
+                    CcGlyphs.DrawAnimated(g, "timer", cx, cy, scale * (float)(1 + 0.12 * fade * Math.Sin(t * Math.PI * 2.5)), c, turn);
+                    break;
+            }
         }
 
         // ---------- Pomodoro ----------
@@ -223,7 +303,7 @@ namespace MacDock
         void PomoStart()
         {
             PomoBegin(PomoState.Focus);
-            ShowToast("Focus", IslandCfg.FocusMin + " min", Color.FromArgb(255, 69, 58), 5, -1, 2.5, null, null);
+            ShowToast("Focus", IslandCfg.FocusMin + " min", Color.FromArgb(125, 122, 255), 7, -1, 2.5, null, null);
         }
 
         void PomoTogglePause()
@@ -259,6 +339,13 @@ namespace MacDock
                     lastBright = b;
                     if (IslandCfg.BrightOn) ShowToast("Brightness", b + "%", Color.White, 6, b / 100.0, 1.6, null, null);
                 }
+            }
+
+            int d = dnd;
+            if (d >= 0 && d != lastDnd)
+            {
+                if (lastDnd >= 0) ShowToast("Do Not Disturb", d == 1 ? "On" : "Off", d == 1 ? Color.FromArgb(125, 122, 255) : Color.White, 7, -1, 1.8, null, null);
+                lastDnd = d;
             }
 
             // Volume HUD (polled ~7x/s) and lock keys.
@@ -365,19 +452,7 @@ namespace MacDock
             float ix = pill.Left + 18, cy = pill.Top + pill.Height / 2f;
             Color c = A(toastColor, alpha);
             // Action pop-ups show the SF Symbol for the action, never the MacDock icon.
-            string symbol;
-            switch (toastKind)
-            {
-                case 1: // volume: wave count follows the level
-                    symbol = toastText == "Muted" ? "mute" : toastBar <= 0.001 ? "speaker0" : toastBar < 1 / 3.0 ? "speakerwave1" : toastBar < 2 / 3.0 ? "speakerwave2" : "speakerwave";
-                    break;
-                case 2: symbol = toastGlyph; break;
-                case 3: symbol = "drop"; break;
-                case 4: symbol = "stand"; break;
-                case 6: symbol = toastBar < 0.5 ? "sunmin" : "warm"; break;
-                default: symbol = "timer"; break;
-            }
-            CcGlyphs.Draw(g, symbol, ix + 10, cy, 0.95f, c);
+            DrawToastIcon(g, ix + 10, cy, c);
             float tx = ix + 32;
             if (toastBar >= 0)
             {
@@ -386,9 +461,10 @@ namespace MacDock
                 using (var tb = new SolidBrush(A(Color.FromArgb(60, 255, 255, 255), alpha)))
                 using (var path = Layered.RoundedRect(track, 3))
                     g.FillPath(tb, path);
-                if (toastBar > 0.01)
+                double shown = toastMoving ? aLevel.Value : toastBar;
+                if (shown > 0.01)
                 {
-                    var fillR = new RectangleF(track.Left, track.Top, (float)(track.Width * Math.Min(1.0, toastBar)), track.Height);
+                    var fillR = new RectangleF(track.Left, track.Top, (float)(track.Width * Math.Min(1.0, shown)), track.Height);
                     using (var fb = new SolidBrush(A(Color.White, alpha)))
                     using (var path = Layered.RoundedRect(fillR, 3))
                         g.FillPath(fb, path);
