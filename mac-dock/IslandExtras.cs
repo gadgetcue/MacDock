@@ -269,8 +269,8 @@ namespace MacDock
                 if (!capsInit) { capsInit = true; lastCaps = caps; lastNum = num; }
                 else if (IslandCfg.LocksOn)
                 {
-                    if (caps != lastCaps) ShowToast("Caps Lock", caps ? "On" : "Off", caps ? Color.FromArgb(255, 214, 10) : Color.White, 2, -1, 1.8, "A", null);
-                    else if (num != lastNum) ShowToast("Num Lock", num ? "On" : "Off", num ? Color.FromArgb(255, 214, 10) : Color.White, 2, -1, 1.8, "1", null);
+                    if (caps != lastCaps) ShowToast("Caps Lock", caps ? "On" : "Off", caps ? Color.FromArgb(255, 214, 10) : Color.White, 2, -1, 1.8, caps ? "capslock.fill" : "capslock", null);
+                    else if (num != lastNum) ShowToast("Num Lock", num ? "On" : "Off", num ? Color.FromArgb(255, 214, 10) : Color.White, 2, -1, 1.8, num ? "number.fill" : "number", null);
                 }
                 lastCaps = caps; lastNum = num;
 
@@ -364,50 +364,20 @@ namespace MacDock
             var fmtR = new StringFormat(fmt) { Alignment = StringAlignment.Far };
             float ix = pill.Left + 18, cy = pill.Top + pill.Height / 2f;
             Color c = A(toastColor, alpha);
-            // Action pop-ups show only their own glyph, never the MacDock icon.
-            using (var pen = new Pen(c, 1.6f))
-            using (var br = new SolidBrush(c))
+            // Action pop-ups show the SF Symbol for the action, never the MacDock icon.
+            string symbol;
+            switch (toastKind)
             {
-                pen.StartCap = pen.EndCap = LineCap.Round;
-                switch (toastKind)
-                {
-                    case 1: // speaker
-                        g.FillPolygon(br, new[] { new PointF(ix, cy - 3), new PointF(ix + 5, cy - 3), new PointF(ix + 10, cy - 8), new PointF(ix + 10, cy + 8), new PointF(ix + 5, cy + 3), new PointF(ix, cy + 3) });
-                        if (toastBar > 0.01) g.DrawArc(pen, ix + 8, cy - 5, 8, 10, -60, 120);
-                        if (toastBar > 0.5) g.DrawArc(pen, ix + 8, cy - 9, 14, 18, -60, 120);
-                        break;
-                    case 2: // key cap with glyph
-                        using (var path = Layered.RoundedRect(new RectangleF(ix, cy - 9, 20, 18), 5))
-                            g.DrawPath(pen, path);
-                        g.DrawString(toastGlyph ?? "", nameFont, br, new RectangleF(ix, cy - 9, 20, 19), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
-                        break;
-                    case 3: // drop
-                        g.FillPolygon(br, new[] { new PointF(ix + 8, cy - 10), new PointF(ix + 15, cy + 1), new PointF(ix + 1, cy + 1) });
-                        g.FillEllipse(br, ix + 1, cy - 4, 14, 14);
-                        break;
-                    case 4: // person stretching
-                        g.FillEllipse(br, ix + 6, cy - 10, 7, 7);
-                        g.DrawLine(pen, ix + 9.5f, cy - 3, ix + 9.5f, cy + 4);
-                        g.DrawLine(pen, ix + 9.5f, cy + 4, ix + 4, cy + 10);
-                        g.DrawLine(pen, ix + 9.5f, cy + 4, ix + 15, cy + 10);
-                        g.DrawLine(pen, ix + 2, cy - 7, ix + 9.5f, cy - 1);
-                        g.DrawLine(pen, ix + 17, cy - 7, ix + 9.5f, cy - 1);
-                        break;
-                    case 6: // sun
-                        g.FillEllipse(br, ix + 5, cy - 5, 10, 10);
-                        for (int i = 0; i < 8; i++)
-                        {
-                            double an = i * Math.PI / 4;
-                            g.DrawLine(pen, ix + 10 + (float)Math.Cos(an) * 7, cy + (float)Math.Sin(an) * 7, ix + 10 + (float)Math.Cos(an) * 10, cy + (float)Math.Sin(an) * 10);
-                        }
-                        break;
-                    default: // timer
-                        g.DrawEllipse(pen, ix, cy - 9, 18, 18);
-                        g.DrawLine(pen, ix + 9, cy, ix + 9, cy - 5);
-                        g.DrawLine(pen, ix + 9, cy, ix + 13, cy + 2);
-                        break;
-                }
+                case 1: // volume: wave count follows the level
+                    symbol = toastText == "Muted" ? "mute" : toastBar <= 0.001 ? "speaker0" : toastBar < 1 / 3.0 ? "speakerwave1" : toastBar < 2 / 3.0 ? "speakerwave2" : "speakerwave";
+                    break;
+                case 2: symbol = toastGlyph; break;
+                case 3: symbol = "drop"; break;
+                case 4: symbol = "stand"; break;
+                case 6: symbol = toastBar < 0.5 ? "sunmin" : "warm"; break;
+                default: symbol = "timer"; break;
             }
+            CcGlyphs.Draw(g, symbol, ix + 10, cy, 0.95f, c);
             float tx = ix + 32;
             if (toastBar >= 0)
             {

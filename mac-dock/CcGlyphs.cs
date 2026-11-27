@@ -186,6 +186,83 @@ namespace MacDock
                     Arc(g, p, -0.6f, 0, 7.1f, -48, 96);
                     Arc(g, p, -0.6f, 0, 10.6f, -48, 96);
                     break;
+                case "speaker0": // speaker.fill, in the same place as the wave variants
+                    Speaker(g, b, p, -4f);
+                    break;
+                case "speakerwave1": // speaker.wave.1.fill / speaker.wave.2.fill
+                case "speakerwave2":
+                    Speaker(g, b, p, -4f);
+                    p.Width = 1.6f;
+                    Arc(g, p, -0.6f, 0, 3.6f, -48, 96);
+                    if (name == "speakerwave2") Arc(g, p, -0.6f, 0, 7.1f, -48, 96);
+                    break;
+                case "capslock": // capslock / capslock.fill
+                case "capslock.fill":
+                {
+                    PointF[] arrow = Pts(0, -9.8f, 9f, -0.6f, 4.4f, -0.6f, 4.4f, 3.8f, -4.4f, 3.8f, -4.4f, -0.6f, -9f, -0.6f);
+                    p.Width = 1.7f;
+                    using (GraphicsPath bar = Round(-4.4f, 6.6f, 8.8f, 3.2f, 0.8f))
+                    {
+                        if (name == "capslock.fill") { g.FillPolygon(b, arrow); g.FillPath(b, bar); }
+                        g.DrawPolygon(p, arrow);
+                        g.DrawPath(p, bar);
+                    }
+                    break;
+                }
+                case "number": // number.square / number.square.fill (Num Lock)
+                case "number.fill":
+                {
+                    float[][] hash = { new[] { -1.4f, -5f, -3f, 5f }, new[] { 3f, -5f, 1.4f, 5f }, new[] { -4.4f, -2f, 5f, -2f }, new[] { -5f, 2f, 4.4f, 2f } };
+                    bool on = name == "number.fill";
+                    p.Width = 1.7f;
+                    GraphicsState s = g.Save();
+                    if (on)
+                        foreach (float[] l in hash)
+                            using (var cut = new GraphicsPath())
+                            {
+                                cut.AddLine(l[0], l[1], l[2], l[3]);
+                                cut.Widen(p);
+                                g.SetClip(cut, CombineMode.Exclude);
+                            }
+                    using (GraphicsPath box = Round(-9.5f, -9.5f, 19f, 19f, 4.6f))
+                    {
+                        if (on) g.FillPath(b, box);
+                        g.DrawPath(p, box);
+                    }
+                    g.Restore(s);
+                    if (!on) foreach (float[] l in hash) g.DrawLine(p, l[0], l[1], l[2], l[3]);
+                    break;
+                }
+                case "drop": // drop.fill
+                    using (var d = new GraphicsPath())
+                    {
+                        d.AddBezier(0, -10.5f, 2.5f, -6.5f, 7.4f, -1.5f, 7.4f, 3f);
+                        d.AddArc(-7.4f, -4.4f, 14.8f, 14.8f, 0, 180);
+                        d.AddBezier(-7.4f, 3f, -7.4f, -1.5f, -2.5f, -6.5f, 0, -10.5f);
+                        d.CloseFigure();
+                        g.FillPath(b, d);
+                    }
+                    break;
+                case "stand": // figure.stand
+                    g.FillEllipse(b, -2.6f, -10.6f, 5.2f, 5.2f);
+                    p.Width = 2.1f;
+                    g.DrawLines(p, Pts(-5.6f, 2.4f, -3.8f, -3.4f, 3.8f, -3.4f, 5.6f, 2.4f));
+                    Solid(g, b, p, 1.4f, -2.2f, -3.2f, 2.2f, -3.2f, 2.2f, 2.6f, -2.2f, 2.6f);
+                    p.Width = 2.3f;
+                    g.DrawLine(p, -1.5f, 2.6f, -2.3f, 9.8f);
+                    g.DrawLine(p, 1.5f, 2.6f, 2.3f, 9.8f);
+                    break;
+                case "timer": // timer
+                    p.Width = 1.8f;
+                    g.DrawEllipse(p, -9.6f, -9.6f, 19.2f, 19.2f);
+                    g.DrawLine(p, 0, 0, -3.8f, -3.8f);
+                    g.FillEllipse(b, -1.7f, -1.7f, 3.4f, 3.4f);
+                    p.Width = 1.4f;
+                    g.DrawLine(p, 0, -6.8f, 0, -5.6f);
+                    g.DrawLine(p, 6.8f, 0, 5.6f, 0);
+                    g.DrawLine(p, 0, 6.8f, 0, 5.6f);
+                    g.DrawLine(p, -6.8f, 0, -5.6f, 0);
+                    break;
                 case "lock": // lock.fill
                     p.Width = 2.2f;
                     using (var sh = new GraphicsPath())
